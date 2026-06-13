@@ -1,0 +1,77 @@
+{
+  "version": "1.0.0",
+  "ticket_prefix": "br",
+  "session_prefix": "br",
+  "project_root": "/Users/katerina/Projects/brick_road",
+  "platform": "github",
+  "repo": "katerina7479/brick_road.git",
+  "dolt": {
+    "host": "127.0.0.1",
+    "port": 3308,
+    "database": "brick_road"
+  },
+  "log_dir": ".company_town/logs",
+  "max_proles": 2,
+  "agents": {
+    "mayor": {
+      "model": "claude-opus-4-6"
+    },
+    "architect": {
+      "model": "claude-opus-4-6"
+    },
+    "artisan": {},
+    "reviewer": {
+      "model": "claude-sonnet-4-6",
+      "workflow": {
+        "accept": {
+          "ticket_transition": {
+            "from": "in_review",
+            "to": "under_review"
+          }
+        },
+        "release": {
+          "ticket_transition": {
+            "from": "under_review",
+            "to": "in_review"
+          }
+        }
+      }
+    },
+    "prole": {
+      "model": "claude-sonnet-4-6",
+      "workflow": {}
+    }
+  },
+  "polling_interval_seconds": 30,
+  "nudge_cooldown_seconds": 300,
+  "context_handoff_threshold": 0.8,
+  "stuck_agent_threshold_seconds": 1800,
+  "worktree_prune_interval_seconds": 300,
+  "worktree_reset_interval_seconds": 60,
+  "pr_backfill_interval_seconds": 300,
+  "restart_dead_agents": true,
+  "restart_cooldown_seconds": 300,
+  "repair_cycle_threshold": 3,
+  "reviewer_follow_up_interval_seconds": 1800,
+  "reviewer_follow_up_n_reviews": 5,
+  "ci_running_stuck_threshold_seconds": 1800,
+  "memory_nudge_interval_seconds": 3600,
+  "tdd": false,
+  "language": "",
+  "dashboard_terminal": "",
+  "quality": {
+    "enabled": true,
+    "baseline_interval_seconds": 3600,
+    "checks": [
+      {
+        "name": "open_ticket_count",
+        "command": "gt ticket list 2\u003e/dev/null | grep -cE '\\[(open|draft|in_progress|ci_running|in_review|under_review|repairing|pr_open|merge_conflict)\\]'; true",
+        "type": "metric",
+        "threshold": 10,
+        "warn_threshold": 20,
+        "direction": "lower",
+        "enabled": true
+      }
+    ]
+  }
+}
