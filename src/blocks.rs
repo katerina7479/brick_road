@@ -1,12 +1,13 @@
 use std::collections::HashMap;
 
 use bevy::prelude::*;
-use bevy_egui::EguiContexts;
+use bevy_egui::{egui, EguiContexts};
 
 use crate::{
     analysis::ScheduleAnalysis,
     constants::{PIXELS_PER_DAY, ROW_HEIGHT},
     db,
+    labels,
     model::{self, DependencyId, DependencyType, Estimate, WorkBlockId},
     schedule,
 };
@@ -29,6 +30,15 @@ const CRITICAL_PATH_COLOR: LinearRgba = LinearRgba::new(3.0, 2.5, 0.0, 1.0);
 /// Tracks the currently selected work block (if any).
 #[derive(Resource, Default)]
 pub struct SelectedBlock(pub Option<WorkBlockId>);
+
+/// Tracks inline name-edit state: which block is being renamed and the live text buffer.
+#[derive(Resource, Default)]
+pub struct NameEditState {
+    pub editing: Option<WorkBlockId>,
+    pub text_buf: String,
+    /// (block_id, elapsed_secs) of the most recent left-click on a block sprite.
+    last_click: Option<(WorkBlockId, f32)>,
+}
 
 /// Marker: this sprite visualises one ScheduledBlock.
 #[derive(Component)]
@@ -143,9 +153,15 @@ pub fn handle_block_selection(
     mouse: Res<ButtonInput<MouseButton>>,
     mut selected: ResMut<SelectedBlock>,
     block_query: Query<(&BlockSprite, &Transform, &Sprite)>,
+    name_edit: Res<NameEditState>,
     mut model: ResMut<model::Model>,
     conn: NonSend<rusqlite::Connection>,
 ) {
+    // Yield to the inline editor while a rename is in progress.
+    if name_edit.editing.is_some() {
+        return;
+    }
+
     // Guard: egui owns the pointer when the cursor is over any egui area.
     if let Ok(ctx) = egui_ctx.ctx_mut() {
         if ctx.is_pointer_over_area() {
@@ -577,5 +593,162 @@ pub fn handle_dep_drag(
                 }
             }
         }
+    }
+}
+
+/// Detects double-click on a block sprite or single-click on a row label and
+/// enters inline name-edit mode by populating `NameEditState`.
+///
+/// Must run before `handle_block_selection` so the guard there sees the updated
+/// `editing` flag on the same frame the double-click fires.
+pub fn handle_name_edit(
+    mut egui_ctx: EguiContexts,
+    windows: Query<&Window>,
+    camera: Query<(&Camera, &GlobalTransform)>,
+    mouse: Res<ButtonInput<MouseButton>>,
+    time: Res<Time>,
+    model: Res<model::Model>,
+    mut name_edit: ResMut<NameEditState>,
+    block_query: Query<(&BlockSprite, &Transform, &Sprite)>,
+    label_query: Query<(&labels::RowLabel, &Transform)>,
+) {
+    if name_edit.editing.is_some() {
+        return;
+    }
+    if !mouse.just_pressed(MouseButton::Left) {
+        return;
+    }
+    if let Ok(ctx) = egui_ctx.ctx_mut() {
+        if ctx.is_pointer_over_area() {
+            return;
+        }
+    }
+
+    let Ok(window) = windows.single() else { return };
+    let Ok((camera, camera_transform)) = camera.single() else { return };
+    let Some(cursor_pos) = window.cursor_position() else { return };
+    let Ok(world_pos) = camera.viewport_to_world_2d(camera_transform, cursor_pos) else {
+        return;
+    };
+
+    let now = time.elapsed_secs();
+
+    // Single-click on a row label → enter edit mode immediately.
+    for (row_label, transform) in &label_query {
+        let center = transform.translation.truncate();
+        if world_pos.x >= center.x - 60.0
+            && world_pos.x <= center.x + 60.0
+            && world_pos.y >= center.y - 7.0
+            && world_pos.y <= center.y + 7.0
+        {
+            let id = row_label.work_block_id;
+            if let Some(wb) = model.work_blocks.get(&id) {
+                name_edit.editing = Some(id);
+                name_edit.text_buf = wb.name.clone();
+                name_edit.last_click = None;
+            }
+            return;
+        }
+    }
+
+    // Double-click on a block sprite → enter edit mode.
+    for (block_sprite, transform, sprite) in &block_query {
+        let Some(size) = sprite.custom_size else { continue };
+        let center = transform.translation.truncate();
+        let half = size * 0.5;
+        if world_pos.x >= center.x - half.x
+            && world_pos.x <= center.x + half.x
+            && world_pos.y >= center.y - half.y
+            && world_pos.y <= center.y + half.y
+        {
+            let id = block_sprite.work_block_id;
+            if let Some((last_id, last_time)) = name_edit.last_click {
+                if last_id == id && now - last_time < 0.4 {
+                    if let Some(wb) = model.work_blocks.get(&id) {
+                        name_edit.editing = Some(id);
+                        name_edit.text_buf = wb.name.clone();
+                        name_edit.last_click = None;
+                    }
+                    return;
+                }
+            }
+            name_edit.last_click = Some((id, now));
+            return;
+        }
+    }
+
+    name_edit.last_click = None;
+}
+
+/// Renders an egui `TextEdit` overlay at the row label's screen position while
+/// `NameEditState::editing` is `Some`. Commits on Enter or focus-loss; cancels
+/// on Escape. Persists the new name to the model and DB on commit.
+pub fn draw_name_edit_overlay(
+    mut contexts: EguiContexts,
+    mut name_edit: ResMut<NameEditState>,
+    mut model: ResMut<model::Model>,
+    conn: NonSend<rusqlite::Connection>,
+    windows: Query<&Window>,
+    camera: Query<(&Camera, &GlobalTransform)>,
+    mut label_query: Query<(&labels::RowLabel, &Transform, &mut Text2d)>,
+    keys: Res<ButtonInput<KeyCode>>,
+) {
+    let Some(edit_id) = name_edit.editing else { return };
+
+    let Ok(_window) = windows.single() else { return };
+    let Ok((camera, camera_transform)) = camera.single() else { return };
+
+    // Locate the label's screen position (logical pixels) to anchor the overlay.
+    let mut screen_pos = egui::pos2(50.0, 200.0);
+    for (rl, transform, _) in &label_query {
+        if rl.work_block_id == edit_id {
+            if let Ok(vp) = camera.world_to_viewport(camera_transform, transform.translation) {
+                screen_pos = egui::pos2(vp.x, vp.y - 10.0);
+            }
+            break;
+        }
+    }
+
+    let Ok(ctx) = contexts.ctx_mut() else { return };
+
+    let escaped = keys.just_pressed(KeyCode::Escape);
+    let mut commit = false;
+
+    if !escaped {
+        egui::Area::new(egui::Id::new("name_edit_overlay"))
+            .fixed_pos(screen_pos)
+            .show(ctx, |ui| {
+                let response = ui.add(
+                    egui::TextEdit::singleline(&mut name_edit.text_buf)
+                        .min_size(egui::Vec2::new(120.0, 20.0)),
+                );
+                response.request_focus();
+                if response.lost_focus() {
+                    commit = true;
+                }
+            });
+    }
+
+    if escaped {
+        name_edit.editing = None;
+        name_edit.text_buf.clear();
+    } else if commit {
+        let new_name = name_edit.text_buf.trim().to_string();
+        if !new_name.is_empty() {
+            if let Some(wb) = model.work_blocks.get_mut(&edit_id) {
+                wb.name = new_name.clone();
+            }
+            for (rl, _, mut text) in &mut label_query {
+                if rl.work_block_id == edit_id {
+                    *text = Text2d::new(new_name.clone());
+                    break;
+                }
+            }
+            if let Err(e) = db::save_model(&conn, &model) {
+                error!("save_model failed: {e}");
+            }
+        }
+        name_edit.editing = None;
+        name_edit.text_buf.clear();
     }
 }

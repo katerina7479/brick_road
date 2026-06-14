@@ -31,6 +31,7 @@ fn main() {
         .insert_resource(ClearColor(Color::srgb(0.02, 0.02, 0.05)))
         .insert_resource(CameraTarget::default())
         .insert_resource(blocks::SelectedBlock::default())
+        .insert_resource(blocks::NameEditState::default())
         .insert_resource(blocks::DragState::default())
         .insert_resource(blocks::DepDragState::default())
         .insert_resource(analysis::ScheduleAnalysis::default())
@@ -45,7 +46,11 @@ fn main() {
         .add_systems(Update, (update_camera_target, smooth_camera).chain())
         .add_systems(Update, draw_grid)
         .add_systems(Update, update_analysis)
-        .add_systems(Update, blocks::handle_block_selection)
+        .add_systems(Update, blocks::handle_name_edit)
+        .add_systems(
+            Update,
+            blocks::handle_block_selection.after(blocks::handle_name_edit),
+        )
         .add_systems(
             Update,
             blocks::handle_block_drag.after(blocks::handle_block_selection),
@@ -78,6 +83,7 @@ fn main() {
         .add_systems(Update, labels::draw_nesting_indicators)
         .add_systems(Update, labels::draw_violation_indicators)
         .add_systems(EguiPrimaryContextPass, side_panel_ui)
+        .add_systems(EguiPrimaryContextPass, blocks::draw_name_edit_overlay)
         .run();
 }
 
