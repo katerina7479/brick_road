@@ -489,6 +489,8 @@ fn side_panel_ui(
     mut cycle_error: Local<Option<String>>,
     mut scope: ResMut<schedule::ViewScope>,
     mut create_state: ResMut<blocks::CreateModeState>,
+    mut new_size_label: Local<String>,
+    mut new_size_error: Local<Option<String>>,
 ) {
     let Ok(ctx) = contexts.ctx_mut() else { return };
     egui::SidePanel::left("side_panel")
@@ -697,16 +699,44 @@ fn side_panel_ui(
                 if let Some(idx) = to_remove {
                     model.t_shirt_sizes.remove(idx);
                 }
-                if ui.small_button("+ Add").clicked() {
-                    model.t_shirt_sizes.push(model::TShirtSize {
-                        label: "?".to_string(),
-                        days: 1.0,
-                    });
-                    mapping_changed = true;
+
+                // New-size input row: validate uniqueness before inserting.
+                ui.horizontal(|ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut *new_size_label)
+                            .desired_width(36.0)
+                            .hint_text("label"),
+                    );
+                    if ui.small_button("+ Add").clicked() {
+                        let label = new_size_label.trim().to_string();
+                        if label.is_empty() {
+                            *new_size_error = Some("Label cannot be empty".to_string());
+                        } else if model.t_shirt_sizes.iter().any(|s| s.label == label) {
+                            *new_size_error = Some(format!("'{label}' already exists"));
+                        } else {
+                            model.t_shirt_sizes.push(model::TShirtSize { label, days: 1.0 });
+                            new_size_label.clear();
+                            *new_size_error = None;
+                            mapping_changed = true;
+                        }
+                    }
+                });
+                if let Some(ref err) = *new_size_error {
+                    ui.colored_label(egui::Color32::from_rgb(220, 60, 60), err);
                 }
+
                 if mapping_changed {
-                    if let Err(e) = db::save_model(&conn, &model) {
-                        error!("save_model failed: {e}");
+                    // Guard against duplicate labels from inline edits before saving.
+                    let unique: std::collections::HashSet<_> =
+                        model.t_shirt_sizes.iter().map(|s| &s.label).collect();
+                    if unique.len() < model.t_shirt_sizes.len() {
+                        *new_size_error =
+                            Some("Duplicate size label — rename before saving".to_string());
+                    } else {
+                        *new_size_error = None;
+                        if let Err(e) = db::save_model(&conn, &model) {
+                            error!("save_model failed: {e}");
+                        }
                     }
                 }
             });
