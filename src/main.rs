@@ -90,6 +90,7 @@ fn main() {
         )
         .add_systems(Update, labels::draw_nesting_indicators)
         .add_systems(Update, labels::draw_violation_indicators)
+        .add_systems(Update, labels::scale_labels_to_zoom)
         .add_systems(EguiPrimaryContextPass, side_panel_ui)
         .add_systems(EguiPrimaryContextPass, blocks::draw_name_edit_overlay)
         .run();
