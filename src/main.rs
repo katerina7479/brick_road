@@ -228,6 +228,7 @@ fn side_panel_ui(
             let optimistic = wb.estimate.optimistic;
             let pessimistic = wb.estimate.pessimistic;
             let confidence = wb.estimate.confidence;
+
             let (start_day, end_day) = (wb.start_day, wb.start_day + wb.duration_days);
 
             ui.strong(&name);
