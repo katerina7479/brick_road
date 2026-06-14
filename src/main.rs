@@ -10,6 +10,8 @@ pub mod camera;
 
 use camera::{smooth_camera, update_camera_target, CameraTarget};
 
+const PIXELS_PER_DAY: f32 = 100.0;
+
 fn main() {
     App::new()
         .add_plugins(DefaultPlugins.set(WindowPlugin {
@@ -25,6 +27,7 @@ fn main() {
         .insert_resource(CameraTarget::default())
         .add_systems(Startup, setup_camera)
         .add_systems(Update, (update_camera_target, smooth_camera).chain())
+        .add_systems(Update, draw_grid)
         .add_systems(EguiPrimaryContextPass, side_panel_ui)
         .run();
 }
@@ -36,6 +39,20 @@ fn setup_camera(mut commands: Commands) {
         Tonemapping::TonyMcMapface,
         Bloom::default(),
     ));
+}
+
+fn draw_grid(mut gizmos: Gizmos) {
+    let line_color = Color::srgba(0.3, 0.3, 0.5, 0.15);
+    let baseline_color = Color::srgba(0.4, 0.4, 0.6, 0.35);
+
+    // Vertical lines at day boundaries
+    for day in -50i32..=50 {
+        let x = day as f32 * PIXELS_PER_DAY;
+        gizmos.line_2d(Vec2::new(x, -5000.0), Vec2::new(x, 5000.0), line_color);
+    }
+
+    // Horizontal baseline at y=0
+    gizmos.line_2d(Vec2::new(-5000.0, 0.0), Vec2::new(5000.0, 0.0), baseline_color);
 }
 
 fn side_panel_ui(mut contexts: EguiContexts) {
