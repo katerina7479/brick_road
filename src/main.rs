@@ -186,6 +186,7 @@ fn main() {
         .add_systems(EguiPrimaryContextPass, side_panel_ui)
         .add_systems(EguiPrimaryContextPass, camera_nav_ui)
         .add_systems(EguiPrimaryContextPass, logo_ui)
+        .add_systems(EguiPrimaryContextPass, resource_row_labels_ui)
         .add_systems(EguiPrimaryContextPass, blocks::draw_name_edit_overlay)
         .add_systems(EguiPrimaryContextPass, blocks::draw_delete_confirm_overlay)
         .add_systems(EguiPrimaryContextPass, blocks::draw_create_mode_overlay)
@@ -309,7 +310,6 @@ fn draw_resource_timeline(
             });
 
             let color = if is_conflicted { alloc_conflict } else { alloc_ok };
-            // Draw bar as four border lines (rect outline).
             let (x_lo, x_hi) = (cx - w * 0.5, cx + w * 0.5);
             let (y_lo, y_hi) = (y - bar_h * 0.5, y + bar_h * 0.5);
             gizmos.line_2d(Vec2::new(x_lo, y_lo), Vec2::new(x_hi, y_lo), color);
@@ -318,6 +318,117 @@ fn draw_resource_timeline(
             gizmos.line_2d(Vec2::new(x_lo, y_hi), Vec2::new(x_lo, y_lo), color);
         }
     }
+
+    // Unassigned row: placed blocks with no allocation in the current plan.
+    let allocated: std::collections::HashSet<model::WorkBlockId> =
+        plan.allocations.iter().map(|a| a.work_block_id).collect();
+    let unassigned: Vec<_> = model
+        .work_blocks
+        .values()
+        .filter(|wb| wb.duration_days > 0.0 && !allocated.contains(&wb.id))
+        .collect();
+
+    if !unassigned.is_empty() {
+        let row = resources.len();
+        let y = -(row as f32) * constants::ROW_HEIGHT;
+
+        gizmos.line_2d(
+            Vec2::new(-50_000.0, y - constants::ROW_HEIGHT * 0.5),
+            Vec2::new(50_000.0,  y - constants::ROW_HEIGHT * 0.5),
+            row_sep,
+        );
+
+        let unassigned_color = Color::srgba(0.55, 0.55, 0.55, 0.5);
+        for wb in &unassigned {
+            let x0 = wb.start_day * PIXELS_PER_DAY;
+            let x1 = (wb.start_day + wb.duration_days) * PIXELS_PER_DAY;
+            let w  = (x1 - x0).max(4.0);
+            let cx = x0 + w * 0.5;
+            let (x_lo, x_hi) = (cx - w * 0.5, cx + w * 0.5);
+            let (y_lo, y_hi) = (y - bar_h * 0.5, y + bar_h * 0.5);
+            gizmos.line_2d(Vec2::new(x_lo, y_lo), Vec2::new(x_hi, y_lo), unassigned_color);
+            gizmos.line_2d(Vec2::new(x_hi, y_lo), Vec2::new(x_hi, y_hi), unassigned_color);
+            gizmos.line_2d(Vec2::new(x_hi, y_hi), Vec2::new(x_lo, y_hi), unassigned_color);
+            gizmos.line_2d(Vec2::new(x_lo, y_hi), Vec2::new(x_lo, y_lo), unassigned_color);
+        }
+    }
+}
+
+/// Renders resource row name labels in Resource view using egui, positioned at
+/// the screen Y that corresponds to each row's world-space Y coordinate.
+fn resource_row_labels_ui(
+    mut contexts: EguiContexts,
+    mode: Res<schedule::TimelineViewMode>,
+    model: Res<model::Model>,
+    schedule: Res<schedule::Schedule>,
+    cam_q: Query<(&Transform, &Projection), With<Camera2d>>,
+    windows: Query<&Window>,
+) {
+    if *mode != schedule::TimelineViewMode::Resource {
+        return;
+    }
+    let Ok(ctx) = contexts.ctx_mut() else { return };
+    let Ok((cam_t, proj)) = cam_q.single() else { return };
+    let Projection::Orthographic(ortho) = proj else { return };
+    let Ok(window) = windows.single() else { return };
+
+    let cam_y = cam_t.translation.y;
+    let scale = ortho.scale;
+    let win_h = window.height();
+
+    let world_y_to_screen = |world_y: f32| -> f32 {
+        win_h * 0.5 - (world_y - cam_y) / scale
+    };
+
+    let Some(plan) = model.plans.get(&schedule.plan_id) else { return };
+
+    let mut resources: Vec<_> = model.resource_blocks.values().collect();
+    resources.sort_by_key(|r| r.id.0);
+
+    let allocated: std::collections::HashSet<model::WorkBlockId> =
+        plan.allocations.iter().map(|a| a.work_block_id).collect();
+    let has_unassigned = model
+        .work_blocks
+        .values()
+        .any(|wb| wb.duration_days > 0.0 && !allocated.contains(&wb.id));
+
+    egui::Area::new(egui::Id::new("resource_row_labels"))
+        .fixed_pos(egui::Pos2::ZERO)
+        .interactable(false)
+        .show(ctx, |ui| {
+            let label_x = constants::SIDE_PANEL_WIDTH + 6.0;
+            for (row, resource) in resources.iter().enumerate() {
+                let world_y = -(row as f32) * constants::ROW_HEIGHT;
+                let sy = world_y_to_screen(world_y);
+                ui.put(
+                    egui::Rect::from_min_size(
+                        egui::Pos2::new(label_x, sy - 8.0),
+                        egui::Vec2::new(150.0, 16.0),
+                    ),
+                    egui::Label::new(
+                        egui::RichText::new(resource.name.as_str())
+                            .size(12.0)
+                            .color(egui::Color32::from_rgb(180, 180, 210)),
+                    ),
+                );
+            }
+            if has_unassigned {
+                let row = resources.len();
+                let world_y = -(row as f32) * constants::ROW_HEIGHT;
+                let sy = world_y_to_screen(world_y);
+                ui.put(
+                    egui::Rect::from_min_size(
+                        egui::Pos2::new(label_x, sy - 8.0),
+                        egui::Vec2::new(150.0, 16.0),
+                    ),
+                    egui::Label::new(
+                        egui::RichText::new("Unassigned")
+                            .size(12.0)
+                            .color(egui::Color32::from_rgba_unmultiplied(140, 140, 170, 180)),
+                    ),
+                );
+            }
+        });
 }
 
 fn setup_demo_schedule(mut model: ResMut<model::Model>, mut commands: Commands) {
