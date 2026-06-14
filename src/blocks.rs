@@ -1148,8 +1148,9 @@ pub fn handle_create_mode_click_exit(
 
 /// Renders the quick-create overlay while create mode is active.
 ///
-/// - Enter: creates a block with the typed name, clears the buffer, stays in
-///   create mode so the user can immediately type the next name.
+/// - Plain Enter: creates a block with the typed name, clears the buffer, stays
+///   in create mode so the user can immediately type the next name.
+/// - Ctrl+Enter / Cmd+Enter: inserts a newline within the current block name.
 /// - Escape: exits create mode.
 ///
 /// New blocks are placed at day 0 with a 1-day default duration; the user can
@@ -1173,15 +1174,28 @@ pub fn draw_create_mode_overlay(
         .resizable(false)
         .anchor(egui::Align2::CENTER_TOP, [0.0, 60.0])
         .show(ctx, |ui| {
-            ui.label("↵ to create  ·  Esc to exit");
+            ui.label("↵ to create  ·  Ctrl+↵ for newline  ·  Esc to exit");
             let response = ui.add(
-                egui::TextEdit::singleline(&mut state.text_buf)
+                egui::TextEdit::multiline(&mut state.text_buf)
                     .hint_text("Block name…")
-                    .desired_width(240.0),
+                    .desired_width(240.0)
+                    .desired_rows(2),
             );
             response.request_focus();
             if response.has_focus() {
-                if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                // Plain Enter submits the block. TextEdit::multiline will have
+                // appended '\n' for this keypress — strip it before submitting.
+                // Ctrl+Enter / Cmd+Enter falls through to the multiline widget,
+                // which inserts the newline naturally without triggering this path.
+                let plain_enter = ui.input(|i| {
+                    i.key_pressed(egui::Key::Enter)
+                        && !i.modifiers.ctrl
+                        && !i.modifiers.command
+                });
+                if plain_enter {
+                    if state.text_buf.ends_with('\n') {
+                        state.text_buf.pop();
+                    }
                     create_block = true;
                 }
                 if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
