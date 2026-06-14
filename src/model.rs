@@ -234,4 +234,124 @@ impl Model {
         });
         id
     }
+
+    // --- Accessors ---
+
+    pub fn get_work_block(&self, id: WorkBlockId) -> Option<&WorkBlock> {
+        self.work_blocks.get(&id)
+    }
+
+    pub fn get_variant(&self, id: VariantId) -> Option<&Variant> {
+        self.variants.get(&id)
+    }
+
+    pub fn get_resource_block(&self, id: ResourceBlockId) -> Option<&ResourceBlock> {
+        self.resource_blocks.get(&id)
+    }
+
+    pub fn get_dependency(&self, id: DependencyId) -> Option<&Dependency> {
+        self.dependencies.get(&id)
+    }
+
+    pub fn get_milestone(&self, id: MilestoneId) -> Option<&Milestone> {
+        self.milestones.get(&id)
+    }
+
+    pub fn get_world(&self, id: WorldId) -> Option<&World> {
+        self.worlds.get(&id)
+    }
+
+    pub fn get_plan(&self, id: PlanId) -> Option<&Plan> {
+        self.plans.get(&id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn est() -> Estimate {
+        Estimate { most_likely: 3.0, optimistic: 1.0, pessimistic: 7.0, confidence: 0.8 }
+    }
+
+    #[test]
+    fn default_model_is_empty() {
+        let m = Model::default();
+        assert!(m.work_blocks.is_empty());
+        assert!(m.variants.is_empty());
+        assert!(m.resource_blocks.is_empty());
+        assert!(m.dependencies.is_empty());
+        assert!(m.milestones.is_empty());
+        assert!(m.worlds.is_empty());
+        assert!(m.plans.is_empty());
+    }
+
+    #[test]
+    fn create_and_retrieve_work_block() {
+        let mut m = Model::default();
+        let id = m.create_work_block("task A", est());
+        let block = m.get_work_block(id).unwrap();
+        assert_eq!(block.name, "task A");
+        assert_eq!(block.id, id);
+        assert!(block.variants.is_empty());
+    }
+
+    #[test]
+    fn ids_are_unique() {
+        let mut m = Model::default();
+        let a = m.create_work_block("a", est());
+        let b = m.create_work_block("b", est());
+        let v = m.create_variant("v", a);
+        let w = m.create_world("w");
+        assert_ne!(a, b);
+        assert_ne!(a.0, v.0);
+        assert_ne!(v.0, w.0);
+    }
+
+    #[test]
+    fn variant_linking() {
+        let mut m = Model::default();
+        let block_id = m.create_work_block("parent", est());
+        let var_id = m.create_variant("fast path", block_id);
+        let child_id = m.create_work_block("child", est());
+
+        m.work_blocks.get_mut(&block_id).unwrap().variants.push(var_id);
+        m.variants.get_mut(&var_id).unwrap().children.push(child_id);
+
+        let block = m.get_work_block(block_id).unwrap();
+        assert_eq!(block.variants, vec![var_id]);
+
+        let variant = m.get_variant(var_id).unwrap();
+        assert_eq!(variant.parent, block_id);
+        assert_eq!(variant.children, vec![child_id]);
+    }
+
+    #[test]
+    fn missing_id_returns_none() {
+        let m = Model::default();
+        assert!(m.get_work_block(WorkBlockId(999)).is_none());
+        assert!(m.get_variant(VariantId(999)).is_none());
+        assert!(m.get_world(WorldId(999)).is_none());
+    }
+
+    #[test]
+    fn create_and_retrieve_all_entity_types() {
+        let mut m = Model::default();
+        let world_id = m.create_world("baseline");
+        let plan_id = m.create_plan("plan A", world_id);
+        let res_id = m.create_resource_block("Alice", ResourceType::Person);
+        let ms_id = m.create_milestone("launch", 90.0);
+        let block_a = m.create_work_block("a", est());
+        let block_b = m.create_work_block("b", est());
+        let dep_id = m.create_dependency(block_a, block_b, DependencyType::FinishToStart);
+
+        assert_eq!(m.get_world(world_id).unwrap().name, "baseline");
+        assert_eq!(m.get_plan(plan_id).unwrap().world_id, world_id);
+        assert_eq!(m.get_resource_block(res_id).unwrap().name, "Alice");
+        assert_eq!(m.get_milestone(ms_id).unwrap().date, 90.0);
+        let dep = m.get_dependency(dep_id).unwrap();
+        assert_eq!(dep.predecessor, block_a);
+        assert_eq!(dep.successor, block_b);
+        assert_eq!(dep.dependency_type, DependencyType::FinishToStart);
+    }
 }

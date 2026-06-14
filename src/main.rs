@@ -26,6 +26,7 @@ fn main() {
         .add_plugins(EguiPlugin::default())
         .insert_resource(ClearColor(Color::srgb(0.02, 0.02, 0.05)))
         .insert_resource(CameraTarget::default())
+        .init_resource::<model::Model>()
         .add_systems(Startup, setup_camera)
         .add_systems(Update, (update_camera_target, smooth_camera).chain())
         .add_systems(Update, draw_grid)
