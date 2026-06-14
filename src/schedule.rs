@@ -69,25 +69,25 @@ pub fn sorted_blocks(model: &Model) -> Vec<&WorkBlock> {
     blocks
 }
 
-/// Tracks which level of the block hierarchy is currently displayed.
+/// Tracks the navigation stack of drill-in levels currently displayed.
 ///
-/// `None` means the top-level plan view (all placed blocks).
-/// `Some(id)` means the user has drilled into that block and only its
-/// variant children are shown.
+/// An empty stack means the top-level plan view (all placed blocks).
+/// Each element is a block whose variant children are shown at that depth.
+/// `scope_stack.last()` is the innermost (currently visible) level.
 #[derive(Debug, Clone, Resource, Default)]
 pub struct ViewScope {
-    pub focused_block: Option<WorkBlockId>,
+    pub scope_stack: Vec<WorkBlockId>,
 }
 
 /// Returns the blocks visible at the current view scope, sorted by
 /// ascending `start_day` with id as a tie-breaker.
 ///
-/// - Top-level view (`scope.focused_block == None`): same as `sorted_blocks`.
+/// - Top-level view (`scope.scope_stack` is empty): same as `sorted_blocks`.
 /// - Drilled-in view: only the placed children from all variants of the
-///   focused block. Falls back to the top-level view if the focused block
-///   has no variants or no placed children.
+///   innermost focused block. Falls back to the top-level view if the
+///   focused block has no variants or no placed children.
 pub fn visible_blocks<'a>(model: &'a Model, scope: &ViewScope) -> Vec<&'a WorkBlock> {
-    if let Some(focused_id) = scope.focused_block {
+    if let Some(&focused_id) = scope.scope_stack.last() {
         if let Some(wb) = model.work_blocks.get(&focused_id) {
             let child_ids: std::collections::HashSet<WorkBlockId> = wb
                 .variants
