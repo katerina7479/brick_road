@@ -670,7 +670,7 @@ fn setup_demo_schedule(mut model: ResMut<model::Model>, mut commands: Commands) 
     };
 
     let world_id = model.create_world("Demo");
-    let plan_id = model.create_plan("Demo Plan", world_id);
+    let plan_id = model.create_plan("Demo Plan", world_id, None);
 
     let design = model.create_work_block("Design", est(5.0));
     let build = model.create_work_block("Build", est(8.0));
@@ -832,6 +832,7 @@ fn side_panel_ui(
     mut new_size_error: Local<Option<String>>,
     mut camera_target: ResMut<CameraTarget>,
     mut compare_plan: Local<Option<model::PlanId>>,
+    today: Res<schedule::TodayMarker>,
 ) {
     let Ok(ctx) = contexts.ctx_mut() else { return };
     egui::SidePanel::right("side_panel")
@@ -881,7 +882,8 @@ fn side_panel_ui(
                         .or_else(|| model.worlds.keys().next().copied());
                     if let Some(wid) = world_id {
                         let n = model.plans.len() + 1;
-                        let new_id = model.create_plan(format!("Plan {n}"), wid);
+                        let new_id =
+                            model.create_plan(format!("Plan {n}"), wid, Some(today.day));
                         *schedule = schedule::Schedule::new(new_id);
                         scope.scope_stack.clear();
                         selected.0 = None;

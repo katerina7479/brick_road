@@ -434,6 +434,7 @@ pub fn handle_block_selection(
     time: Res<Time>,
     mut last_empty_click: Local<f32>,
     dep_drag: Res<DepDragState>,
+    active_schedule: Res<schedule::Schedule>,
 ) {
     // Yield when a dep-handle drag is in progress.
     if dep_drag.from.is_some() {
@@ -496,9 +497,16 @@ pub fn handle_block_selection(
         if is_double_click {
             // Reset so a subsequent third click doesn't trigger another creation.
             *last_empty_click = 0.0;
-            let start_day = (world_pos.x / PIXELS_PER_DAY).max(0.0);
+            let raw_start = (world_pos.x / PIXELS_PER_DAY).max(0.0);
             // Snap to the nearest 0.5-day grid line.
-            let start_day = (start_day * 2.0).round() / 2.0;
+            let raw_start = (raw_start * 2.0).round() / 2.0;
+            // Branch plans may not place blocks before their start day.
+            let branch_min = model
+                .plans
+                .get(&active_schedule.plan_id)
+                .and_then(|p| p.branch_start_day)
+                .unwrap_or(0.0);
+            let start_day = raw_start.max(branch_min);
             let duration_days = 1.0f32;
             let est = Estimate {
                 most_likely: duration_days,
@@ -511,7 +519,8 @@ pub fn handle_block_selection(
                 wb.start_day = start_day;
                 wb.duration_days = duration_days;
             }
-            if let Some(plan) = model.plans.values_mut().next() {
+            let plan_id = active_schedule.plan_id;
+            if let Some(plan) = model.plans.get_mut(&plan_id) {
                 plan.root_blocks.push(new_id);
             }
             if let Err(e) = db::save_model(&conn, &model) {
@@ -649,6 +658,7 @@ pub fn handle_block_drag(
     block_query: Query<(&BlockSprite, &Transform, &Sprite)>,
     resize: Res<ResizeDragState>,
     dep_drag: Res<DepDragState>,
+    active_schedule: Res<schedule::Schedule>,
 ) {
     if dep_drag.from.is_some() {
         drag.dragging = None;
@@ -707,7 +717,14 @@ pub fn handle_block_drag(
     // Held: slide start_day to follow cursor.
     if mouse.pressed(MouseButton::Left) {
         if let Some((id, offset_px)) = drag.dragging {
-            let new_start = ((world_pos.x - offset_px) / PIXELS_PER_DAY).max(0.0);
+            let branch_min = model
+                .plans
+                .get(&active_schedule.plan_id)
+                .and_then(|p| p.branch_start_day)
+                .unwrap_or(0.0);
+            let new_start = ((world_pos.x - offset_px) / PIXELS_PER_DAY)
+                .max(0.0)
+                .max(branch_min);
             if let Some(wb) = model.work_blocks.get_mut(&id) {
                 wb.start_day = new_start;
             }
@@ -1677,7 +1694,7 @@ mod tests {
     fn delete_block_cleans_plan_root_and_allocations() {
         let mut m = Model::default();
         let wid = m.create_world("w");
-        let pid = m.create_plan("p", wid);
+        let pid = m.create_plan("p", wid, None);
         let a = m.create_work_block("A", est());
         m.plans.get_mut(&pid).unwrap().root_blocks.push(a);
 
@@ -1805,6 +1822,7 @@ pub fn draw_create_mode_overlay(
     mut state: ResMut<CreateModeState>,
     mut model: ResMut<model::Model>,
     conn: NonSend<rusqlite::Connection>,
+    active_schedule: Res<schedule::Schedule>,
 ) {
     if !state.active {
         return;
@@ -1855,7 +1873,17 @@ pub fn draw_create_mode_overlay(
                 confidence: 0.8,
             };
             let new_id = model.create_work_block(name, est);
-            if let Some(plan) = model.plans.values_mut().next() {
+            let plan_id = active_schedule.plan_id;
+            let branch_min = model
+                .plans
+                .get(&plan_id)
+                .and_then(|p| p.branch_start_day)
+                .unwrap_or(0.0);
+            if let Some(wb) = model.work_blocks.get_mut(&new_id) {
+                wb.start_day = branch_min;
+                wb.duration_days = 1.0;
+            }
+            if let Some(plan) = model.plans.get_mut(&plan_id) {
                 plan.root_blocks.push(new_id);
             }
             if let Err(e) = db::save_model(&conn, &model) {
