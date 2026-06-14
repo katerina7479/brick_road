@@ -97,6 +97,7 @@ pub fn save_model(conn: &Connection, model: &Model) -> Result<()> {
          DELETE FROM plan_variant_selections;
          DELETE FROM plan_root_blocks;
          DELETE FROM variant_children;
+         DELETE FROM variant_block_positions;
          DELETE FROM availability_segments;
          DELETE FROM calendar_non_working_dates;
          DELETE FROM t_shirt_sizes;",
@@ -295,6 +296,14 @@ pub fn save_model(conn: &Connection, model: &Model) -> Result<()> {
                 "INSERT INTO variant_children (variant_id, child_work_block_id, sort_order)
                  VALUES (?1, ?2, ?3)",
                 (v.id.0 as i64, child_id.0 as i64, order as i64),
+            )?;
+        }
+        for (&wb_id, &(sd, dd)) in &v.block_positions {
+            tx.execute(
+                "INSERT INTO variant_block_positions
+                     (variant_id, work_block_id, start_day, duration_days)
+                 VALUES (?1, ?2, ?3, ?4)",
+                (v.id.0 as i64, wb_id.0 as i64, sd as f64, dd as f64),
             )?;
         }
     }
@@ -553,6 +562,7 @@ pub fn load_model(conn: &Connection) -> Result<Model> {
                     name,
                     parent,
                     children: vec![],
+                    block_positions: std::collections::HashMap::new(),
                 },
             );
             if let Some(wb) = model.work_blocks.get_mut(&parent) {
@@ -573,6 +583,29 @@ pub fn load_model(conn: &Connection) -> Result<Model> {
             let (var_id, child_id) = row?;
             if let Some(v) = model.variants.get_mut(&VariantId(var_id as u64)) {
                 v.children.push(WorkBlockId(child_id as u64));
+            }
+        }
+    }
+
+    // variant_block_positions → restore snapshots into variant.block_positions
+    {
+        let mut stmt = conn.prepare(
+            "SELECT variant_id, work_block_id, start_day, duration_days
+             FROM variant_block_positions",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, f64>(2)?,
+                row.get::<_, f64>(3)?,
+            ))
+        })?;
+        for row in rows {
+            let (var_id, wb_id, sd, dd) = row?;
+            if let Some(v) = model.variants.get_mut(&VariantId(var_id as u64)) {
+                v.block_positions
+                    .insert(WorkBlockId(wb_id as u64), (sd as f32, dd as f32));
             }
         }
     }
@@ -1240,6 +1273,7 @@ mod tests {
                 name: "orphan".into(),
                 parent: WorkBlockId(888),
                 children: vec![],
+                block_positions: std::collections::HashMap::new(),
             },
         );
         let err = validate_model(&m).unwrap_err().to_string();
@@ -1397,6 +1431,25 @@ mod tests {
     }
 
     #[test]
+    fn variant_block_positions_round_trip() {
+        let conn = open_in_memory();
+        let mut m = Model::default();
+        let wb_parent = m.create_work_block("parent", est(3.0, 2.0, 5.0, 0.8));
+        let wb_child = m.create_work_block("child", est(2.0, 1.0, 4.0, 0.8));
+        let vid = m.create_variant("fast", wb_parent);
+        m.work_blocks.get_mut(&wb_parent).unwrap().variants.push(vid);
+        m.variants.get_mut(&vid).unwrap().children.push(wb_child);
+        // Store a position snapshot on the variant.
+        m.variants.get_mut(&vid).unwrap().block_positions.insert(wb_child, (5.0, 3.0));
+
+        save_model(&conn, &m).unwrap();
+        let loaded = load_model(&conn).unwrap();
+
+        let loaded_v = loaded.variants.get(&vid).unwrap();
+        assert_eq!(loaded_v.block_positions.get(&wb_child), Some(&(5.0, 3.0)));
+    }
+
+    #[test]
     fn confidence_factors_round_trip() {
         let conn = open_in_memory();
         let mut m = Model::default();
@@ -1464,6 +1517,14 @@ CREATE TABLE IF NOT EXISTS variant_children (
     child_work_block_id  INTEGER NOT NULL REFERENCES work_blocks(id),
     sort_order           INTEGER NOT NULL,
     PRIMARY KEY (variant_id, sort_order)
+);
+
+CREATE TABLE IF NOT EXISTS variant_block_positions (
+    variant_id    INTEGER NOT NULL REFERENCES variants(id),
+    work_block_id INTEGER NOT NULL REFERENCES work_blocks(id),
+    start_day     REAL    NOT NULL,
+    duration_days REAL    NOT NULL,
+    PRIMARY KEY (variant_id, work_block_id)
 );
 
 CREATE TABLE IF NOT EXISTS dependencies (
