@@ -938,3 +938,100 @@ pub fn draw_name_edit_overlay(
         name_edit.text_buf.clear();
     }
 }
+
+/// Tracks a pending block deletion waiting for user confirmation.
+#[derive(Resource, Default)]
+pub struct DeleteConfirmState {
+    pub pending: Option<WorkBlockId>,
+}
+
+/// Detects Delete/Backspace key press and queues the selected block for
+/// confirmation. Skipped while a name edit or egui text input is active.
+pub fn handle_block_delete(
+    mut egui_ctx: EguiContexts,
+    keyboard: Res<ButtonInput<KeyCode>>,
+    selected: Res<SelectedBlock>,
+    name_edit: Res<NameEditState>,
+    mut delete_confirm: ResMut<DeleteConfirmState>,
+) {
+    if name_edit.editing.is_some() {
+        return;
+    }
+    if let Ok(ctx) = egui_ctx.ctx_mut() {
+        if ctx.wants_keyboard_input() {
+            return;
+        }
+    }
+    if keyboard.just_pressed(KeyCode::Delete) || keyboard.just_pressed(KeyCode::Backspace) {
+        if let Some(id) = selected.0 {
+            delete_confirm.pending = Some(id);
+        }
+    }
+}
+
+/// Shows a confirmation dialog while `DeleteConfirmState::pending` is set.
+/// On confirm: removes the block and all references from the model, persists to
+/// DB, and clears the selection. On cancel: dismisses without deleting.
+pub fn draw_delete_confirm_overlay(
+    mut contexts: EguiContexts,
+    mut delete_confirm: ResMut<DeleteConfirmState>,
+    mut model: ResMut<model::Model>,
+    mut selected: ResMut<SelectedBlock>,
+    conn: NonSend<rusqlite::Connection>,
+) {
+    let Some(pending_id) = delete_confirm.pending else { return };
+
+    let block_name = model
+        .work_blocks
+        .get(&pending_id)
+        .map(|wb| wb.name.clone())
+        .unwrap_or_else(|| "Unknown".to_string());
+
+    let Ok(ctx) = contexts.ctx_mut() else { return };
+
+    let mut confirmed = false;
+    let mut cancelled = false;
+
+    egui::Window::new("Confirm Delete")
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .show(ctx, |ui| {
+            ui.label(format!("Delete \"{}\"?", block_name));
+            ui.label("This will also remove all its dependencies.");
+            ui.separator();
+            ui.horizontal(|ui| {
+                if ui.button("Delete").clicked() {
+                    confirmed = true;
+                }
+                if ui.button("Cancel").clicked() {
+                    cancelled = true;
+                }
+            });
+        });
+
+    if confirmed {
+        model.work_blocks.remove(&pending_id);
+        model
+            .dependencies
+            .retain(|_, dep| dep.predecessor != pending_id && dep.successor != pending_id);
+        for plan in model.plans.values_mut() {
+            plan.root_blocks.retain(|&bid| bid != pending_id);
+            plan.selected_variants.remove(&pending_id);
+            plan.allocations.retain(|a| a.work_block_id != pending_id);
+        }
+        for variant in model.variants.values_mut() {
+            variant.children.retain(|&bid| bid != pending_id);
+        }
+        // Remove variants owned by the deleted block to avoid orphans.
+        model.variants.retain(|_, v| v.parent != pending_id);
+
+        if let Err(e) = db::save_model(&conn, &model) {
+            error!("save_model failed: {e}");
+        }
+        selected.0 = None;
+        delete_confirm.pending = None;
+    } else if cancelled {
+        delete_confirm.pending = None;
+    }
+}
