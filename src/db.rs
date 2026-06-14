@@ -51,7 +51,12 @@ pub fn save_model(conn: &Connection, model: &Model) -> Result<()> {
 
     // resource_blocks + availability_segments
     for rb in model.resource_blocks.values() {
-        let world_id = rb_to_world.get(&rb.id.0).copied().unwrap_or(0);
+        let world_id = rb_to_world.get(&rb.id.0).copied().ok_or_else(|| {
+            rusqlite::Error::InvalidParameterName(format!(
+                "ResourceBlock {} is not in any World.resource_ids",
+                rb.id.0
+            ))
+        })?;
         tx.execute(
             "INSERT INTO resource_blocks (id, world_id, name, resource_type)
              VALUES (?1, ?2, ?3, ?4)",
