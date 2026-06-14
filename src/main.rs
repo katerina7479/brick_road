@@ -46,11 +46,23 @@ fn main() {
         .add_systems(Update, blocks::handle_block_selection)
         .add_systems(
             Update,
-            blocks::sync_block_sprites.after(blocks::handle_block_selection),
+            blocks::spawn_block_sprites.after(blocks::handle_block_selection),
+        )
+        .add_systems(
+            Update,
+            blocks::sync_block_sprites
+                .after(blocks::handle_block_selection)
+                .after(blocks::spawn_block_sprites),
         )
         .add_systems(
             Update,
             blocks::sync_conflict_overlays.after(update_analysis),
+        )
+        .add_systems(
+            Update,
+            labels::spawn_labels
+                .after(blocks::handle_block_selection)
+                .after(blocks::spawn_block_sprites),
         )
         .add_systems(Update, labels::draw_nesting_indicators)
         .add_systems(Update, labels::draw_violation_indicators)

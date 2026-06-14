@@ -6,7 +6,8 @@ use bevy_egui::EguiContexts;
 use crate::{
     analysis::ScheduleAnalysis,
     constants::{PIXELS_PER_DAY, ROW_HEIGHT},
-    model::{self, WorkBlockId},
+    db,
+    model::{self, Estimate, WorkBlockId},
     schedule,
 };
 
@@ -46,6 +47,9 @@ pub fn spawn_block_sprites(
     model: Res<model::Model>,
     existing: Query<Entity, With<BlockSprite>>,
 ) {
+    if !model.is_changed() {
+        return;
+    }
     for entity in &existing {
         commands.entity(entity).despawn();
     }
@@ -131,6 +135,7 @@ pub fn sync_block_sprites(
 /// Clicks that land inside egui areas (e.g. the side panel) are ignored.
 /// Clicking the currently selected block deselects it; clicking empty space
 /// clears the selection.
+#[allow(clippy::too_many_arguments)]
 pub fn handle_block_selection(
     mut egui_ctx: EguiContexts,
     windows: Query<&Window>,
@@ -138,6 +143,8 @@ pub fn handle_block_selection(
     mouse: Res<ButtonInput<MouseButton>>,
     mut selected: ResMut<SelectedBlock>,
     block_query: Query<(&BlockSprite, &Transform, &Sprite)>,
+    mut model: ResMut<model::Model>,
+    conn: NonSend<rusqlite::Connection>,
 ) {
     // Guard: egui owns the pointer when the cursor is over any egui area.
     if let Ok(ctx) = egui_ctx.ctx_mut() {
@@ -179,12 +186,34 @@ pub fn handle_block_selection(
         }
     }
 
-    // Re-clicking the selected block toggles it off; otherwise set/clear.
-    selected.0 = if clicked.is_some() && clicked == selected.0 {
-        None
+    if let Some(id) = clicked {
+        // Re-clicking the selected block toggles it off; otherwise select it.
+        selected.0 = if Some(id) == selected.0 { None } else { Some(id) };
     } else {
-        clicked
-    };
+        // Empty timeline space: create a new WorkBlock at the clicked position.
+        let start_day = (world_pos.x / PIXELS_PER_DAY).max(0.0);
+        // Snap to the nearest 0.5-day grid line.
+        let start_day = (start_day * 2.0).round() / 2.0;
+        let duration_days = 1.0f32;
+        let est = Estimate {
+            most_likely: duration_days,
+            optimistic: duration_days * 0.7,
+            pessimistic: duration_days * 1.5,
+            confidence: 0.8,
+        };
+        let new_id = model.create_work_block("New Block", est);
+        if let Some(wb) = model.work_blocks.get_mut(&new_id) {
+            wb.start_day = start_day;
+            wb.duration_days = duration_days;
+        }
+        if let Some(plan) = model.plans.values_mut().next() {
+            plan.root_blocks.push(new_id);
+        }
+        if let Err(e) = db::save_model(&conn, &model) {
+            error!("save_model failed: {e}");
+        }
+        selected.0 = Some(new_id);
+    }
 }
 
 /// Marker: this sprite visualises one `ResourceConflict` window.

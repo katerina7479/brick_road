@@ -39,6 +39,9 @@ pub fn spawn_labels(
     day_q: Query<Entity, With<DayLabel>>,
     row_q: Query<Entity, With<RowLabel>>,
 ) {
+    if !model.is_changed() {
+        return;
+    }
     for e in &day_q {
         commands.entity(e).despawn();
     }
