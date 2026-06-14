@@ -14,8 +14,8 @@ pub mod labels;
 pub mod model;
 pub mod schedule;
 
-use camera::{smooth_camera, update_camera_target, CameraTarget};
-use constants::PIXELS_PER_DAY;
+use camera::{camera_nav_keys, smooth_camera, update_camera_target, CameraTarget};
+use constants::{PIXELS_PER_DAY, SIDE_PANEL_WIDTH};
 
 fn main() {
     App::new()
@@ -31,7 +31,12 @@ fn main() {
         .insert_resource(ClearColor(Color::srgb(0.02, 0.02, 0.05)))
         .insert_resource(CameraTarget::default())
         .insert_resource(blocks::SelectedBlock::default())
+        .insert_resource(blocks::NameEditState::default())
+        .insert_resource(blocks::DragState::default())
+        .insert_resource(blocks::ResizeDragState::default())
         .insert_resource(blocks::DepDragState::default())
+        .insert_resource(blocks::DeleteConfirmState::default())
+        .insert_resource(schedule::ViewScope::default())
         .insert_resource(analysis::ScheduleAnalysis::default())
         .add_systems(Startup, (setup_db, setup_camera))
         .add_systems(Startup, setup_demo_schedule.after(setup_db))
@@ -41,26 +46,79 @@ fn main() {
             PostStartup,
             labels::spawn_labels.after(blocks::spawn_block_sprites),
         )
-        .add_systems(Update, (update_camera_target, smooth_camera).chain())
+        .add_systems(
+            PostStartup,
+            labels::spawn_day_labels.after(labels::spawn_labels),
+        )
+        .add_systems(Update, (camera_nav_keys, update_camera_target, smooth_camera).chain())
         .add_systems(Update, draw_grid)
         .add_systems(Update, update_analysis)
-        .add_systems(Update, blocks::handle_block_selection)
+        .add_systems(Update, blocks::handle_name_edit)
         .add_systems(
             Update,
-            blocks::sync_block_sprites.after(blocks::handle_block_selection),
+            blocks::handle_block_delete.after(blocks::handle_name_edit),
+        )
+        .add_systems(
+            Update,
+            blocks::handle_block_selection.after(blocks::handle_name_edit),
+        )
+        .add_systems(
+            Update,
+            blocks::handle_block_resize.after(blocks::handle_block_selection),
+        )
+        .add_systems(
+            Update,
+            blocks::handle_block_drag
+                .after(blocks::handle_block_selection)
+                .after(blocks::handle_block_resize),
+        )
+        .add_systems(
+            Update,
+            blocks::spawn_block_sprites.after(blocks::handle_block_selection),
+        )
+        .add_systems(
+            Update,
+            blocks::sync_block_sprites
+                .after(blocks::handle_block_drag)
+                .after(blocks::spawn_block_sprites),
         )
         .add_systems(
             Update,
             blocks::sync_conflict_overlays.after(update_analysis),
+        )
+        .add_systems(
+            Update,
+            blocks::sync_uncertainty_overlays.after(blocks::spawn_block_sprites),
         )
         .add_systems(Update, blocks::handle_dep_drag)
         .add_systems(
             Update,
             blocks::draw_dependency_edges.after(update_analysis),
         )
+        .add_systems(
+            Update,
+            labels::spawn_labels
+                .after(blocks::handle_block_selection)
+                .after(blocks::spawn_block_sprites),
+        )
+        .add_systems(
+            Update,
+            labels::spawn_day_labels
+                .after(update_camera_target)
+                .after(smooth_camera),
+        )
         .add_systems(Update, labels::draw_nesting_indicators)
         .add_systems(Update, labels::draw_violation_indicators)
+        .add_systems(Update, labels::scale_labels_to_zoom)
+        .add_systems(
+            Update,
+            blocks::sync_block_labels.after(blocks::spawn_block_sprites),
+        )
         .add_systems(EguiPrimaryContextPass, side_panel_ui)
+        .add_systems(EguiPrimaryContextPass, camera_nav_ui)
+        .add_systems(EguiPrimaryContextPass, logo_ui)
+        .add_systems(EguiPrimaryContextPass, blocks::draw_name_edit_overlay)
+        .add_systems(EguiPrimaryContextPass, blocks::draw_delete_confirm_overlay)
         .run();
 }
 
@@ -167,6 +225,67 @@ fn update_analysis(
     };
 }
 
+/// Renders Re-center and Fit-to-view buttons in a small floating area
+/// anchored to the top-right of the window. Keyboard shortcuts (Home / F)
+/// are handled by `camera_nav_keys` in `camera.rs`.
+fn camera_nav_ui(
+    mut contexts: EguiContexts,
+    mut target: ResMut<CameraTarget>,
+    model: Res<model::Model>,
+    scope: Res<schedule::ViewScope>,
+    windows: Query<&Window>,
+) {
+    let Ok(ctx) = contexts.ctx_mut() else { return };
+    egui::Area::new(egui::Id::new("camera_nav"))
+        .anchor(egui::Align2::RIGHT_TOP, egui::Vec2::new(-8.0, 8.0))
+        .show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                if ui.small_button("Re-center [Home]").clicked() {
+                    target.pos = Vec2::ZERO;
+                    target.zoom = 1.0;
+                }
+                if ui.small_button("Fit to view [F]").clicked() {
+                    if let Some(new_target) = camera::fit_to_blocks(&model, &scope, &windows) {
+                        *target = new_target;
+                    }
+                }
+            });
+        });
+}
+
+/// Renders the brick_road logo as a floating button anchored to the upper-left
+/// corner of the window. The logo renders on top of the side panel and serves
+/// as a persistent home/brand button — clicking it triggers fit-to-view,
+/// identical to the keyboard shortcut `F`.
+///
+/// The amber warm-glow styling complements the HDR bloom aesthetic of the
+/// main timeline canvas.
+fn logo_ui(
+    mut contexts: EguiContexts,
+    mut target: ResMut<CameraTarget>,
+    model: Res<model::Model>,
+    scope: Res<schedule::ViewScope>,
+    windows: Query<&Window>,
+) {
+    let Ok(ctx) = contexts.ctx_mut() else { return };
+    egui::Area::new(egui::Id::new("brick_road_logo"))
+        .anchor(egui::Align2::LEFT_TOP, egui::Vec2::new(8.0, 8.0))
+        .interactable(true)
+        .show(ctx, |ui| {
+            let text = egui::RichText::new("brick_road")
+                .size(18.0)
+                .color(egui::Color32::from_rgb(250, 165, 40));
+            let btn = egui::Button::new(text)
+                .fill(egui::Color32::from_rgba_unmultiplied(22, 14, 4, 215))
+                .stroke(egui::Stroke::new(1.5, egui::Color32::from_rgb(180, 105, 25)));
+            if ui.add(btn).on_hover_text("Fit to view [F]").clicked() {
+                if let Some(new_target) = camera::fit_to_blocks(&model, &scope, &windows) {
+                    *target = new_target;
+                }
+            }
+        });
+}
+
 fn side_panel_ui(
     mut contexts: EguiContexts,
     selected: Res<blocks::SelectedBlock>,
@@ -174,12 +293,48 @@ fn side_panel_ui(
     mut schedule: ResMut<schedule::Schedule>,
     conn: NonSend<rusqlite::Connection>,
     mut cycle_error: Local<Option<String>>,
+    mut scope: ResMut<schedule::ViewScope>,
 ) {
     let Ok(ctx) = contexts.ctx_mut() else { return };
     egui::SidePanel::left("side_panel")
-        .min_width(220.0)
+        .min_width(SIDE_PANEL_WIDTH)
         .show(ctx, |ui| {
             ui.heading("brick_road");
+            // Breadcrumb: show full navigation path when drilled in.
+            // Clicking an ancestor segment truncates the stack back to that level.
+            if !scope.scope_stack.is_empty() {
+                let stack_len = scope.scope_stack.len();
+                let names: Vec<String> = scope
+                    .scope_stack
+                    .iter()
+                    .map(|&id| {
+                        model
+                            .work_blocks
+                            .get(&id)
+                            .map(|wb| wb.name.clone())
+                            .unwrap_or_else(|| "?".to_string())
+                    })
+                    .collect();
+                let mut truncate_to: Option<usize> = None;
+                ui.horizontal(|ui| {
+                    if ui.small_button("Root").clicked() {
+                        truncate_to = Some(0);
+                    }
+                    for (i, name) in names.iter().enumerate() {
+                        ui.label("›");
+                        if i + 1 < stack_len {
+                            if ui.small_button(name.as_str()).clicked() {
+                                truncate_to = Some(i + 1);
+                            }
+                        } else {
+                            ui.label(name.as_str());
+                        }
+                    }
+                });
+                if let Some(depth) = truncate_to {
+                    scope.scope_stack.truncate(depth);
+                }
+            }
             ui.separator();
 
             if ui.button("Auto-schedule").clicked() {
@@ -234,6 +389,7 @@ fn side_panel_ui(
             let mut optimistic = wb.estimate.optimistic;
             let mut pessimistic = wb.estimate.pessimistic;
             let confidence = wb.estimate.confidence;
+            let color = wb.color;
 
             let (start_day, end_day) = (wb.start_day, wb.start_day + wb.duration_days);
 
@@ -246,12 +402,17 @@ fn side_panel_ui(
             }
 
             ui.separator();
-            ui.label("Duration");
-            let changed = ui
-                .add(egui::Slider::new(&mut duration_days, 1i32..=60).text("days"))
-                .changed();
+            let dur_changed = ui.horizontal(|ui| {
+                ui.label("Duration:");
+                ui.add(
+                    egui::DragValue::new(&mut duration_days)
+                        .speed(0.5)
+                        .range(1i32..=60)
+                        .suffix(" days"),
+                ).changed()
+            }).inner;
 
-            if changed {
+            if dur_changed {
                 if let Some(wb) = model.work_blocks.get_mut(&sel_id) {
                     wb.duration_days = duration_days;
                 }
@@ -263,22 +424,120 @@ fn side_panel_ui(
 
             ui.separator();
             ui.label("Estimate");
-            let ml_changed = ui
-                .add(egui::Slider::new(&mut most_likely, 1i32..=60).text("most likely"))
-                .changed();
-            let opt_changed = ui
-                .add(egui::Slider::new(&mut optimistic, 1i32..=60).text("optimistic"))
-                .changed();
-            let pes_changed = ui
-                .add(egui::Slider::new(&mut pessimistic, 1i32..=60).text("pessimistic"))
-                .changed();
-            ui.label(format!("Confidence:   {:.0}%", confidence * 100.0));
+            // DragValues are ordered best→expected→worst. Each range is bounded
+            // by its neighbours so optimistic ≤ most_likely ≤ pessimistic holds.
+            let opt_changed = ui.horizontal(|ui| {
+                ui.label("Optimistic:");
+                ui.add(
+                    egui::DragValue::new(&mut optimistic)
+                        .speed(0.5)
+                        .range(1i32..=most_likely)
+                        .suffix(" days"),
+                ).changed()
+            }).inner;
+            let ml_changed = ui.horizontal(|ui| {
+                ui.label("Most likely:");
+                ui.add(
+                    egui::DragValue::new(&mut most_likely)
+                        .speed(0.5)
+                        .range(optimistic..=pessimistic)
+                        .suffix(" days"),
+                ).changed()
+            }).inner;
+            let pes_changed = ui.horizontal(|ui| {
+                ui.label("Pessimistic:");
+                ui.add(
+                    egui::DragValue::new(&mut pessimistic)
+                        .speed(0.5)
+                        .range(most_likely..=200i32)
+                        .suffix(" days"),
+                ).changed()
+            }).inner;
+            ui.label(format!("Confidence: {:.0}%", confidence * 100.0));
 
-            if ml_changed || opt_changed || pes_changed {
+            if opt_changed || ml_changed || pes_changed {
                 if let Some(wb) = model.work_blocks.get_mut(&sel_id) {
                     wb.estimate.most_likely = most_likely;
                     wb.estimate.optimistic = optimistic;
                     wb.estimate.pessimistic = pessimistic;
+                }
+                if let Err(e) = db::save_model(&conn, &model) {
+                    error!("save_model failed: {e}");
+                }
+            }
+
+            ui.separator();
+            ui.label("Color");
+
+            // Preset HDR-friendly swatches — channels > 1.0 trigger bloom.
+            const PRESETS: &[(&str, [f32; 3])] = &[
+                ("Amber",   [2.0, 0.5, 0.1]),
+                ("Green",   [0.2, 1.8, 0.5]),
+                ("Cyan",    [0.2, 0.8, 3.0]),
+                ("Magenta", [2.2, 0.3, 1.5]),
+                ("Yellow",  [2.5, 1.8, 0.1]),
+                ("Blue",    [0.5, 0.5, 3.0]),
+                ("Pink",    [2.5, 0.3, 2.0]),
+                ("Teal",    [0.2, 2.5, 1.5]),
+                ("Orange",  [3.0, 1.0, 0.1]),
+                ("Purple",  [1.2, 0.2, 2.5]),
+            ];
+
+            let mut color_changed = false;
+            let mut new_color = color;
+
+            ui.horizontal_wrapped(|ui| {
+                for (label, rgb) in PRESETS {
+                    let [r, g, b] = *rgb;
+                    // Tone-map HDR → 8-bit for the swatch background.
+                    let fill = egui::Color32::from_rgb(
+                        ((r / 3.5).min(1.0) * 220.0) as u8,
+                        ((g / 3.5).min(1.0) * 220.0) as u8,
+                        ((b / 3.5).min(1.0) * 220.0) as u8,
+                    );
+                    let active = color.is_some_and(|c| {
+                        (c[0] - r).abs() < 0.01
+                            && (c[1] - g).abs() < 0.01
+                            && (c[2] - b).abs() < 0.01
+                    });
+                    let mut btn = egui::Button::new("")
+                        .fill(fill)
+                        .min_size(egui::Vec2::splat(18.0));
+                    if active {
+                        btn = btn.stroke(egui::Stroke::new(2.0, egui::Color32::WHITE));
+                    }
+                    if ui.add(btn).on_hover_text(*label).clicked() {
+                        new_color = Some(*rgb);
+                        color_changed = true;
+                    }
+                }
+                if ui
+                    .small_button("×")
+                    .on_hover_text("Reset to palette color")
+                    .clicked()
+                {
+                    new_color = None;
+                    color_changed = true;
+                }
+            });
+
+            // Custom HDR inputs — allow values > 1.0 for bloom.
+            ui.label("Custom (R / G / B)");
+            let mut custom = color.unwrap_or([1.0, 1.0, 1.0]);
+            let (cr, cg, cb) = ui.horizontal(|ui| {
+                let cr = ui.add(egui::DragValue::new(&mut custom[0]).speed(0.05).range(0.0f32..=3.0).prefix("R ")).changed();
+                let cg = ui.add(egui::DragValue::new(&mut custom[1]).speed(0.05).range(0.0f32..=3.0).prefix("G ")).changed();
+                let cb = ui.add(egui::DragValue::new(&mut custom[2]).speed(0.05).range(0.0f32..=3.0).prefix("B ")).changed();
+                (cr, cg, cb)
+            }).inner;
+            if cr || cg || cb {
+                new_color = Some(custom);
+                color_changed = true;
+            }
+
+            if color_changed {
+                if let Some(wb) = model.work_blocks.get_mut(&sel_id) {
+                    wb.color = new_color;
                 }
                 if let Err(e) = db::save_model(&conn, &model) {
                     error!("save_model failed: {e}");

@@ -16,6 +16,9 @@ pub fn create_tables(conn: &Connection) -> Result<()> {
     for sql in [
         "ALTER TABLE work_blocks ADD COLUMN start_day INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE work_blocks ADD COLUMN duration_days INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE work_blocks ADD COLUMN color_r REAL",
+        "ALTER TABLE work_blocks ADD COLUMN color_g REAL",
+        "ALTER TABLE work_blocks ADD COLUMN color_b REAL",
     ] {
         match conn.execute_batch(sql) {
             Ok(()) => {}
@@ -108,8 +111,8 @@ pub fn save_model(conn: &Connection, model: &Model) -> Result<()> {
             "INSERT INTO work_blocks
                  (id, name, estimate_most_likely, estimate_optimistic,
                   estimate_pessimistic, estimate_confidence,
-                  start_day, duration_days)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                  start_day, duration_days, color_r, color_g, color_b)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             (
                 wb.id.0,
                 &wb.name,
@@ -119,6 +122,9 @@ pub fn save_model(conn: &Connection, model: &Model) -> Result<()> {
                 wb.estimate.confidence as f64,
                 wb.start_day as i64,
                 wb.duration_days as i64,
+                wb.color.map(|c| c[0] as f64),
+                wb.color.map(|c| c[1] as f64),
+                wb.color.map(|c| c[2] as f64),
             ),
         )?;
     }
@@ -320,7 +326,7 @@ pub fn load_model(conn: &Connection) -> Result<Model> {
         let mut stmt = conn.prepare(
             "SELECT id, name, estimate_most_likely, estimate_optimistic,
                     estimate_pessimistic, estimate_confidence,
-                    start_day, duration_days
+                    start_day, duration_days, color_r, color_g, color_b
              FROM work_blocks",
         )?;
         let rows = stmt.query_map([], |row| {
@@ -333,10 +339,17 @@ pub fn load_model(conn: &Connection) -> Result<Model> {
                 row.get::<_, f64>(5)?,
                 row.get::<_, f64>(6)?,
                 row.get::<_, f64>(7)?,
+                row.get::<_, Option<f64>>(8)?,
+                row.get::<_, Option<f64>>(9)?,
+                row.get::<_, Option<f64>>(10)?,
             ))
         })?;
         for row in rows {
-            let (id, name, ml, opt, pes, conf, start_day, duration_days) = row?;
+            let (id, name, ml, opt, pes, conf, start_day, duration_days, cr, cg, cb) = row?;
+            let color = match (cr, cg, cb) {
+                (Some(r), Some(g), Some(b)) => Some([r as f32, g as f32, b as f32]),
+                _ => None,
+            };
             bump!(id);
             model.work_blocks.insert(
                 WorkBlockId(id as u64),
@@ -352,6 +365,7 @@ pub fn load_model(conn: &Connection) -> Result<Model> {
                     variants: vec![],
                     start_day: start_day as i32,
                     duration_days: duration_days as i32,
+                    color,
                 },
             );
         }
@@ -1082,7 +1096,10 @@ CREATE TABLE IF NOT EXISTS work_blocks (
     estimate_pessimistic INTEGER NOT NULL,
     estimate_confidence  REAL    NOT NULL,
     start_day            INTEGER NOT NULL DEFAULT 0,
-    duration_days        INTEGER NOT NULL DEFAULT 0
+    duration_days        INTEGER NOT NULL DEFAULT 0,
+    color_r              REAL,
+    color_g              REAL,
+    color_b              REAL
 );
 
 CREATE TABLE IF NOT EXISTS variants (
