@@ -32,6 +32,8 @@ fn main() {
         .insert_resource(CameraTarget::default())
         .insert_resource(blocks::SelectedBlock::default())
         .insert_resource(blocks::NameEditState::default())
+        .insert_resource(blocks::DragState::default())
+        .insert_resource(blocks::DepDragState::default())
         .insert_resource(analysis::ScheduleAnalysis::default())
         .add_systems(Startup, (setup_db, setup_camera))
         .add_systems(Startup, setup_demo_schedule.after(setup_db))
@@ -51,11 +53,20 @@ fn main() {
         )
         .add_systems(
             Update,
-            blocks::sync_block_sprites.after(blocks::handle_block_selection),
+            blocks::handle_block_drag.after(blocks::handle_block_selection),
+        )
+        .add_systems(
+            Update,
+            blocks::sync_block_sprites.after(blocks::handle_block_drag),
         )
         .add_systems(
             Update,
             blocks::sync_conflict_overlays.after(update_analysis),
+        )
+        .add_systems(Update, blocks::handle_dep_drag)
+        .add_systems(
+            Update,
+            blocks::draw_dependency_edges.after(update_analysis),
         )
         .add_systems(Update, labels::draw_nesting_indicators)
         .add_systems(Update, labels::draw_violation_indicators)
@@ -230,9 +241,9 @@ fn side_panel_ui(
             };
             let name = wb.name.clone();
             let mut duration_days = wb.duration_days;
-            let most_likely = wb.estimate.most_likely;
-            let optimistic = wb.estimate.optimistic;
-            let pessimistic = wb.estimate.pessimistic;
+            let mut most_likely = wb.estimate.most_likely;
+            let mut optimistic = wb.estimate.optimistic;
+            let mut pessimistic = wb.estimate.pessimistic;
             let confidence = wb.estimate.confidence;
 
             let (start_day, end_day) = (wb.start_day, wb.start_day + wb.duration_days);
@@ -267,9 +278,26 @@ fn side_panel_ui(
 
             ui.separator();
             ui.label("Estimate");
-            ui.label(format!("Most likely:  {:.1} days", most_likely));
-            ui.label(format!("Optimistic:   {:.1} days", optimistic));
-            ui.label(format!("Pessimistic:  {:.1} days", pessimistic));
+            let ml_changed = ui
+                .add(egui::Slider::new(&mut most_likely, 0.5f32..=60.0).text("most likely").step_by(0.5))
+                .changed();
+            let opt_changed = ui
+                .add(egui::Slider::new(&mut optimistic, 0.5f32..=60.0).text("optimistic").step_by(0.5))
+                .changed();
+            let pes_changed = ui
+                .add(egui::Slider::new(&mut pessimistic, 0.5f32..=60.0).text("pessimistic").step_by(0.5))
+                .changed();
             ui.label(format!("Confidence:   {:.0}%", confidence * 100.0));
+
+            if ml_changed || opt_changed || pes_changed {
+                if let Some(wb) = model.work_blocks.get_mut(&sel_id) {
+                    wb.estimate.most_likely = most_likely;
+                    wb.estimate.optimistic = optimistic;
+                    wb.estimate.pessimistic = pessimistic;
+                }
+                if let Err(e) = db::save_model(&conn, &model) {
+                    error!("save_model failed: {e}");
+                }
+            }
         });
 }
