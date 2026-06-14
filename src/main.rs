@@ -43,22 +43,23 @@ fn main() {
         .insert_resource(schedule::TimelineViewMode::default())
         .insert_resource(schedule::VisibleBlocks::default())
         .insert_resource(analysis::ScheduleAnalysis::default())
+        .insert_resource(blocks::BlockSpriteMap::default())
         .insert_resource(labels::NestingDepthMap::default())
         .add_systems(Startup, (setup_db, setup_camera))
         .add_systems(Startup, setup_demo_schedule.after(setup_db))
-        .add_systems(PostStartup, update_analysis.before(blocks::spawn_block_sprites))
+        .add_systems(PostStartup, update_analysis.before(blocks::reconcile_block_sprites))
         .add_systems(
             PostStartup,
-            labels::compute_nesting_depths.before(blocks::spawn_block_sprites),
+            labels::compute_nesting_depths.before(blocks::reconcile_block_sprites),
         )
         .add_systems(
             PostStartup,
-            schedule::update_visible_blocks.before(blocks::spawn_block_sprites),
+            schedule::update_visible_blocks.before(blocks::reconcile_block_sprites),
         )
-        .add_systems(PostStartup, blocks::spawn_block_sprites)
+        .add_systems(PostStartup, blocks::reconcile_block_sprites)
         .add_systems(
             PostStartup,
-            labels::spawn_labels.after(blocks::spawn_block_sprites),
+            labels::spawn_labels.after(blocks::reconcile_block_sprites),
         )
         .add_systems(
             PostStartup,
@@ -70,7 +71,7 @@ fn main() {
         .add_systems(
             Update,
             schedule::update_visible_blocks
-                .before(blocks::spawn_block_sprites)
+                .before(blocks::reconcile_block_sprites)
                 .before(blocks::sync_conflict_overlays)
                 .before(blocks::sync_uncertainty_overlays)
                 .before(blocks::draw_dependency_edges)
@@ -102,13 +103,13 @@ fn main() {
         )
         .add_systems(
             Update,
-            blocks::spawn_block_sprites.after(blocks::handle_block_selection),
+            blocks::reconcile_block_sprites.after(blocks::handle_block_selection),
         )
         .add_systems(
             Update,
             blocks::sync_block_sprites
                 .after(blocks::handle_block_drag)
-                .after(blocks::spawn_block_sprites)
+                .after(blocks::reconcile_block_sprites)
                 .run_if(task_view_active),
         )
         .add_systems(
@@ -126,7 +127,7 @@ fn main() {
         .add_systems(
             Update,
             blocks::sync_uncertainty_overlays
-                .after(blocks::spawn_block_sprites)
+                .after(blocks::reconcile_block_sprites)
                 .run_if(task_view_active),
         )
         .add_systems(
@@ -147,7 +148,7 @@ fn main() {
             Update,
             labels::spawn_labels
                 .after(blocks::handle_block_selection)
-                .after(blocks::spawn_block_sprites),
+                .after(blocks::reconcile_block_sprites),
         )
         .add_systems(
             Update,
@@ -165,7 +166,20 @@ fn main() {
         .add_systems(
             Update,
             blocks::sync_block_labels
-                .after(blocks::spawn_block_sprites)
+                .after(blocks::reconcile_block_sprites)
+                .run_if(task_view_active),
+        )
+        .add_systems(
+            Update,
+            blocks::sync_block_label_names
+                .after(blocks::reconcile_block_sprites)
+                .before(blocks::sync_block_labels)
+                .run_if(task_view_active),
+        )
+        .add_systems(
+            Update,
+            blocks::sync_description_dots
+                .after(blocks::reconcile_block_sprites)
                 .run_if(task_view_active),
         )
         .add_systems(Update, draw_resource_timeline)

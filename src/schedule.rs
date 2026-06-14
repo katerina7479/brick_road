@@ -133,6 +133,10 @@ pub struct VisibleBlocks {
 }
 
 /// Refreshes `VisibleBlocks` when the model or view scope changes.
+///
+/// Only writes to `cache.ids` when the content actually changes, so downstream
+/// systems that check `visible_blocks.is_changed()` do not fire on every frame
+/// during block drag/resize (where only position changes, not the visible set).
 pub fn update_visible_blocks(
     model: Res<Model>,
     scope: Res<ViewScope>,
@@ -141,10 +145,13 @@ pub fn update_visible_blocks(
     if !model.is_changed() && !scope.is_changed() {
         return;
     }
-    cache.ids = visible_blocks(&model, &scope)
+    let new_ids: Vec<WorkBlockId> = visible_blocks(&model, &scope)
         .into_iter()
         .map(|wb| wb.id)
         .collect();
+    if new_ids != cache.ids {
+        cache.ids = new_ids;
+    }
 }
 
 /// Propagate dependency constraints to all blocks reachable (transitively)
