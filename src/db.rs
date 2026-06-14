@@ -1205,6 +1205,109 @@ mod tests {
             "expected parent mismatch message in: {err}"
         );
     }
+
+    // ── Incremental / stale-deletion tests ───────────────────────────────────
+
+    #[test]
+    fn stale_work_block_deleted_on_second_save() {
+        // Exercises the WHERE id NOT IN (…) path in delete_stale for work_blocks.
+        // Save with block A, then remove it, save again, and verify it is gone.
+        let conn = open_in_memory();
+        let mut m = Model::default();
+        let wb_id = m.create_work_block("to-be-removed", est(3.0, 2.0, 5.0, 0.9));
+
+        save_model(&conn, &m).unwrap();
+        // Confirm it is present after the first save.
+        let after_first = load_model(&conn).unwrap();
+        assert!(after_first.work_blocks.contains_key(&wb_id));
+
+        // Remove the block and save again.
+        m.work_blocks.remove(&wb_id);
+        save_model(&conn, &m).unwrap();
+
+        let after_second = load_model(&conn).unwrap();
+        assert!(
+            !after_second.work_blocks.contains_key(&wb_id),
+            "stale work_block should have been deleted by Phase 3"
+        );
+    }
+
+    #[test]
+    fn incremental_save_updates_existing_entity() {
+        // Verifies that an in-place upsert (ON CONFLICT DO UPDATE) actually
+        // reflects the new field values on the second load.
+        let conn = open_in_memory();
+        let mut m = Model::default();
+        let wb_id = m.create_work_block("original", est(5.0, 3.0, 8.0, 0.8));
+
+        save_model(&conn, &m).unwrap();
+
+        // Mutate the block in-place.
+        m.work_blocks.get_mut(&wb_id).unwrap().name = "renamed".to_string();
+        save_model(&conn, &m).unwrap();
+
+        let loaded = load_model(&conn).unwrap();
+        let wb = loaded.work_blocks.get(&wb_id).expect("block must still exist");
+        assert_eq!(wb.name, "renamed", "upsert must have written the new name");
+    }
+
+    #[test]
+    fn stale_deletion_with_empty_current_set() {
+        // Exercises the `current_ids.is_empty()` branch of delete_stale, which
+        // clears the table entirely with `DELETE FROM <table>` rather than
+        // `DELETE FROM <table> WHERE id NOT IN (…)`.
+        let conn = open_in_memory();
+        let mut m = Model::default();
+        m.create_work_block("block-a", est(2.0, 1.0, 4.0, 1.0));
+        m.create_work_block("block-b", est(3.0, 2.0, 5.0, 0.9));
+
+        save_model(&conn, &m).unwrap();
+        assert_eq!(load_model(&conn).unwrap().work_blocks.len(), 2);
+
+        // Remove all blocks — save_model will call delete_stale with empty ids.
+        m.work_blocks.clear();
+        save_model(&conn, &m).unwrap();
+
+        let loaded = load_model(&conn).unwrap();
+        assert!(
+            loaded.work_blocks.is_empty(),
+            "delete_stale empty-set path must clear the table"
+        );
+    }
+
+    #[test]
+    fn stale_entity_deletion_across_multiple_types() {
+        // One test exercising stale deletion for several entity types in one cycle.
+        let conn = open_in_memory();
+        let mut m = Model::default();
+        let world_id = m.create_world("w");
+        let rb_id = m.create_resource_block("Alice", ResourceType::Person);
+        m.worlds.get_mut(&world_id).unwrap().resource_ids.push(rb_id);
+        let wb_a = m.create_work_block("A", est(2.0, 1.0, 3.0, 1.0));
+        let wb_b = m.create_work_block("B", est(3.0, 2.0, 5.0, 0.9));
+        let dep = m.create_dependency(wb_a, wb_b, DependencyType::FinishToStart);
+        let ms_id = m.create_milestone("launch", 10.0);
+
+        save_model(&conn, &m).unwrap();
+
+        // Remove wb_b, the dependency referencing it, the resource block, and the milestone.
+        m.dependencies.remove(&dep);
+        m.work_blocks.remove(&wb_b);
+        // Remove rb from world.resource_ids before removing from resource_blocks,
+        // since save_model validates ResourceBlocks are in a World.resource_ids list.
+        m.worlds.get_mut(&world_id).unwrap().resource_ids.retain(|&id| id != rb_id);
+        m.resource_blocks.remove(&rb_id);
+        m.milestones.remove(&ms_id);
+        save_model(&conn, &m).unwrap();
+
+        let loaded = load_model(&conn).unwrap();
+        assert!(!loaded.work_blocks.contains_key(&wb_b), "wb_b should be deleted");
+        assert!(!loaded.dependencies.contains_key(&dep), "dependency should be deleted");
+        assert!(!loaded.resource_blocks.contains_key(&rb_id), "resource_block should be deleted");
+        assert!(!loaded.milestones.contains_key(&ms_id), "milestone should be deleted");
+        // Surviving entity stays.
+        assert!(loaded.work_blocks.contains_key(&wb_a), "wb_a must survive");
+    }
 }
 
 const CREATE_TABLES_SQL: &str = "
