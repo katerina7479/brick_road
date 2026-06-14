@@ -904,9 +904,13 @@ pub fn draw_name_edit_overlay(
     let Ok(ctx) = contexts.ctx_mut() else { return };
 
     let escaped = keys.just_pressed(KeyCode::Escape);
+    // Check Enter via Bevy's key state — egui's TextEdit::singleline does not
+    // reliably fire lost_focus() on Enter in bevy_egui, so we handle it
+    // explicitly here in parallel with the Escape path.
+    let entered = keys.just_pressed(KeyCode::Enter) || keys.just_pressed(KeyCode::NumpadEnter);
     let mut commit = false;
 
-    if !escaped {
+    if !escaped && !entered {
         egui::Area::new(egui::Id::new("name_edit_overlay"))
             .fixed_pos(screen_pos)
             .show(ctx, |ui| {
@@ -915,10 +919,14 @@ pub fn draw_name_edit_overlay(
                         .min_size(egui::Vec2::new(120.0, 20.0)),
                 );
                 response.request_focus();
+                // Fallback: commit if focus is lost through any other means
+                // (Tab, clicking outside the overlay, etc.).
                 if response.lost_focus() {
                     commit = true;
                 }
             });
+    } else if entered {
+        commit = true;
     }
 
     if escaped {
