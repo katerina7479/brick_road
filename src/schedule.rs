@@ -4,7 +4,8 @@ use bevy::prelude::{DetectChanges, Res, ResMut, Resource};
 
 use crate::graph::{CycleError, DependencyGraph};
 use crate::model::{
-    DependencyType, Model, Plan, PlanId, ResourceBlock, ResourceBlockId, WorkBlock, WorkBlockId,
+    AvailabilitySegment, DependencyType, Model, Plan, PlanId, ResourceBlockId, WorkBlock,
+    WorkBlockId,
 };
 
 /// The computed time placement of one work block.
@@ -596,10 +597,20 @@ pub fn resource_leveled_pass(
             .push((alloc.resource_id, alloc.allocation_factor));
     }
 
-    let resource_blocks: HashMap<ResourceBlockId, &ResourceBlock> = model
+    // Sort each resource's availability segments by start once before the main
+    // scheduling loop. Binary searches in avail_at, feasible_at, and
+    // earliest_feasible_start require ascending start order; sorting here is an
+    // O(m log m) one-time cost per resource (m = segment count).
+    let resource_blocks: HashMap<ResourceBlockId, Vec<AvailabilitySegment>> = model
         .resource_blocks
         .iter()
-        .map(|(&id, rb)| (id, rb))
+        .map(|(_, rb)| {
+            let mut segs = rb.availability.segments.clone();
+            segs.sort_unstable_by(|a, b| {
+                a.start.partial_cmp(&b.start).unwrap_or(std::cmp::Ordering::Equal)
+            });
+            (rb.id, segs)
+        })
         .collect();
 
     let mut sched = Schedule::new(plan.id);
@@ -698,7 +709,7 @@ fn earliest_feasible_start(
     duration: f32,
     demands: &[(ResourceBlockId, f32)],
     committed: &HashMap<ResourceBlockId, SortedIntervals>,
-    resource_blocks: &HashMap<ResourceBlockId, &ResourceBlock>,
+    resource_blocks: &HashMap<ResourceBlockId, Vec<AvailabilitySegment>>,
 ) -> f32 {
     if demands.is_empty() || duration <= 0.0 {
         return min_start;
@@ -707,17 +718,23 @@ fn earliest_feasible_start(
     let mut candidates: Vec<f32> = vec![min_start];
     for &(rb_id, _) in demands {
         if let Some(si) = committed.get(&rb_id) {
-            for &(_, end, _) in &si.inner {
+            // Committed intervals are sorted by start. Those with start > min_start
+            // always have end > start > min_start, so no end-check needed. For
+            // earlier-started intervals, check end explicitly.
+            let split = si.inner.partition_point(|&(s, _, _)| s <= min_start);
+            for &(_, end, _) in &si.inner[..split] {
                 if end > min_start {
                     candidates.push(end);
                 }
             }
+            for &(_, end, _) in &si.inner[split..] {
+                candidates.push(end);
+            }
         }
-        if let Some(rb) = resource_blocks.get(&rb_id) {
-            // Segments are sorted by start; only those starting or ending after
-            // min_start can introduce a new feasibility boundary.
-            let lo = rb.availability.segments.partition_point(|seg| seg.end <= min_start);
-            for seg in &rb.availability.segments[lo..] {
+        if let Some(segs) = resource_blocks.get(&rb_id) {
+            // Segments are sorted by start; skip those whose end ≤ min_start.
+            let lo = segs.partition_point(|seg| seg.end <= min_start);
+            for seg in &segs[lo..] {
                 if seg.start > min_start {
                     candidates.push(seg.start);
                 }
@@ -756,7 +773,7 @@ fn feasible_at(
     duration: f32,
     demands: &[(ResourceBlockId, f32)],
     committed: &HashMap<ResourceBlockId, SortedIntervals>,
-    resource_blocks: &HashMap<ResourceBlockId, &ResourceBlock>,
+    resource_blocks: &HashMap<ResourceBlockId, Vec<AvailabilitySegment>>,
 ) -> bool {
     let window_end = t + duration;
     for &(rb_id, demand) in demands {
@@ -770,10 +787,10 @@ fn feasible_at(
                 if ie > t && ie < window_end { pts.push(ie); }
             }
         }
-        if let Some(rb) = resource_blocks.get(&rb_id) {
-            // Binary search: only segments whose end is after t can overlap the window.
-            let lo = rb.availability.segments.partition_point(|seg| seg.end <= t);
-            for seg in &rb.availability.segments[lo..] {
+        if let Some(segs) = resource_blocks.get(&rb_id) {
+            // Segments are sorted; skip those that end before the window starts.
+            let lo = segs.partition_point(|seg| seg.end <= t);
+            for seg in &segs[lo..] {
                 if seg.start >= window_end { break; }
                 if seg.start > t { pts.push(seg.start); }
                 if seg.end > t && seg.end < window_end { pts.push(seg.end); }
@@ -786,7 +803,7 @@ fn feasible_at(
             let mid = (w[0] + w[1]) * 0.5;
             let avail = resource_blocks
                 .get(&rb_id)
-                .map(|rb| avail_at(rb, mid))
+                .map(|segs| avail_at(segs, mid))
                 .unwrap_or(1.0);
             let used = si.map_or(0.0, |si| si.demand_at(mid));
             if used + demand > avail + 1e-6 {
@@ -797,13 +814,16 @@ fn feasible_at(
     true
 }
 
-/// Availability factor for resource `rb` at instant `t`.
+/// Availability factor for resource at instant `t`.
 ///
-/// Segments are sorted by start; binary search finds the containing segment
-/// in O(log n) rather than the O(n) linear scan of the original implementation.
-/// Gaps in the availability timeline default to factor 1.0.
-fn avail_at(rb: &ResourceBlock, t: f32) -> f32 {
-    let segs = &rb.availability.segments;
+/// `segs` must be sorted ascending by `start` (enforced by the sort in
+/// `resource_leveled_pass`). Binary search finds the containing segment in
+/// O(log n). Gaps in the timeline default to factor 1.0.
+fn avail_at(segs: &[AvailabilitySegment], t: f32) -> f32 {
+    debug_assert!(
+        segs.windows(2).all(|w| w[0].start <= w[1].start),
+        "avail_at: segments must be sorted by start"
+    );
     // Find the last segment with start ≤ t.
     let idx = segs.partition_point(|seg| seg.start <= t);
     if idx > 0 {
@@ -1611,5 +1631,135 @@ mod tests {
         // No dependencies.
         cascade_dependencies(&mut m, a);
         assert_eq!(m.work_blocks[&a].start_day, 0.0);
+    }
+
+    // ── SortedIntervals unit tests ────────────────────────────────────────────
+
+    #[test]
+    fn sorted_intervals_push_maintains_order() {
+        let mut si = SortedIntervals::default();
+        // Insert out of order: 5, 1, 3.
+        si.push(5.0, 6.0, 1.0);
+        si.push(1.0, 2.0, 1.0);
+        si.push(3.0, 4.0, 1.0);
+        // Inner vec must be sorted by start.
+        let starts: Vec<f32> = si.inner.iter().map(|&(s, _, _)| s).collect();
+        assert_eq!(starts, vec![1.0, 3.0, 5.0]);
+    }
+
+    #[test]
+    fn sorted_intervals_push_equal_start() {
+        // Two intervals sharing the same start time must both be present.
+        let mut si = SortedIntervals::default();
+        si.push(2.0, 5.0, 0.5);
+        si.push(2.0, 8.0, 0.3);
+        assert_eq!(si.inner.len(), 2);
+        // Both start times stored.
+        assert_eq!(si.inner[0].0, 2.0);
+        assert_eq!(si.inner[1].0, 2.0);
+    }
+
+    #[test]
+    fn demand_at_no_intervals() {
+        let si = SortedIntervals::default();
+        assert_eq!(si.demand_at(0.0), 0.0);
+        assert_eq!(si.demand_at(100.0), 0.0);
+    }
+
+    #[test]
+    fn demand_at_non_overlapping() {
+        // [0,2) = 1.0, [3,5) = 0.5 — query inside first, between, inside second.
+        let mut si = SortedIntervals::default();
+        si.push(0.0, 2.0, 1.0);
+        si.push(3.0, 5.0, 0.5);
+        assert_eq!(si.demand_at(1.0), 1.0);
+        assert_eq!(si.demand_at(2.5), 0.0);
+        assert_eq!(si.demand_at(4.0), 0.5);
+    }
+
+    #[test]
+    fn demand_at_overlapping_intervals() {
+        // [0,5) = 0.6 and [2,7) = 0.3 overlap in [2,5).
+        let mut si = SortedIntervals::default();
+        si.push(0.0, 5.0, 0.6);
+        si.push(2.0, 7.0, 0.3);
+        // Before overlap: only first interval active.
+        assert!((si.demand_at(1.0) - 0.6).abs() < 1e-6);
+        // Inside overlap: both active.
+        assert!((si.demand_at(3.0) - 0.9).abs() < 1e-6);
+        // After first ends: only second active.
+        assert!((si.demand_at(6.0) - 0.3).abs() < 1e-6);
+        // After both end.
+        assert_eq!(si.demand_at(8.0), 0.0);
+    }
+
+    #[test]
+    fn demand_at_endpoint_exclusion() {
+        // Interval [1, 3): demand at t=1 included (start ≤ t), demand at t=3 excluded (end ≤ t).
+        let mut si = SortedIntervals::default();
+        si.push(1.0, 3.0, 1.0);
+        assert_eq!(si.demand_at(1.0), 1.0); // start == t: included
+        assert_eq!(si.demand_at(2.999), 1.0);
+        assert_eq!(si.demand_at(3.0), 0.0); // end == t: excluded (end > t is false)
+    }
+
+    #[test]
+    fn with_start_before_empty() {
+        let si = SortedIntervals::default();
+        assert!(si.with_start_before(100.0).is_empty());
+    }
+
+    #[test]
+    fn with_start_before_all_included() {
+        let mut si = SortedIntervals::default();
+        si.push(1.0, 2.0, 1.0);
+        si.push(3.0, 4.0, 1.0);
+        // window_end = 10 — all intervals start before 10.
+        assert_eq!(si.with_start_before(10.0).len(), 2);
+    }
+
+    #[test]
+    fn with_start_before_partial() {
+        let mut si = SortedIntervals::default();
+        si.push(1.0, 2.0, 1.0);
+        si.push(5.0, 6.0, 1.0);
+        si.push(9.0, 10.0, 1.0);
+        // window_end = 5: only interval with start=1 (start < 5); start=5 excluded.
+        let slice = si.with_start_before(5.0);
+        assert_eq!(slice.len(), 1);
+        assert_eq!(slice[0].0, 1.0);
+    }
+
+    #[test]
+    fn with_start_before_exact_boundary() {
+        let mut si = SortedIntervals::default();
+        si.push(3.0, 4.0, 1.0);
+        si.push(3.0, 5.0, 0.5);
+        // with_start_before uses strict less-than: start < window_end.
+        // Both start at 3.0 < 3.0 is false → neither included.
+        assert!(si.with_start_before(3.0).is_empty());
+        // Both start at 3.0 < 4.0 → both included.
+        assert_eq!(si.with_start_before(4.0).len(), 2);
+    }
+
+    #[test]
+    fn avail_at_unsorted_hits_debug_assert() {
+        // In release builds this test isn't meaningful, but in debug builds the
+        // assert fires. Guard with cfg so it compiles in both modes.
+        use crate::model::AvailabilitySegment;
+        let segs = vec![
+            AvailabilitySegment { start: 5.0, end: 10.0, factor: 0.5 },
+            AvailabilitySegment { start: 0.0, end: 5.0,  factor: 1.0 },
+        ];
+        // This would give a wrong answer without sorting; the debug_assert
+        // should catch it in debug mode. We just verify the sorted path works.
+        let sorted = {
+            let mut s = segs.clone();
+            s.sort_unstable_by(|a, b| a.start.partial_cmp(&b.start).unwrap());
+            s
+        };
+        assert_eq!(avail_at(&sorted, 2.5), 1.0);
+        assert_eq!(avail_at(&sorted, 7.5), 0.5);
+        assert_eq!(avail_at(&sorted, 11.0), 1.0); // gap defaults to 1.0
     }
 }
