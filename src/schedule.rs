@@ -4,7 +4,7 @@ use bevy::prelude::Resource;
 
 use crate::graph::{CycleError, DependencyGraph};
 use crate::model::{
-    DependencyType, Model, Plan, PlanId, ResourceBlock, ResourceBlockId, WorkBlockId,
+    DependencyType, Model, Plan, PlanId, ResourceBlock, ResourceBlockId, WorkBlock, WorkBlockId,
 };
 
 /// The computed time placement of one work block.
@@ -50,16 +50,16 @@ pub struct CriticalPathAnalysis {
     pub float: HashMap<WorkBlockId, f32>,
 }
 
-/// Returns every scheduled block sorted by ascending `start_day`, with
-/// `work_block_id` as a stable tie-breaker. This is the canonical row
-/// ordering shared by block sprites and row labels.
-pub fn sorted_blocks(schedule: &Schedule) -> Vec<&ScheduledBlock> {
-    let mut blocks: Vec<&ScheduledBlock> = schedule.blocks.values().collect();
+/// Returns every work block sorted by ascending `start_day`, with
+/// `id` as a stable tie-breaker. This is the canonical row ordering
+/// shared by block sprites and row labels.
+pub fn sorted_blocks(model: &Model) -> Vec<&WorkBlock> {
+    let mut blocks: Vec<&WorkBlock> = model.work_blocks.values().collect();
     blocks.sort_by(|a, b| {
         a.start_day
             .partial_cmp(&b.start_day)
             .unwrap_or(std::cmp::Ordering::Equal)
-            .then(a.work_block_id.0.cmp(&b.work_block_id.0))
+            .then(a.id.0.cmp(&b.id.0))
     });
     blocks
 }
