@@ -6,6 +6,7 @@ use bevy::{
 use crate::{
     constants::{PIXELS_PER_DAY, ROW_HEIGHT},
     model::Model,
+    schedule::{self, ViewScope},
 };
 
 /// Egui side panel width — used to offset fit-to-view centering so blocks
@@ -63,6 +64,7 @@ pub fn camera_nav_keys(
     keyboard: Res<ButtonInput<KeyCode>>,
     mut target: ResMut<CameraTarget>,
     model: Res<Model>,
+    scope: Res<ViewScope>,
     windows: Query<&Window>,
 ) {
     if egui_ctx
@@ -77,38 +79,41 @@ pub fn camera_nav_keys(
         target.zoom = 1.0;
     }
     if keyboard.just_pressed(KeyCode::KeyF) {
-        if let Some(new_target) = fit_to_blocks(&model, &windows) {
+        if let Some(new_target) = fit_to_blocks(&model, &scope, &windows) {
             *target = new_target;
         }
     }
 }
 
-/// Computes a `CameraTarget` that fits all placed blocks into the visible
-/// timeline area (excluding the side panel) with a 15% padding margin.
-/// Returns `None` when there are no placed blocks or no window.
-pub fn fit_to_blocks(model: &Model, windows: &Query<&Window>) -> Option<CameraTarget> {
+/// Computes a `CameraTarget` that fits the *visible* blocks (respecting
+/// `scope` drill-in) into the timeline area with a 15% padding margin.
+/// Returns `None` when there are no placed visible blocks or no window.
+pub fn fit_to_blocks(
+    model: &Model,
+    scope: &ViewScope,
+    windows: &Query<&Window>,
+) -> Option<CameraTarget> {
     let Ok(window) = windows.single() else { return None };
     let window_w = window.width();
     let window_h = window.height();
 
-    let placed: Vec<_> = model
-        .work_blocks
-        .values()
+    let visible: Vec<_> = schedule::visible_blocks(model, scope)
+        .into_iter()
         .filter(|wb| wb.duration_days > 0.0)
         .collect();
-    if placed.is_empty() {
+    if visible.is_empty() {
         return None;
     }
 
-    let x_min = placed
+    let x_min = visible
         .iter()
         .map(|wb| wb.start_day * PIXELS_PER_DAY)
         .fold(f32::INFINITY, f32::min);
-    let x_max = placed
+    let x_max = visible
         .iter()
         .map(|wb| (wb.start_day + wb.duration_days) * PIXELS_PER_DAY)
         .fold(f32::NEG_INFINITY, f32::max);
-    let n = placed.len() as f32;
+    let n = visible.len() as f32;
     let y_max = ROW_HEIGHT * 0.5;
     let y_min = -(n - 1.0) * ROW_HEIGHT - ROW_HEIGHT * 0.5;
 
