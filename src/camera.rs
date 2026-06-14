@@ -95,7 +95,7 @@ pub fn fit_to_blocks(
 
     let visible: Vec<_> = schedule::visible_blocks(model, scope)
         .into_iter()
-        .filter(|wb| wb.duration_days > 0.0)
+        .filter(|wb| wb.duration_days > 0)
         .collect();
     if visible.is_empty() {
         return None;
@@ -103,11 +103,11 @@ pub fn fit_to_blocks(
 
     let x_min = visible
         .iter()
-        .map(|wb| wb.start_day * PIXELS_PER_DAY)
+        .map(|wb| wb.start_day as f32 * PIXELS_PER_DAY)
         .fold(f32::INFINITY, f32::min);
     let x_max = visible
         .iter()
-        .map(|wb| (wb.start_day + wb.duration_days) * PIXELS_PER_DAY)
+        .map(|wb| (wb.start_day + wb.duration_days) as f32 * PIXELS_PER_DAY)
         .fold(f32::NEG_INFINITY, f32::max);
     let n = visible.len() as f32;
     let y_max = ROW_HEIGHT * 0.5;
