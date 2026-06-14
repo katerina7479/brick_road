@@ -10,6 +10,7 @@ pub mod camera;
 pub mod constants;
 pub mod db;
 pub mod model;
+pub mod schedule;
 
 use camera::{smooth_camera, update_camera_target, CameraTarget};
 use constants::PIXELS_PER_DAY;
