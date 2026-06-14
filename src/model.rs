@@ -50,6 +50,9 @@ pub struct WorkBlock {
     pub color: Option<[f32; 3]>,
     /// Free-form notes displayed on hover; not shown in the block bar.
     pub description: String,
+    /// User-set priority: 0=Low, 1=Normal (default), 2=High, 3=Critical.
+    /// Conveyed visually as border weight on the block bar.
+    pub priority: u8,
 }
 
 /// One alternative decomposition of a parent WorkBlock into an ordered sequence
@@ -194,6 +197,7 @@ impl Model {
                 duration_days: 0.0,
                 color: None,
                 description: String::new(),
+                priority: 1,
             },
         );
         id

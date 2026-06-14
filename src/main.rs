@@ -88,6 +88,10 @@ fn main() {
         )
         .add_systems(
             Update,
+            blocks::draw_block_borders.after(blocks::sync_block_sprites),
+        )
+        .add_systems(
+            Update,
             blocks::sync_uncertainty_overlays.after(blocks::spawn_block_sprites),
         )
         .add_systems(
@@ -429,6 +433,7 @@ fn side_panel_ui(
             let mut duration_days = wb.duration_days;
             let confidence = wb.estimate.confidence;
             let color = wb.color;
+            let priority = wb.priority;
 
             let (start_day, end_day) = (wb.start_day, wb.start_day + wb.duration_days);
 
@@ -592,6 +597,25 @@ fn side_panel_ui(
             if color_changed {
                 if let Some(wb) = model.work_blocks.get_mut(&sel_id) {
                     wb.color = new_color;
+                }
+                if let Err(e) = db::save_model(&conn, &model) {
+                    error!("save_model failed: {e}");
+                }
+            }
+
+            ui.separator();
+            ui.label("Priority");
+            let mut new_priority = priority;
+            ui.horizontal(|ui| {
+                for (label, val) in [("Low", 0u8), ("Normal", 1), ("High", 2), ("Critical", 3)] {
+                    if ui.radio(priority == val, label).clicked() {
+                        new_priority = val;
+                    }
+                }
+            });
+            if new_priority != priority {
+                if let Some(wb) = model.work_blocks.get_mut(&sel_id) {
+                    wb.priority = new_priority;
                 }
                 if let Err(e) = db::save_model(&conn, &model) {
                     error!("save_model failed: {e}");
