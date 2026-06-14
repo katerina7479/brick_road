@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use bevy::prelude::*;
 
@@ -9,6 +9,70 @@ use crate::{
     model::{Model, WorkBlockId},
     schedule::Schedule,
 };
+
+/// Precomputed nesting depth for every `WorkBlock`.
+///
+/// Depth 0 = top-level block (not a child of any variant).
+/// Depth N = N hops through variant parent relationships from a root.
+/// Recomputed once per model change so per-frame consumers pay O(1) per block.
+#[derive(Debug, Default, Resource)]
+pub struct NestingDepthMap {
+    pub depths: HashMap<WorkBlockId, usize>,
+}
+
+/// Pure depth-map computation, extracted for testability.
+///
+/// BFS from root blocks (those not referenced in any variant's children) at
+/// depth 0, expanding each block's own variant children at depth + 1.
+/// If a block is reachable via multiple paths (diamond), whichever BFS front
+/// reaches it first wins — depth is assigned once and never overwritten.
+pub(crate) fn build_depth_map(model: &Model) -> HashMap<WorkBlockId, usize> {
+    // Collect every block that appears as someone's variant child.
+    let mut is_child: HashSet<WorkBlockId> = HashSet::new();
+    for variant in model.variants.values() {
+        for &child_id in &variant.children {
+            is_child.insert(child_id);
+        }
+    }
+
+    let mut depths: HashMap<WorkBlockId, usize> = HashMap::new();
+    let mut queue: VecDeque<(WorkBlockId, usize)> = VecDeque::new();
+
+    // Seed with roots (not a child of any variant) at depth 0.
+    for &id in model.work_blocks.keys() {
+        if !is_child.contains(&id) {
+            depths.insert(id, 0);
+            queue.push_back((id, 0));
+        }
+    }
+
+    while let Some((id, depth)) = queue.pop_front() {
+        let Some(wb) = model.work_blocks.get(&id) else {
+            continue;
+        };
+        for &variant_id in &wb.variants {
+            let Some(variant) = model.variants.get(&variant_id) else {
+                continue;
+            };
+            for &child_id in &variant.children {
+                if let std::collections::hash_map::Entry::Vacant(e) = depths.entry(child_id) {
+                    e.insert(depth + 1);
+                    queue.push_back((child_id, depth + 1));
+                }
+            }
+        }
+    }
+
+    depths
+}
+
+/// Rebuilds `NestingDepthMap` when the model changes. O(V+E) per rebuild.
+pub fn compute_nesting_depths(model: Res<Model>, mut depth_map: ResMut<NestingDepthMap>) {
+    if !model.is_changed() {
+        return;
+    }
+    depth_map.depths = build_depth_map(&model);
+}
 
 /// Y position of day-number labels above the block rows.
 const DAY_LABEL_Y: f32 = 55.0;
@@ -92,11 +156,19 @@ pub fn spawn_day_labels(
     }
 }
 
+/// Pixels of extra left-indent per nesting level for hierarchy brackets.
+const DEPTH_INDENT_PX: f32 = 6.0;
+
 /// Draws vertical bracket gizmos for each `Variant`'s children, showing
 /// parent/child nesting relationships in the block layout.
+///
+/// Brackets for deeper nesting levels are shifted further left by
+/// `DEPTH_INDENT_PX` per level so nested groups remain visually distinct
+/// even when their child blocks share the same x range.
 pub fn draw_nesting_indicators(
     schedule: Res<Schedule>,
     model: Res<Model>,
+    depth_map: Res<NestingDepthMap>,
     mut gizmos: Gizmos,
     block_q: Query<(&BlockSprite, &Transform)>,
 ) {
@@ -137,7 +209,10 @@ pub fn draw_nesting_indicators(
             continue;
         }
 
-        let bx = left_x - 8.0;
+        // Indent deeper brackets further left so nesting levels are visually distinct.
+        let depth = depth_map.depths.get(&variant.parent).copied().unwrap_or(0);
+        let bx = left_x - 8.0 - depth as f32 * DEPTH_INDENT_PX;
+
         // Vertical bar.
         gizmos.line_2d(Vec2::new(bx, bot_y), Vec2::new(bx, top_y), bracket_color);
         // Horizontal serifs.
@@ -209,5 +284,93 @@ pub fn draw_violation_indicators(
             Vec2::new(succ_x, succ_y),
             violation_color,
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{Estimate, Model};
+
+    fn est() -> Estimate {
+        Estimate { most_likely: 3.0, optimistic: 2.0, pessimistic: 5.0, confidence: 0.8 }
+    }
+
+    #[test]
+    fn empty_model_produces_empty_map() {
+        let model = Model::default();
+        assert!(build_depth_map(&model).is_empty());
+    }
+
+    #[test]
+    fn single_root_block_has_depth_zero() {
+        let mut model = Model::default();
+        let id = model.create_work_block("root", est());
+        let depths = build_depth_map(&model);
+        assert_eq!(depths[&id], 0);
+    }
+
+    #[test]
+    fn child_of_variant_has_depth_one() {
+        let mut model = Model::default();
+        let parent = model.create_work_block("parent", est());
+        let child = model.create_work_block("child", est());
+        let vid = model.create_variant("v", parent);
+        model.work_blocks.get_mut(&parent).unwrap().variants.push(vid);
+        model.variants.get_mut(&vid).unwrap().children.push(child);
+
+        let depths = build_depth_map(&model);
+        assert_eq!(depths[&parent], 0);
+        assert_eq!(depths[&child], 1);
+    }
+
+    #[test]
+    fn three_level_hierarchy() {
+        let mut model = Model::default();
+        let root = model.create_work_block("root", est());
+        let mid = model.create_work_block("mid", est());
+        let leaf = model.create_work_block("leaf", est());
+
+        let v1 = model.create_variant("v1", root);
+        model.work_blocks.get_mut(&root).unwrap().variants.push(v1);
+        model.variants.get_mut(&v1).unwrap().children.push(mid);
+
+        let v2 = model.create_variant("v2", mid);
+        model.work_blocks.get_mut(&mid).unwrap().variants.push(v2);
+        model.variants.get_mut(&v2).unwrap().children.push(leaf);
+
+        let depths = build_depth_map(&model);
+        assert_eq!(depths[&root], 0);
+        assert_eq!(depths[&mid], 1);
+        assert_eq!(depths[&leaf], 2);
+    }
+
+    #[test]
+    fn multiple_roots_all_at_depth_zero() {
+        let mut model = Model::default();
+        let a = model.create_work_block("a", est());
+        let b = model.create_work_block("b", est());
+        let depths = build_depth_map(&model);
+        assert_eq!(depths[&a], 0);
+        assert_eq!(depths[&b], 0);
+    }
+
+    #[test]
+    fn diamond_uses_first_assigned_depth() {
+        let mut model = Model::default();
+        let root = model.create_work_block("root", est());
+        let shared = model.create_work_block("shared", est());
+
+        let v1 = model.create_variant("v1", root);
+        let v2 = model.create_variant("v2", root);
+        model.work_blocks.get_mut(&root).unwrap().variants.push(v1);
+        model.work_blocks.get_mut(&root).unwrap().variants.push(v2);
+        model.variants.get_mut(&v1).unwrap().children.push(shared);
+        model.variants.get_mut(&v2).unwrap().children.push(shared);
+
+        let depths = build_depth_map(&model);
+        assert_eq!(depths[&root], 0);
+        // shared is reachable via v1 and v2 — both paths are depth 1.
+        assert_eq!(depths[&shared], 1);
     }
 }
