@@ -232,8 +232,8 @@ pub fn sync_block_labels(
 /// Converts a left-click to a block selection.
 ///
 /// Clicks that land inside egui areas (e.g. the side panel) are ignored.
-/// Clicking the currently selected block deselects it; clicking empty space
-/// clears the selection.
+/// Clicking the currently selected block deselects it; single-clicking empty
+/// space deselects; double-clicking empty space (within 350 ms) creates a block.
 #[allow(clippy::too_many_arguments)]
 pub fn handle_block_selection(
     mut egui_ctx: EguiContexts,
@@ -245,6 +245,8 @@ pub fn handle_block_selection(
     name_edit: Res<NameEditState>,
     mut model: ResMut<model::Model>,
     conn: NonSend<rusqlite::Connection>,
+    time: Res<Time>,
+    mut last_empty_click: Local<f32>,
 ) {
     // Yield to the inline editor while a rename is in progress.
     if name_edit.editing.is_some() {
@@ -295,29 +297,38 @@ pub fn handle_block_selection(
         // Re-clicking the selected block toggles it off; otherwise select it.
         selected.0 = if Some(id) == selected.0 { None } else { Some(id) };
     } else {
-        // Empty timeline space: create a new WorkBlock at the clicked position.
-        let start_day = (world_pos.x / PIXELS_PER_DAY).max(0.0);
-        // Snap to the nearest 0.5-day grid line.
-        let start_day = (start_day * 2.0).round() / 2.0;
-        let duration_days = 1.0f32;
-        let est = Estimate {
-            most_likely: duration_days,
-            optimistic: duration_days * 0.7,
-            pessimistic: duration_days * 1.5,
-            confidence: 0.8,
-        };
-        let new_id = model.create_work_block("New Block", est);
-        if let Some(wb) = model.work_blocks.get_mut(&new_id) {
-            wb.start_day = start_day;
-            wb.duration_days = duration_days;
+        // Empty space: single click deselects, double-click (≤350 ms) creates a block.
+        let now = time.elapsed_secs();
+        let is_double_click = now - *last_empty_click < 0.35;
+        if is_double_click {
+            // Reset so a subsequent third click doesn't trigger another creation.
+            *last_empty_click = 0.0;
+            let start_day = (world_pos.x / PIXELS_PER_DAY).max(0.0);
+            // Snap to the nearest 0.5-day grid line.
+            let start_day = (start_day * 2.0).round() / 2.0;
+            let duration_days = 1.0f32;
+            let est = Estimate {
+                most_likely: duration_days,
+                optimistic: duration_days * 0.7,
+                pessimistic: duration_days * 1.5,
+                confidence: 0.8,
+            };
+            let new_id = model.create_work_block("New Block", est);
+            if let Some(wb) = model.work_blocks.get_mut(&new_id) {
+                wb.start_day = start_day;
+                wb.duration_days = duration_days;
+            }
+            if let Some(plan) = model.plans.values_mut().next() {
+                plan.root_blocks.push(new_id);
+            }
+            if let Err(e) = db::save_model(&conn, &model) {
+                error!("save_model failed: {e}");
+            }
+            selected.0 = Some(new_id);
+        } else {
+            *last_empty_click = now;
+            selected.0 = None;
         }
-        if let Some(plan) = model.plans.values_mut().next() {
-            plan.root_blocks.push(new_id);
-        }
-        if let Err(e) = db::save_model(&conn, &model) {
-            error!("save_model failed: {e}");
-        }
-        selected.0 = Some(new_id);
     }
 }
 
