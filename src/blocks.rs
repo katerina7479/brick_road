@@ -1567,7 +1567,7 @@ mod tests {
     use crate::model::{Estimate, Model};
 
     fn est() -> Estimate {
-        Estimate { most_likely: 5.0, optimistic: 3.0, pessimistic: 8.0, confidence: 0.8 }
+        Estimate { most_likely: 5, optimistic: 3, pessimistic: 8, confidence: 0.8 }
     }
 
     #[test]

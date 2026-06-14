@@ -1474,7 +1474,7 @@ mod tests {
         model.calendar.start_date = NaiveDate::from_ymd_opt(2025, 1, 6).unwrap();
         // Holiday 200 working days out — far beyond span=5.
         model.calendar.non_working_dates =
-            vec![calendar::day_to_date(200.0, &model.calendar)];
+            vec![calendar::day_to_date(200, &model.calendar)];
         let positions = weekend_band_positions(5, &model);
         assert_eq!(positions.iter().filter(|(_, h)| *h).count(), 0);
     }

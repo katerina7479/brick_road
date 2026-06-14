@@ -975,7 +975,7 @@ mod tests {
         conn
     }
 
-    fn est(ml: f32, opt: f32, pes: f32, conf: f32) -> Estimate {
+    fn est(ml: Day, opt: Day, pes: Day, conf: f32) -> Estimate {
         Estimate {
             most_likely: ml,
             optimistic: opt,
@@ -997,9 +997,9 @@ mod tests {
     fn sparse_model_round_trip() {
         let conn = open_in_memory();
         let mut m = Model::default();
-        m.create_milestone("kickoff", 0.0);
-        m.create_milestone("launch", 120.0);
-        m.create_work_block("prep", est(5.0, 3.0, 10.0, 0.8));
+        m.create_milestone("kickoff", 0);
+        m.create_milestone("launch", 120);
+        m.create_work_block("prep", est(5, 3, 10, 0.8));
 
         save_model(&conn, &m).unwrap();
         let loaded = load_model(&conn).unwrap();
@@ -1028,8 +1028,8 @@ mod tests {
             .availability
             .segments
             .push(AvailabilitySegment {
-                start: 0.0,
-                end: 100.0,
+                start: 0,
+                end: 100,
                 factor: 1.0,
             });
         m.resource_blocks
@@ -1038,17 +1038,17 @@ mod tests {
             .availability
             .segments
             .push(AvailabilitySegment {
-                start: 100.0,
-                end: 200.0,
+                start: 100,
+                end: 200,
                 factor: 0.5,
             });
         let rb2 = m.create_resource_block("Team Alpha", ResourceType::Team);
         m.worlds.get_mut(&world_id).unwrap().resource_ids.push(rb1);
         m.worlds.get_mut(&world_id).unwrap().resource_ids.push(rb2);
 
-        let wb_a = m.create_work_block("Design", est(3.0, 1.0, 7.0, 0.75));
-        let wb_b = m.create_work_block("Implement", est(10.0, 5.0, 20.0, 0.5));
-        let wb_child = m.create_work_block("Sub-task", est(4.0, 2.0, 8.0, 0.75));
+        let wb_a = m.create_work_block("Design", est(3, 1, 7, 0.75));
+        let wb_b = m.create_work_block("Implement", est(10, 5, 20, 0.5));
+        let wb_child = m.create_work_block("Sub-task", est(4, 2, 8, 0.75));
 
         let v1 = m.create_variant("fast", wb_b);
         let v2 = m.create_variant("thorough", wb_b);
@@ -1057,9 +1057,9 @@ mod tests {
         m.variants.get_mut(&v1).unwrap().children.push(wb_child);
 
         let dep_id = m.create_dependency(wb_a, wb_b, DependencyType::FinishToStart);
-        m.dependencies.get_mut(&dep_id).unwrap().lag = 1.5;
+        m.dependencies.get_mut(&dep_id).unwrap().lag = 1;
 
-        m.create_milestone("launch", 90.0);
+        m.create_milestone("launch", 90);
 
         let plan_id = m.create_plan("alpha", world_id);
         m.plans.get_mut(&plan_id).unwrap().root_blocks.push(wb_a);
@@ -1122,17 +1122,17 @@ mod tests {
         // persistence path for user-defined placement values.
         let conn = open_in_memory();
         let mut m = Model::default();
-        let id = m.create_work_block("task", est(5.0, 3.0, 8.0, 0.9));
+        let id = m.create_work_block("task", est(5, 3, 8, 0.9));
         let wb = m.work_blocks.get_mut(&id).unwrap();
-        wb.start_day = 7.5;
-        wb.duration_days = 3.0;
+        wb.start_day = 7;
+        wb.duration_days = 3;
 
         save_model(&conn, &m).unwrap();
         let loaded = load_model(&conn).unwrap();
 
         let loaded_wb = loaded.work_blocks.get(&id).unwrap();
-        assert_eq!(loaded_wb.start_day, 7.5);
-        assert_eq!(loaded_wb.duration_days, 3.0);
+        assert_eq!(loaded_wb.start_day, 7);
+        assert_eq!(loaded_wb.duration_days, 3);
         assert_eq!(m.work_blocks, loaded.work_blocks);
     }
 
@@ -1140,17 +1140,17 @@ mod tests {
     fn nonzero_start_day_and_duration_round_trip() {
         let conn = open_in_memory();
         let mut m = Model::default();
-        let id = m.create_work_block("placed task", est(4.0, 2.0, 8.0, 0.8));
+        let id = m.create_work_block("placed task", est(4, 2, 8, 0.8));
         let wb = m.work_blocks.get_mut(&id).unwrap();
-        wb.start_day = 3.5;
-        wb.duration_days = 7.0;
+        wb.start_day = 3;
+        wb.duration_days = 7;
 
         save_model(&conn, &m).unwrap();
         let loaded = load_model(&conn).unwrap();
 
         let loaded_wb = loaded.work_blocks.get(&id).unwrap();
-        assert_eq!(loaded_wb.start_day, 3.5);
-        assert_eq!(loaded_wb.duration_days, 7.0);
+        assert_eq!(loaded_wb.start_day, 3);
+        assert_eq!(loaded_wb.duration_days, 7);
     }
 
     #[test]
@@ -1163,13 +1163,14 @@ mod tests {
         conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
 
         // Old schema: work_blocks without placement columns.
+        // Estimate columns are INTEGER to match the br-146 schema expectation.
         conn.execute_batch(
             "CREATE TABLE work_blocks (
                 id                   INTEGER PRIMARY KEY,
                 name                 TEXT NOT NULL,
-                estimate_most_likely REAL NOT NULL,
-                estimate_optimistic  REAL NOT NULL,
-                estimate_pessimistic REAL NOT NULL,
+                estimate_most_likely INTEGER NOT NULL,
+                estimate_optimistic  INTEGER NOT NULL,
+                estimate_pessimistic INTEGER NOT NULL,
                 estimate_confidence  REAL NOT NULL
             );",
         )
@@ -1180,7 +1181,7 @@ mod tests {
             "INSERT INTO work_blocks
                  (id, name, estimate_most_likely, estimate_optimistic,
                   estimate_pessimistic, estimate_confidence)
-             VALUES (1, 'legacy task', 5.0, 3.5, 8.0, 0.8)",
+             VALUES (1, 'legacy task', 5, 4, 8, 0.8)",
             [],
         )
         .unwrap();
@@ -1193,8 +1194,8 @@ mod tests {
         let wb_id = WorkBlockId(1);
         let wb = model.work_blocks.get(&wb_id).expect("legacy block loaded");
         assert_eq!(wb.name, "legacy task");
-        assert_eq!(wb.start_day, 0.0, "start_day should default to 0.0");
-        assert_eq!(wb.duration_days, 0.0, "duration_days should default to 0.0");
+        assert_eq!(wb.start_day, 0, "start_day should default to 0");
+        assert_eq!(wb.duration_days, 0, "duration_days should default to 0");
     }
 
     #[test]
@@ -1203,8 +1204,8 @@ mod tests {
         let w = m.create_world("w");
         let rb = m.create_resource_block("Alice", ResourceType::Person);
         m.worlds.get_mut(&w).unwrap().resource_ids.push(rb);
-        let wb_a = m.create_work_block("a", est(1.0, 0.5, 2.0, 1.0));
-        let wb_b = m.create_work_block("b", est(1.0, 0.5, 2.0, 1.0));
+        let wb_a = m.create_work_block("a", est(1, 1, 2, 1.0));
+        let wb_b = m.create_work_block("b", est(1, 1, 2, 1.0));
         let v = m.create_variant("v", wb_a);
         m.work_blocks.get_mut(&wb_a).unwrap().variants.push(v);
         let _dep = m.create_dependency(wb_a, wb_b, DependencyType::FinishToStart);
@@ -1230,7 +1231,7 @@ mod tests {
     #[test]
     fn validate_catches_orphan_variant_parent() {
         let mut m = Model::default();
-        let wb_id = m.create_work_block("wb", est(1.0, 0.5, 2.0, 1.0));
+        let wb_id = m.create_work_block("wb", est(1, 1, 2, 1.0));
         let v_id = m.create_variant("v", wb_id);
         m.work_blocks.get_mut(&wb_id).unwrap().variants.push(v_id);
         m.variants.insert(
@@ -1275,8 +1276,8 @@ mod tests {
     fn validate_catches_mismatched_variant_selection() {
         let mut m = Model::default();
         let world_id = m.create_world("w");
-        let wb_a = m.create_work_block("a", est(1.0, 0.5, 2.0, 1.0));
-        let wb_b = m.create_work_block("b", est(1.0, 0.5, 2.0, 1.0));
+        let wb_a = m.create_work_block("a", est(1, 1, 2, 1.0));
+        let wb_b = m.create_work_block("b", est(1, 1, 2, 1.0));
         let v = m.create_variant("v", wb_a);
         m.work_blocks.get_mut(&wb_a).unwrap().variants.push(v);
         let plan_id = m.create_plan("p", world_id);
@@ -1301,7 +1302,7 @@ mod tests {
         // Save with block A, then remove it, save again, and verify it is gone.
         let conn = open_in_memory();
         let mut m = Model::default();
-        let wb_id = m.create_work_block("to-be-removed", est(3.0, 2.0, 5.0, 0.9));
+        let wb_id = m.create_work_block("to-be-removed", est(3, 2, 5, 0.9));
 
         save_model(&conn, &m).unwrap();
         // Confirm it is present after the first save.
@@ -1325,7 +1326,7 @@ mod tests {
         // reflects the new field values on the second load.
         let conn = open_in_memory();
         let mut m = Model::default();
-        let wb_id = m.create_work_block("original", est(5.0, 3.0, 8.0, 0.8));
+        let wb_id = m.create_work_block("original", est(5, 3, 8, 0.8));
 
         save_model(&conn, &m).unwrap();
 
@@ -1345,8 +1346,8 @@ mod tests {
         // `DELETE FROM <table> WHERE id NOT IN (…)`.
         let conn = open_in_memory();
         let mut m = Model::default();
-        m.create_work_block("block-a", est(2.0, 1.0, 4.0, 1.0));
-        m.create_work_block("block-b", est(3.0, 2.0, 5.0, 0.9));
+        m.create_work_block("block-a", est(2, 1, 4, 1.0));
+        m.create_work_block("block-b", est(3, 2, 5, 0.9));
 
         save_model(&conn, &m).unwrap();
         assert_eq!(load_model(&conn).unwrap().work_blocks.len(), 2);
@@ -1370,10 +1371,10 @@ mod tests {
         let world_id = m.create_world("w");
         let rb_id = m.create_resource_block("Alice", ResourceType::Person);
         m.worlds.get_mut(&world_id).unwrap().resource_ids.push(rb_id);
-        let wb_a = m.create_work_block("A", est(2.0, 1.0, 3.0, 1.0));
-        let wb_b = m.create_work_block("B", est(3.0, 2.0, 5.0, 0.9));
+        let wb_a = m.create_work_block("A", est(2, 1, 3, 1.0));
+        let wb_b = m.create_work_block("B", est(3, 2, 5, 0.9));
         let dep = m.create_dependency(wb_a, wb_b, DependencyType::FinishToStart);
-        let ms_id = m.create_milestone("launch", 10.0);
+        let ms_id = m.create_milestone("launch", 10);
 
         save_model(&conn, &m).unwrap();
 
