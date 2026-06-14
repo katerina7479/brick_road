@@ -35,6 +35,7 @@ fn main() {
         .insert_resource(blocks::DragState::default())
         .insert_resource(blocks::ResizeDragState::default())
         .insert_resource(blocks::DepDragState::default())
+        .insert_resource(blocks::DeleteConfirmState::default())
         .insert_resource(schedule::ViewScope::default())
         .insert_resource(analysis::ScheduleAnalysis::default())
         .add_systems(Startup, (setup_db, setup_camera))
@@ -49,6 +50,10 @@ fn main() {
         .add_systems(Update, draw_grid)
         .add_systems(Update, update_analysis)
         .add_systems(Update, blocks::handle_name_edit)
+        .add_systems(
+            Update,
+            blocks::handle_block_delete.after(blocks::handle_name_edit),
+        )
         .add_systems(
             Update,
             blocks::handle_block_selection.after(blocks::handle_name_edit),
@@ -99,6 +104,7 @@ fn main() {
         .add_systems(EguiPrimaryContextPass, camera_nav_ui)
         .add_systems(EguiPrimaryContextPass, logo_ui)
         .add_systems(EguiPrimaryContextPass, blocks::draw_name_edit_overlay)
+        .add_systems(EguiPrimaryContextPass, blocks::draw_delete_confirm_overlay)
         .run();
 }
 
