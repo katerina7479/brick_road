@@ -383,6 +383,12 @@ fn earliest_feasible_start(
 }
 
 /// Returns true if [t, t+duration) is feasible for all demanded resources.
+///
+/// Divides the window into sub-intervals at every point where either the
+/// availability factor or the committed demand changes, then checks whether
+/// `existing_demand + new_demand ≤ availability` at each sub-interval.
+/// This avoids the conservative over-rejection that occurs when peak demand
+/// and minimum availability don't coincide at the same time point.
 fn feasible_at(
     t: f32,
     duration: f32,
@@ -392,62 +398,61 @@ fn feasible_at(
 ) -> bool {
     let window_end = t + duration;
     for &(rb_id, demand) in demands {
-        let avail = resource_blocks
-            .get(&rb_id)
-            .map(|rb| min_avail_in_window(rb, t, window_end))
-            .unwrap_or(1.0);
-        let used = max_demand_in_window(
-            committed.get(&rb_id).map(|v| v.as_slice()).unwrap_or(&[]),
-            t,
-            window_end,
-        );
-        if used + demand > avail + 1e-6 {
-            return false;
+        // Collect every time point where availability or committed demand changes
+        // within the window. Using these as sub-interval boundaries ensures both
+        // functions are piecewise-constant within each sub-interval.
+        let mut pts: Vec<f32> = vec![t, window_end];
+        if let Some(ivs) = committed.get(&rb_id) {
+            for &(is, ie, _) in ivs {
+                if is > t && is < window_end { pts.push(is); }
+                if ie > t && ie < window_end { pts.push(ie); }
+            }
+        }
+        if let Some(rb) = resource_blocks.get(&rb_id) {
+            for seg in &rb.availability.segments {
+                if seg.start > t && seg.start < window_end { pts.push(seg.start); }
+                if seg.end > t && seg.end < window_end { pts.push(seg.end); }
+            }
+        }
+        pts.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        pts.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
+
+        for w in pts.windows(2) {
+            let mid = (w[0] + w[1]) * 0.5;
+            let avail = resource_blocks
+                .get(&rb_id)
+                .map(|rb| avail_at(rb, mid))
+                .unwrap_or(1.0);
+            let used = demand_at(
+                committed.get(&rb_id).map(|v| v.as_slice()).unwrap_or(&[]),
+                mid,
+            );
+            if used + demand > avail + 1e-6 {
+                return false;
+            }
         }
     }
     true
 }
 
-/// Minimum resource availability factor over [start, end).
+/// Availability factor for resource `rb` at instant `t`.
 /// Gaps in the availability timeline are treated as factor 1.0.
-fn min_avail_in_window(rb: &ResourceBlock, start: f32, end: f32) -> f32 {
-    if rb.availability.segments.is_empty() {
-        return 1.0;
-    }
-    let mut min = 1.0_f32;
+fn avail_at(rb: &ResourceBlock, t: f32) -> f32 {
     for seg in &rb.availability.segments {
-        if seg.start < end && seg.end > start {
-            min = f32::min(min, seg.factor);
+        if seg.start <= t && t < seg.end {
+            return seg.factor;
         }
     }
-    min
+    1.0
 }
 
-/// Maximum simultaneous demand from committed intervals over [start, end).
-/// Uses a sweep-line to handle overlapping intervals correctly.
-fn max_demand_in_window(intervals: &[(f32, f32, f32)], start: f32, end: f32) -> f32 {
-    let mut events: Vec<(f32, f32)> = Vec::new();
-    for &(is, ie, demand) in intervals {
-        if is >= end || ie <= start {
-            continue;
-        }
-        events.push((f32::max(is, start), demand));
-        events.push((f32::min(ie, end), -demand));
-    }
-    if events.is_empty() {
-        return 0.0;
-    }
-    events.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
-
-    let mut current = 0.0_f32;
-    let mut peak = 0.0_f32;
-    for (_, delta) in events {
-        current += delta;
-        if current > peak {
-            peak = current;
-        }
-    }
-    peak
+/// Total committed demand at instant `t`.
+fn demand_at(intervals: &[(f32, f32, f32)], t: f32) -> f32 {
+    intervals
+        .iter()
+        .filter(|&&(is, ie, _)| is <= t && t < ie)
+        .map(|&(_, _, d)| d)
+        .sum()
 }
 
 #[cfg(test)]
@@ -783,6 +788,41 @@ mod tests {
         let s = run_leveled(&m, pid, vec![a, b, c]);
         assert_eq!(s.blocks[&a].start_day, 0.0);
         // c schedules before b (lower id); c at [0,3); b dep=3, R free at 3 → b at 3.
+        assert_eq!(s.blocks[&b].start_day, 3.0);
+    }
+
+    #[test]
+    fn per_point_check_avoids_conservative_delay() {
+        // Resource R: low availability [0,5) at factor 0.3, full capacity [5,100).
+        // C uses R at 0.8 — committed to [5,8) because R is below 0.8 before day 5.
+        // B needs R at 0.2, dep constraint forces start ≥ 3, duration = 5 → window [3,8).
+        //
+        // Conservative check (old): min_avail=0.3, max_demand=0.8 → 1.0 > 0.3 → rejects day 3.
+        // Per-point sweep (new):
+        //   [3,5): avail=0.3, used=0.0 → 0.2 ≤ 0.3 ✓
+        //   [5,8): avail=1.0, used=0.8 → 1.0 ≤ 1.0 ✓
+        //   → accepts day 3.
+        let (mut m, pid) = base();
+        let r = m.create_resource_block("R", ResourceType::Person);
+        {
+            let rb = m.resource_blocks.get_mut(&r).unwrap();
+            rb.availability.segments.push(AvailabilitySegment { start: 0.0, end: 5.0, factor: 0.3 });
+            rb.availability.segments.push(AvailabilitySegment { start: 5.0, end: 100.0, factor: 1.0 });
+        }
+        let a = m.create_work_block("A", est(3.0)); // no resource; creates dep constraint for B
+        let c = m.create_work_block("C", est(3.0)); // uses R at 0.8 → scheduled [5,8)
+        let b = m.create_work_block("B", est(5.0)); // needs R at 0.2; dep B.start ≥ 3
+        m.create_dependency(a, b, DependencyType::FinishToStart);
+        {
+            let plan = m.plans.get_mut(&pid).unwrap();
+            add_alloc(plan, r, c, 0.8);
+            add_alloc(plan, r, b, 0.2);
+        }
+        // Topo order by id: a, c, b.
+        // a: no resource → [0,3).
+        // c: R avail=0.3 in [0,5) < 0.8 → must wait until day 5 → [5,8).
+        // b: dep_start=3, R committed [(5,8,0.8)]; per-point sweep accepts [3,8) → starts at 3.
+        let s = run_leveled(&m, pid, vec![a, c, b]);
         assert_eq!(s.blocks[&b].start_day, 3.0);
     }
 
