@@ -96,11 +96,22 @@ pub fn save_model(conn: &Connection, model: &Model) -> Result<()> {
         )?;
     }
 
+    // Build variant → sort_order from each WorkBlock's ordered variants vec.
+    let mut variant_sort_order: std::collections::HashMap<u64, i64> =
+        std::collections::HashMap::new();
+    for wb in model.work_blocks.values() {
+        for (order, &var_id) in wb.variants.iter().enumerate() {
+            variant_sort_order.insert(var_id.0, order as i64);
+        }
+    }
+
     // variants + variant_children
     for v in model.variants.values() {
+        let order = variant_sort_order.get(&v.id.0).copied().unwrap_or(0);
         tx.execute(
-            "INSERT INTO variants (id, name, parent_work_block_id) VALUES (?1, ?2, ?3)",
-            (v.id.0, &v.name, v.parent.0),
+            "INSERT INTO variants (id, name, parent_work_block_id, sort_order)
+             VALUES (?1, ?2, ?3, ?4)",
+            (v.id.0, &v.name, v.parent.0, order),
         )?;
         for (order, &child_id) in v.children.iter().enumerate() {
             tx.execute(
@@ -306,10 +317,12 @@ pub fn load_model(conn: &Connection) -> Result<Model> {
         }
     }
 
-    // variants  (children populated below)
+    // variants — ORDER BY preserves wb.variants ordering; children populated below
     {
         let mut stmt = conn.prepare(
-            "SELECT id, name, parent_work_block_id FROM variants",
+            "SELECT id, name, parent_work_block_id
+             FROM variants
+             ORDER BY parent_work_block_id, sort_order",
         )?;
         let rows = stmt.query_map([], |row| {
             Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)?))
@@ -317,15 +330,15 @@ pub fn load_model(conn: &Connection) -> Result<Model> {
         for row in rows {
             let (id, name, parent_id) = row?;
             bump!(id);
+            let var_id = VariantId(id as u64);
+            let parent = WorkBlockId(parent_id as u64);
             model.variants.insert(
-                VariantId(id as u64),
-                Variant {
-                    id: VariantId(id as u64),
-                    name,
-                    parent: WorkBlockId(parent_id as u64),
-                    children: vec![],
-                },
+                var_id,
+                Variant { id: var_id, name, parent, children: vec![] },
             );
+            if let Some(wb) = model.work_blocks.get_mut(&parent) {
+                wb.variants.push(var_id);
+            }
         }
     }
 
@@ -344,18 +357,6 @@ pub fn load_model(conn: &Connection) -> Result<Model> {
             if let Some(v) = model.variants.get_mut(&VariantId(var_id as u64)) {
                 v.children.push(WorkBlockId(child_id as u64));
             }
-        }
-    }
-
-    // Rebuild work_block.variants from each variant's parent field.
-    let parent_links: Vec<(WorkBlockId, VariantId)> = model
-        .variants
-        .values()
-        .map(|v| (v.parent, v.id))
-        .collect();
-    for (wb_id, var_id) in parent_links {
-        if let Some(wb) = model.work_blocks.get_mut(&wb_id) {
-            wb.variants.push(var_id);
         }
     }
 
@@ -571,7 +572,9 @@ CREATE TABLE IF NOT EXISTS work_blocks (
 CREATE TABLE IF NOT EXISTS variants (
     id                   INTEGER PRIMARY KEY,
     name                 TEXT    NOT NULL,
-    parent_work_block_id INTEGER NOT NULL REFERENCES work_blocks(id)
+    parent_work_block_id INTEGER NOT NULL REFERENCES work_blocks(id),
+    sort_order           INTEGER NOT NULL,
+    UNIQUE (parent_work_block_id, sort_order)
 );
 
 CREATE TABLE IF NOT EXISTS variant_children (
