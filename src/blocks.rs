@@ -1,7 +1,7 @@
 use bevy::prelude::*;
 use bevy_egui::EguiContexts;
 
-use crate::{constants::{PIXELS_PER_DAY, ROW_HEIGHT}, model::WorkBlockId, schedule::Schedule};
+use crate::{constants::{PIXELS_PER_DAY, ROW_HEIGHT}, model::WorkBlockId, schedule::{self, Schedule}};
 
 const BLOCK_HEIGHT: f32 = 28.0;
 
@@ -14,6 +14,9 @@ const PALETTE: &[LinearRgba] = &[
     LinearRgba::new(2.5, 1.8, 0.1, 1.0), // yellow
     LinearRgba::new(0.5, 0.5, 3.0, 1.0), // blue
 ];
+
+/// HDR gold applied to every block on the critical path.
+const CRITICAL_PATH_COLOR: LinearRgba = LinearRgba::new(3.0, 2.5, 0.0, 1.0);
 
 /// Tracks the currently selected work block (if any).
 #[derive(Resource, Default)]
@@ -39,13 +42,7 @@ pub fn spawn_block_sprites(
         commands.entity(entity).despawn();
     }
 
-    let mut ordered: Vec<_> = schedule.blocks.values().collect();
-    ordered.sort_by(|a, b| {
-        a.start_day
-            .partial_cmp(&b.start_day)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then(a.work_block_id.0.cmp(&b.work_block_id.0))
-    });
+    let ordered = schedule::sorted_blocks(&schedule);
 
     let on_critical_path: std::collections::HashSet<WorkBlockId> =
         schedule.critical_path.iter().copied().collect();
@@ -76,7 +73,11 @@ pub fn spawn_block_sprites(
 }
 
 /// Recomputes `Transform`, `Sprite::custom_size`, and color every frame.
-/// Selected blocks are drawn at 2× palette intensity for a bright HDR bloom.
+///
+/// Color priority (highest wins):
+///   1. Critical-path gold — block is on `schedule.critical_path`
+///   2. Selection 2× — block is the currently selected block
+///   3. Palette default
 pub fn sync_block_sprites(
     schedule: Res<Schedule>,
     selected: Res<SelectedBlock>,
@@ -94,7 +95,10 @@ pub fn sync_block_sprites(
         sprite.custom_size = Some(Vec2::new(width, BLOCK_HEIGHT));
 
         let base = PALETTE[block_sprite.row % PALETTE.len()];
-        sprite.color = if selected.0 == Some(block_sprite.work_block_id) {
+        let id = block_sprite.work_block_id;
+        sprite.color = if schedule.critical_path.contains(&id) {
+            Color::from(CRITICAL_PATH_COLOR)
+        } else if selected.0 == Some(id) {
             Color::from(LinearRgba::new(
                 base.red * 2.0,
                 base.green * 2.0,
