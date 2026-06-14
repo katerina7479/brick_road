@@ -6,6 +6,10 @@ use bevy::{
 };
 use bevy_egui::{egui, EguiContexts, EguiPlugin, EguiPrimaryContextPass};
 
+pub mod camera;
+
+use camera::{smooth_camera, update_camera_target, CameraTarget};
+
 fn main() {
     App::new()
         .add_plugins(DefaultPlugins.set(WindowPlugin {
@@ -18,7 +22,9 @@ fn main() {
         }))
         .add_plugins(EguiPlugin::default())
         .insert_resource(ClearColor(Color::srgb(0.02, 0.02, 0.05)))
+        .insert_resource(CameraTarget::default())
         .add_systems(Startup, setup_camera)
+        .add_systems(Update, (update_camera_target, smooth_camera).chain())
         .add_systems(EguiPrimaryContextPass, side_panel_ui)
         .run();
 }
