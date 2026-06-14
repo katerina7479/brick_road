@@ -154,6 +154,22 @@ pub fn draw_nesting_indicators(
     }
 }
 
+/// Keeps all `DayLabel` and `RowLabel` `Text2d` entities at a constant
+/// screen-space size by counter-scaling their `Transform` by the current
+/// orthographic zoom each frame.
+#[allow(clippy::type_complexity)]
+pub fn scale_labels_to_zoom(
+    cam_q: Query<&Projection, With<Camera2d>>,
+    mut label_q: Query<&mut Transform, Or<(With<DayLabel>, With<RowLabel>)>>,
+) {
+    let Ok(proj) = cam_q.single() else { return };
+    let Projection::Orthographic(ortho) = proj else { return };
+    let s = ortho.scale;
+    for mut transform in &mut label_q {
+        transform.scale = Vec3::splat(s);
+    }
+}
+
 /// Returns how many variant layers deep this block is nested (0 = root-level).
 fn nesting_depth(model: &Model, id: WorkBlockId) -> usize {
     for variant in model.variants.values() {
