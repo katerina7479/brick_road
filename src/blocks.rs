@@ -751,8 +751,8 @@ pub fn handle_name_edit(
                     name_edit.last_click = None;
                     if let Some(wb) = model.work_blocks.get(&id) {
                         if !wb.variants.is_empty() {
-                            // Drill into this block's children.
-                            scope.focused_block = Some(id);
+                            // Push onto the stack to drill into this block's children.
+                            scope.scope_stack.push(id);
                         } else {
                             // Rename the block inline.
                             name_edit.editing = Some(id);

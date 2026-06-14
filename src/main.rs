@@ -212,15 +212,39 @@ fn side_panel_ui(
         .min_width(220.0)
         .show(ctx, |ui| {
             ui.heading("brick_road");
-            // Breadcrumb: show back button when drilled into a child view.
-            if let Some(focused_id) = scope.focused_block {
-                let name = model
-                    .work_blocks
-                    .get(&focused_id)
-                    .map(|wb| wb.name.clone())
-                    .unwrap_or_else(|| "?".to_string());
-                if ui.button(format!("← {name}")).clicked() {
-                    scope.focused_block = None;
+            // Breadcrumb: show full navigation path when drilled in.
+            // Clicking an ancestor segment truncates the stack back to that level.
+            if !scope.scope_stack.is_empty() {
+                let stack_len = scope.scope_stack.len();
+                let names: Vec<String> = scope
+                    .scope_stack
+                    .iter()
+                    .map(|&id| {
+                        model
+                            .work_blocks
+                            .get(&id)
+                            .map(|wb| wb.name.clone())
+                            .unwrap_or_else(|| "?".to_string())
+                    })
+                    .collect();
+                let mut truncate_to: Option<usize> = None;
+                ui.horizontal(|ui| {
+                    if ui.small_button("Root").clicked() {
+                        truncate_to = Some(0);
+                    }
+                    for (i, name) in names.iter().enumerate() {
+                        ui.label("›");
+                        if i + 1 < stack_len {
+                            if ui.small_button(name.as_str()).clicked() {
+                                truncate_to = Some(i + 1);
+                            }
+                        } else {
+                            ui.label(name.as_str());
+                        }
+                    }
+                });
+                if let Some(depth) = truncate_to {
+                    scope.scope_stack.truncate(depth);
                 }
             }
             ui.separator();
