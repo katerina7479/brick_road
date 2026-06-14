@@ -3,16 +3,25 @@ use std::collections::HashMap;
 use bevy::prelude::*;
 use bevy_egui::{egui, EguiContexts};
 
+use bevy::sprite::Anchor;
+
 use crate::{
     analysis::ScheduleAnalysis,
     constants::{PIXELS_PER_DAY, ROW_HEIGHT},
     db,
-    labels,
     model::{self, DependencyId, DependencyType, Estimate, WorkBlockId},
     schedule::{self, ViewScope},
 };
 
 const BLOCK_HEIGHT: f32 = 28.0;
+/// Minimum logical block width (px) below which the inline name label is hidden.
+const MIN_LABEL_WIDTH: f32 = 20.0;
+/// Approximate pixel width per character at font_size 11 (used for truncation).
+const LABEL_CHAR_WIDTH: f32 = 7.0;
+
+/// Marker for the inline name label rendered inside a block bar.
+#[derive(Component)]
+pub struct BlockLabel;
 
 /// HDR linear palette — one or more channels > 1.0 so the Bloom post-process fires.
 const PALETTE: &[LinearRgba] = &[
@@ -83,7 +92,7 @@ pub fn spawn_block_sprites(
             Color::from(PALETTE[row % PALETTE.len()])
         };
 
-        commands.spawn((
+        let mut block_cmd = commands.spawn((
             BlockSprite {
                 work_block_id: wb.id,
                 row,
@@ -95,6 +104,29 @@ pub fn spawn_block_sprites(
             },
             Transform::from_xyz(x, y, 0.0),
         ));
+
+        // Inline name label — only when the bar is wide enough to be readable.
+        if width >= MIN_LABEL_WIDTH {
+            let available_chars = ((width - 4.0) / LABEL_CHAR_WIDTH) as usize;
+            let display = if wb.name.chars().count() > available_chars && available_chars > 0 {
+                let truncated: String =
+                    wb.name.chars().take(available_chars.saturating_sub(1)).collect();
+                format!("{truncated}…")
+            } else {
+                wb.name.clone()
+            };
+            block_cmd.with_children(|parent| {
+                parent.spawn((
+                    BlockLabel,
+                    Text2d::new(display),
+                    TextFont { font_size: 11.0, ..default() },
+                    TextColor(Color::srgba(1.0, 1.0, 1.0, 0.9)),
+                    Anchor::CENTER_LEFT,
+                    // Position from the parent center: 2px padding from the left edge.
+                    Transform::from_xyz(-(width * 0.5) + 2.0, 0.0, 0.1),
+                ));
+            });
+        }
     }
 }
 
@@ -676,12 +708,11 @@ pub fn handle_dep_drag(
     }
 }
 
-/// Detects double-click on a block sprite or single-click on a row label and
-/// enters inline name-edit mode by populating `NameEditState`.
+/// Detects double-click on a block sprite and enters inline name-edit mode
+/// by populating `NameEditState`.
 ///
 /// Must run before `handle_block_selection` so the guard there sees the updated
 /// `editing` flag on the same frame the double-click fires.
-#[allow(clippy::too_many_arguments)]
 pub fn handle_name_edit(
     mut egui_ctx: EguiContexts,
     windows: Query<&Window>,
@@ -692,7 +723,6 @@ pub fn handle_name_edit(
     mut name_edit: ResMut<NameEditState>,
     mut scope: ResMut<ViewScope>,
     block_query: Query<(&BlockSprite, &Transform, &Sprite)>,
-    label_query: Query<(&labels::RowLabel, &Transform)>,
 ) {
     if name_edit.editing.is_some() {
         return;
@@ -714,24 +744,6 @@ pub fn handle_name_edit(
     };
 
     let now = time.elapsed_secs();
-
-    // Single-click on a row label → enter edit mode immediately.
-    for (row_label, transform) in &label_query {
-        let center = transform.translation.truncate();
-        if world_pos.x >= center.x - 60.0
-            && world_pos.x <= center.x + 60.0
-            && world_pos.y >= center.y - 7.0
-            && world_pos.y <= center.y + 7.0
-        {
-            let id = row_label.work_block_id;
-            if let Some(wb) = model.work_blocks.get(&id) {
-                name_edit.editing = Some(id);
-                name_edit.text_buf = wb.name.clone();
-                name_edit.last_click = None;
-            }
-            return;
-        }
-    }
 
     // Double-click on a block sprite.
     // If the block has variants → drill into its children.
@@ -770,10 +782,11 @@ pub fn handle_name_edit(
     name_edit.last_click = None;
 }
 
-/// Renders an egui `TextEdit` overlay at the row label's screen position while
-/// `NameEditState::editing` is `Some`. Commits on Enter or focus-loss; cancels
-/// on Escape. Persists the new name to the model and DB on commit.
-#[allow(clippy::too_many_arguments)]
+/// Renders an egui `TextEdit` overlay anchored to the editing block's screen
+/// position while `NameEditState::editing` is `Some`. Commits on Enter or
+/// focus-loss; cancels on Escape. On commit, persists to model + DB; the model
+/// change triggers `spawn_block_sprites` which re-creates the `BlockLabel` with
+/// the updated name automatically.
 pub fn draw_name_edit_overlay(
     mut contexts: EguiContexts,
     mut name_edit: ResMut<NameEditState>,
@@ -781,7 +794,7 @@ pub fn draw_name_edit_overlay(
     conn: NonSend<rusqlite::Connection>,
     windows: Query<&Window>,
     camera: Query<(&Camera, &GlobalTransform)>,
-    mut label_query: Query<(&labels::RowLabel, &Transform, &mut Text2d)>,
+    block_query: Query<(&BlockSprite, &Transform)>,
     keys: Res<ButtonInput<KeyCode>>,
 ) {
     let Some(edit_id) = name_edit.editing else { return };
@@ -789,10 +802,10 @@ pub fn draw_name_edit_overlay(
     let Ok(_window) = windows.single() else { return };
     let Ok((camera, camera_transform)) = camera.single() else { return };
 
-    // Locate the label's screen position (logical pixels) to anchor the overlay.
+    // Locate the block sprite's screen position to anchor the overlay.
     let mut screen_pos = egui::pos2(50.0, 200.0);
-    for (rl, transform, _) in &label_query {
-        if rl.work_block_id == edit_id {
+    for (bs, transform) in &block_query {
+        if bs.work_block_id == edit_id {
             if let Ok(vp) = camera.world_to_viewport(camera_transform, transform.translation) {
                 screen_pos = egui::pos2(vp.x, vp.y - 10.0);
             }
@@ -827,13 +840,7 @@ pub fn draw_name_edit_overlay(
         let new_name = name_edit.text_buf.trim().to_string();
         if !new_name.is_empty() {
             if let Some(wb) = model.work_blocks.get_mut(&edit_id) {
-                wb.name = new_name.clone();
-            }
-            for (rl, _, mut text) in &mut label_query {
-                if rl.work_block_id == edit_id {
-                    *text = Text2d::new(new_name.clone());
-                    break;
-                }
+                wb.name = new_name;
             }
             if let Err(e) = db::save_model(&conn, &model) {
                 error!("save_model failed: {e}");
