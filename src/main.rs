@@ -141,9 +141,9 @@ fn side_panel_ui(
             };
 
             // Compute row index using the canonical sort order shared with block sprites.
-            let row = schedule::sorted_blocks(&schedule)
+            let row = schedule::sorted_blocks(&model)
                 .iter()
-                .position(|b| b.work_block_id == sel_id);
+                .position(|b| b.id == sel_id);
 
             // Clone display values before any mutable borrow of model.
             let Some(wb) = model.work_blocks.get(&sel_id) else {
@@ -155,10 +155,10 @@ fn side_panel_ui(
             let pessimistic = wb.estimate.pessimistic;
             let confidence = wb.estimate.confidence;
 
-            let (start_day, end_day) = schedule
-                .blocks
+            let (start_day, end_day) = model
+                .work_blocks
                 .get(&sel_id)
-                .map(|sb| (sb.start_day, sb.end_day))
+                .map(|wb| (wb.start_day, wb.start_day + wb.duration_days))
                 .unwrap_or((0.0, 0.0));
 
             ui.strong(&name);
