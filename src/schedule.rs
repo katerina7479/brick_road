@@ -147,6 +147,39 @@ pub fn update_visible_blocks(
         .collect();
 }
 
+/// Tracks today's position on the timeline as a working-day number.
+#[derive(Debug, Default, Resource)]
+pub struct TodayMarker {
+    pub day: f32,
+}
+
+/// Recomputes `TodayMarker` when the model's calendar changes.
+///
+/// Converts the UTC Unix timestamp to a Gregorian date using the
+/// Howard Hinnant algorithm — no `chrono/clock` feature required.
+pub fn update_today_marker(model: Res<Model>, mut today: ResMut<TodayMarker>) {
+    if !model.is_changed() {
+        return;
+    }
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    // Civil date from Unix day count (Hinnant algorithm, public domain).
+    let z = (secs / 86400) as i64 + 719468;
+    let era = (if z >= 0 { z } else { z - 146096 }) / 146097;
+    let doe = (z - era * 146097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe as i64 + era * 400 + if m <= 2 { 1 } else { 0 };
+    let today_date = NaiveDate::from_ymd_opt(y as i32, m as u32, d as u32)
+        .unwrap_or_else(|| NaiveDate::from_ymd_opt(2025, 1, 1).unwrap());
+    today.day = crate::calendar::date_to_day(today_date, &model.calendar) as f32;
+}
+
 /// Propagate dependency constraints to all blocks reachable (transitively)
 /// as successors of `root` after `root`'s `start_day` or `duration_days`
 /// has changed.
