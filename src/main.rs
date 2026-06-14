@@ -31,6 +31,8 @@ fn main() {
         .insert_resource(ClearColor(Color::srgb(0.02, 0.02, 0.05)))
         .insert_resource(CameraTarget::default())
         .insert_resource(blocks::SelectedBlock::default())
+        .insert_resource(blocks::NameEditState::default())
+        .insert_resource(blocks::DragState::default())
         .insert_resource(blocks::DepDragState::default())
         .insert_resource(analysis::ScheduleAnalysis::default())
         .add_systems(Startup, (setup_db, setup_camera))
@@ -44,10 +46,24 @@ fn main() {
         .add_systems(Update, (update_camera_target, smooth_camera).chain())
         .add_systems(Update, draw_grid)
         .add_systems(Update, update_analysis)
-        .add_systems(Update, blocks::handle_block_selection)
+        .add_systems(Update, blocks::handle_name_edit)
         .add_systems(
             Update,
-            blocks::sync_block_sprites.after(blocks::handle_block_selection),
+            blocks::handle_block_selection.after(blocks::handle_name_edit),
+        )
+        .add_systems(
+            Update,
+            blocks::handle_block_drag.after(blocks::handle_block_selection),
+        )
+        .add_systems(
+            Update,
+            blocks::spawn_block_sprites.after(blocks::handle_block_selection),
+        )
+        .add_systems(
+            Update,
+            blocks::sync_block_sprites
+                .after(blocks::handle_block_drag)
+                .after(blocks::spawn_block_sprites),
         )
         .add_systems(
             Update,
@@ -58,9 +74,16 @@ fn main() {
             Update,
             blocks::draw_dependency_edges.after(update_analysis),
         )
+        .add_systems(
+            Update,
+            labels::spawn_labels
+                .after(blocks::handle_block_selection)
+                .after(blocks::spawn_block_sprites),
+        )
         .add_systems(Update, labels::draw_nesting_indicators)
         .add_systems(Update, labels::draw_violation_indicators)
         .add_systems(EguiPrimaryContextPass, side_panel_ui)
+        .add_systems(EguiPrimaryContextPass, blocks::draw_name_edit_overlay)
         .run();
 }
 

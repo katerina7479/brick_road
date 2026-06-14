@@ -1,12 +1,14 @@
 use std::collections::HashMap;
 
 use bevy::prelude::*;
-use bevy_egui::EguiContexts;
+use bevy_egui::{egui, EguiContexts};
 
 use crate::{
     analysis::ScheduleAnalysis,
     constants::{PIXELS_PER_DAY, ROW_HEIGHT},
-    model::{self, DependencyId, DependencyType, WorkBlockId},
+    db,
+    labels,
+    model::{self, DependencyId, DependencyType, Estimate, WorkBlockId},
     schedule,
 };
 
@@ -29,6 +31,15 @@ const CRITICAL_PATH_COLOR: LinearRgba = LinearRgba::new(3.0, 2.5, 0.0, 1.0);
 #[derive(Resource, Default)]
 pub struct SelectedBlock(pub Option<WorkBlockId>);
 
+/// Tracks inline name-edit state: which block is being renamed and the live text buffer.
+#[derive(Resource, Default)]
+pub struct NameEditState {
+    pub editing: Option<WorkBlockId>,
+    pub text_buf: String,
+    /// (block_id, elapsed_secs) of the most recent left-click on a block sprite.
+    last_click: Option<(WorkBlockId, f32)>,
+}
+
 /// Marker: this sprite visualises one ScheduledBlock.
 #[derive(Component)]
 pub struct BlockSprite {
@@ -46,6 +57,9 @@ pub fn spawn_block_sprites(
     model: Res<model::Model>,
     existing: Query<Entity, With<BlockSprite>>,
 ) {
+    if !model.is_changed() {
+        return;
+    }
     for entity in &existing {
         commands.entity(entity).despawn();
     }
@@ -131,6 +145,7 @@ pub fn sync_block_sprites(
 /// Clicks that land inside egui areas (e.g. the side panel) are ignored.
 /// Clicking the currently selected block deselects it; clicking empty space
 /// clears the selection.
+#[allow(clippy::too_many_arguments)]
 pub fn handle_block_selection(
     mut egui_ctx: EguiContexts,
     windows: Query<&Window>,
@@ -138,7 +153,15 @@ pub fn handle_block_selection(
     mouse: Res<ButtonInput<MouseButton>>,
     mut selected: ResMut<SelectedBlock>,
     block_query: Query<(&BlockSprite, &Transform, &Sprite)>,
+    name_edit: Res<NameEditState>,
+    mut model: ResMut<model::Model>,
+    conn: NonSend<rusqlite::Connection>,
 ) {
+    // Yield to the inline editor while a rename is in progress.
+    if name_edit.editing.is_some() {
+        return;
+    }
+
     // Guard: egui owns the pointer when the cursor is over any egui area.
     if let Ok(ctx) = egui_ctx.ctx_mut() {
         if ctx.is_pointer_over_area() {
@@ -179,12 +202,128 @@ pub fn handle_block_selection(
         }
     }
 
-    // Re-clicking the selected block toggles it off; otherwise set/clear.
-    selected.0 = if clicked.is_some() && clicked == selected.0 {
-        None
+    if let Some(id) = clicked {
+        // Re-clicking the selected block toggles it off; otherwise select it.
+        selected.0 = if Some(id) == selected.0 { None } else { Some(id) };
     } else {
-        clicked
+        // Empty timeline space: create a new WorkBlock at the clicked position.
+        let start_day = (world_pos.x / PIXELS_PER_DAY).max(0.0);
+        // Snap to the nearest 0.5-day grid line.
+        let start_day = (start_day * 2.0).round() / 2.0;
+        let duration_days = 1.0f32;
+        let est = Estimate {
+            most_likely: duration_days,
+            optimistic: duration_days * 0.7,
+            pessimistic: duration_days * 1.5,
+            confidence: 0.8,
+        };
+        let new_id = model.create_work_block("New Block", est);
+        if let Some(wb) = model.work_blocks.get_mut(&new_id) {
+            wb.start_day = start_day;
+            wb.duration_days = duration_days;
+        }
+        if let Some(plan) = model.plans.values_mut().next() {
+            plan.root_blocks.push(new_id);
+        }
+        if let Err(e) = db::save_model(&conn, &model) {
+            error!("save_model failed: {e}");
+        }
+        selected.0 = Some(new_id);
+    }
+}
+
+/// Tracks an in-progress block drag initiated by the user.
+#[derive(Resource, Default)]
+pub struct DragState {
+    /// The block being dragged and the cursor's x-offset from the block's left edge (pixels).
+    dragging: Option<(WorkBlockId, f32)>,
+}
+
+/// Center-drag a block left or right to reposition its `start_day`.
+///
+/// - Press: hit-test blocks, record offset from left edge, set selection.
+/// - Held: slide `start_day` to follow the cursor (clamped to ≥ 0).
+/// - Release: cascade dependency constraints, persist to DB.
+///
+/// Clicks that land inside egui areas are ignored (same guard as selection).
+pub fn handle_block_drag(
+    mut egui_ctx: EguiContexts,
+    windows: Query<&Window>,
+    camera: Query<(&Camera, &GlobalTransform)>,
+    mouse: Res<ButtonInput<MouseButton>>,
+    mut drag: ResMut<DragState>,
+    mut selected: ResMut<SelectedBlock>,
+    mut model: ResMut<model::Model>,
+    conn: NonSend<rusqlite::Connection>,
+    block_query: Query<(&BlockSprite, &Transform, &Sprite)>,
+) {
+    // Guard: egui owns the pointer when the cursor is over any egui area.
+    if let Ok(ctx) = egui_ctx.ctx_mut() {
+        if ctx.is_pointer_over_area() {
+            drag.dragging = None;
+            return;
+        }
+    }
+
+    let Ok(window) = windows.single() else { return };
+    let Ok((camera, camera_transform)) = camera.single() else {
+        return;
     };
+    let Some(cursor_pos) = window.cursor_position() else {
+        drag.dragging = None;
+        return;
+    };
+    let Ok(world_pos) = camera.viewport_to_world_2d(camera_transform, cursor_pos) else {
+        return;
+    };
+
+    // Press: hit-test and start drag.
+    if mouse.just_pressed(MouseButton::Left) {
+        drag.dragging = None;
+        for (block_sprite, transform, sprite) in &block_query {
+            let Some(size) = sprite.custom_size else { continue };
+            let center = transform.translation.truncate();
+            let half = size * 0.5;
+            if world_pos.x >= center.x - half.x
+                && world_pos.x <= center.x + half.x
+                && world_pos.y >= center.y - half.y
+                && world_pos.y <= center.y + half.y
+            {
+                let id = block_sprite.work_block_id;
+                let start_px = model
+                    .work_blocks
+                    .get(&id)
+                    .map(|wb| wb.start_day * PIXELS_PER_DAY)
+                    .unwrap_or(0.0);
+                // Offset preserves where within the block the user grabbed.
+                drag.dragging = Some((id, world_pos.x - start_px));
+                selected.0 = Some(id);
+                break;
+            }
+        }
+        return;
+    }
+
+    // Held: slide start_day to follow cursor.
+    if mouse.pressed(MouseButton::Left) {
+        if let Some((id, offset_px)) = drag.dragging {
+            let new_start = ((world_pos.x - offset_px) / PIXELS_PER_DAY).max(0.0);
+            if let Some(wb) = model.work_blocks.get_mut(&id) {
+                wb.start_day = new_start;
+            }
+        }
+        return;
+    }
+
+    // Release: cascade dependencies and persist.
+    if mouse.just_released(MouseButton::Left) {
+        if let Some((id, _)) = drag.dragging.take() {
+            schedule::cascade_dependencies(&mut model, id);
+            if let Err(e) = db::save_model(&conn, &model) {
+                error!("save_model failed: {e}");
+            }
+        }
+    }
 }
 
 /// Marker: this sprite visualises one `ResourceConflict` window.
@@ -364,15 +503,23 @@ fn draw_arrowhead(gizmos: &mut Gizmos, src: Vec2, dst: Vec2, color: Color) {
     gizmos.line_2d(dst, dst - dir * 8.0 - perp * 4.0, color);
 }
 
-/// Right-click drag from one block to another to create a `FinishToStart`
-/// dependency. Press right button on source, release on target.
-/// Self-loops and duplicate FS edges in the same direction are silently ignored.
-#[allow(clippy::too_many_arguments)]
+fn dep_type_from_modifiers(keys: &ButtonInput<KeyCode>) -> DependencyType {
+    if keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]) {
+        DependencyType::StartToStart
+    } else if keys.any_pressed([KeyCode::ControlLeft, KeyCode::ControlRight]) {
+        DependencyType::FinishToFinish
+    } else if keys.any_pressed([KeyCode::AltLeft, KeyCode::AltRight]) {
+        DependencyType::StartToFinish
+    } else {
+        DependencyType::FinishToStart
+    }
+}
 pub fn handle_dep_drag(
     mut egui_ctx: EguiContexts,
     windows: Query<&Window>,
     camera: Query<(&Camera, &GlobalTransform)>,
     mouse: Res<ButtonInput<MouseButton>>,
+    keyboard: Res<ButtonInput<KeyCode>>,
     mut drag: ResMut<DepDragState>,
     mut model: ResMut<model::Model>,
     block_query: Query<(&BlockSprite, &Transform, &Sprite)>,
@@ -414,13 +561,14 @@ pub fn handle_dep_drag(
         if let Some(from_id) = drag.from.take() {
             if let Some(to_id) = block_at(world_pos) {
                 if to_id != from_id {
+                    let dep_type = dep_type_from_modifiers(&keyboard);
                     let already = model.dependencies.values().any(|d| {
                         d.predecessor == from_id
                             && d.successor == to_id
-                            && d.dependency_type == DependencyType::FinishToStart
+                            && d.dependency_type == dep_type
                     });
                     if !already {
-                        model.create_dependency(from_id, to_id, DependencyType::FinishToStart);
+                        model.create_dependency(from_id, to_id, dep_type);
                         if let Err(e) = crate::db::save_model(&conn, &model) {
                             error!("save_model failed: {e}");
                         }
@@ -428,5 +576,162 @@ pub fn handle_dep_drag(
                 }
             }
         }
+    }
+}
+
+/// Detects double-click on a block sprite or single-click on a row label and
+/// enters inline name-edit mode by populating `NameEditState`.
+///
+/// Must run before `handle_block_selection` so the guard there sees the updated
+/// `editing` flag on the same frame the double-click fires.
+pub fn handle_name_edit(
+    mut egui_ctx: EguiContexts,
+    windows: Query<&Window>,
+    camera: Query<(&Camera, &GlobalTransform)>,
+    mouse: Res<ButtonInput<MouseButton>>,
+    time: Res<Time>,
+    model: Res<model::Model>,
+    mut name_edit: ResMut<NameEditState>,
+    block_query: Query<(&BlockSprite, &Transform, &Sprite)>,
+    label_query: Query<(&labels::RowLabel, &Transform)>,
+) {
+    if name_edit.editing.is_some() {
+        return;
+    }
+    if !mouse.just_pressed(MouseButton::Left) {
+        return;
+    }
+    if let Ok(ctx) = egui_ctx.ctx_mut() {
+        if ctx.is_pointer_over_area() {
+            return;
+        }
+    }
+
+    let Ok(window) = windows.single() else { return };
+    let Ok((camera, camera_transform)) = camera.single() else { return };
+    let Some(cursor_pos) = window.cursor_position() else { return };
+    let Ok(world_pos) = camera.viewport_to_world_2d(camera_transform, cursor_pos) else {
+        return;
+    };
+
+    let now = time.elapsed_secs();
+
+    // Single-click on a row label → enter edit mode immediately.
+    for (row_label, transform) in &label_query {
+        let center = transform.translation.truncate();
+        if world_pos.x >= center.x - 60.0
+            && world_pos.x <= center.x + 60.0
+            && world_pos.y >= center.y - 7.0
+            && world_pos.y <= center.y + 7.0
+        {
+            let id = row_label.work_block_id;
+            if let Some(wb) = model.work_blocks.get(&id) {
+                name_edit.editing = Some(id);
+                name_edit.text_buf = wb.name.clone();
+                name_edit.last_click = None;
+            }
+            return;
+        }
+    }
+
+    // Double-click on a block sprite → enter edit mode.
+    for (block_sprite, transform, sprite) in &block_query {
+        let Some(size) = sprite.custom_size else { continue };
+        let center = transform.translation.truncate();
+        let half = size * 0.5;
+        if world_pos.x >= center.x - half.x
+            && world_pos.x <= center.x + half.x
+            && world_pos.y >= center.y - half.y
+            && world_pos.y <= center.y + half.y
+        {
+            let id = block_sprite.work_block_id;
+            if let Some((last_id, last_time)) = name_edit.last_click {
+                if last_id == id && now - last_time < 0.4 {
+                    if let Some(wb) = model.work_blocks.get(&id) {
+                        name_edit.editing = Some(id);
+                        name_edit.text_buf = wb.name.clone();
+                        name_edit.last_click = None;
+                    }
+                    return;
+                }
+            }
+            name_edit.last_click = Some((id, now));
+            return;
+        }
+    }
+
+    name_edit.last_click = None;
+}
+
+/// Renders an egui `TextEdit` overlay at the row label's screen position while
+/// `NameEditState::editing` is `Some`. Commits on Enter or focus-loss; cancels
+/// on Escape. Persists the new name to the model and DB on commit.
+pub fn draw_name_edit_overlay(
+    mut contexts: EguiContexts,
+    mut name_edit: ResMut<NameEditState>,
+    mut model: ResMut<model::Model>,
+    conn: NonSend<rusqlite::Connection>,
+    windows: Query<&Window>,
+    camera: Query<(&Camera, &GlobalTransform)>,
+    mut label_query: Query<(&labels::RowLabel, &Transform, &mut Text2d)>,
+    keys: Res<ButtonInput<KeyCode>>,
+) {
+    let Some(edit_id) = name_edit.editing else { return };
+
+    let Ok(_window) = windows.single() else { return };
+    let Ok((camera, camera_transform)) = camera.single() else { return };
+
+    // Locate the label's screen position (logical pixels) to anchor the overlay.
+    let mut screen_pos = egui::pos2(50.0, 200.0);
+    for (rl, transform, _) in &label_query {
+        if rl.work_block_id == edit_id {
+            if let Ok(vp) = camera.world_to_viewport(camera_transform, transform.translation) {
+                screen_pos = egui::pos2(vp.x, vp.y - 10.0);
+            }
+            break;
+        }
+    }
+
+    let Ok(ctx) = contexts.ctx_mut() else { return };
+
+    let escaped = keys.just_pressed(KeyCode::Escape);
+    let mut commit = false;
+
+    if !escaped {
+        egui::Area::new(egui::Id::new("name_edit_overlay"))
+            .fixed_pos(screen_pos)
+            .show(ctx, |ui| {
+                let response = ui.add(
+                    egui::TextEdit::singleline(&mut name_edit.text_buf)
+                        .min_size(egui::Vec2::new(120.0, 20.0)),
+                );
+                response.request_focus();
+                if response.lost_focus() {
+                    commit = true;
+                }
+            });
+    }
+
+    if escaped {
+        name_edit.editing = None;
+        name_edit.text_buf.clear();
+    } else if commit {
+        let new_name = name_edit.text_buf.trim().to_string();
+        if !new_name.is_empty() {
+            if let Some(wb) = model.work_blocks.get_mut(&edit_id) {
+                wb.name = new_name.clone();
+            }
+            for (rl, _, mut text) in &mut label_query {
+                if rl.work_block_id == edit_id {
+                    *text = Text2d::new(new_name.clone());
+                    break;
+                }
+            }
+            if let Err(e) = db::save_model(&conn, &model) {
+                error!("save_model failed: {e}");
+            }
+        }
+        name_edit.editing = None;
+        name_edit.text_buf.clear();
     }
 }
