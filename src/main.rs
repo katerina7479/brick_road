@@ -125,17 +125,10 @@ fn side_panel_ui(
             return;
         };
 
-        // Compute row index using the same sort order as block sprites.
-        let row = {
-            let mut ordered: Vec<_> = schedule.blocks.values().collect();
-            ordered.sort_by(|a, b| {
-                a.start_day
-                    .partial_cmp(&b.start_day)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-                    .then(a.work_block_id.0.cmp(&b.work_block_id.0))
-            });
-            ordered.iter().position(|b| b.work_block_id == sel_id)
-        };
+        // Compute row index using the canonical sort order shared with block sprites.
+        let row = schedule::sorted_blocks(&schedule)
+            .iter()
+            .position(|b| b.work_block_id == sel_id);
 
         // Clone display values before any mutable borrow of model.
         let Some(wb) = model.work_blocks.get(&sel_id) else { return };
