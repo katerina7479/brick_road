@@ -4,6 +4,7 @@ use bevy::{
 };
 use bevy_egui::{egui, EguiContexts, EguiPlugin, EguiPrimaryContextPass};
 
+pub mod analysis;
 pub mod blocks;
 pub mod camera;
 pub mod constants;
