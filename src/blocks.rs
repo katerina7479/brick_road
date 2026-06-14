@@ -9,7 +9,7 @@ use crate::{
     db,
     labels,
     model::{self, DependencyId, DependencyType, Estimate, WorkBlockId},
-    schedule,
+    schedule::{self, ViewScope},
 };
 
 const BLOCK_HEIGHT: f32 = 28.0;
@@ -55,16 +55,17 @@ pub fn spawn_block_sprites(
     mut commands: Commands,
     sa: Res<ScheduleAnalysis>,
     model: Res<model::Model>,
+    scope: Res<ViewScope>,
     existing: Query<Entity, With<BlockSprite>>,
 ) {
-    if !model.is_changed() {
+    if !model.is_changed() && !scope.is_changed() {
         return;
     }
     for entity in &existing {
         commands.entity(entity).despawn();
     }
 
-    let ordered = schedule::sorted_blocks(&model);
+    let ordered = schedule::visible_blocks(&model, &scope);
 
     let on_critical_path: std::collections::HashSet<WorkBlockId> =
         sa.critical_path.iter().copied().collect();
@@ -436,6 +437,7 @@ pub fn sync_conflict_overlays(
     mut commands: Commands,
     sa: Res<ScheduleAnalysis>,
     model: Res<model::Model>,
+    scope: Res<ViewScope>,
     existing: Query<Entity, With<ConflictOverlay>>,
 ) {
     for entity in &existing {
@@ -447,7 +449,7 @@ pub fn sync_conflict_overlays(
     }
 
     // Row lookup: WorkBlockId → row index (same ordering as block sprites).
-    let ordered = schedule::sorted_blocks(&model);
+    let ordered = schedule::visible_blocks(&model, &scope);
     let row_of: HashMap<WorkBlockId, usize> =
         ordered.iter().enumerate().map(|(i, wb)| (wb.id, i)).collect();
     let total_rows = ordered.len().max(1);
@@ -519,10 +521,11 @@ pub fn draw_dependency_edges(
     model: Res<model::Model>,
     sa: Res<ScheduleAnalysis>,
     drag: Res<DepDragState>,
+    scope: Res<ViewScope>,
     windows: Query<&Window>,
     camera: Query<(&Camera, &GlobalTransform)>,
 ) {
-    let ordered = schedule::sorted_blocks(&model);
+    let ordered = schedule::visible_blocks(&model, &scope);
     let geom: HashMap<WorkBlockId, BlockGeom> = ordered
         .iter()
         .enumerate()
@@ -606,6 +609,8 @@ fn dep_type_from_modifiers(keys: &ButtonInput<KeyCode>) -> DependencyType {
         DependencyType::FinishToStart
     }
 }
+
+#[allow(clippy::too_many_arguments)]
 pub fn handle_dep_drag(
     mut egui_ctx: EguiContexts,
     windows: Query<&Window>,
@@ -676,6 +681,7 @@ pub fn handle_dep_drag(
 ///
 /// Must run before `handle_block_selection` so the guard there sees the updated
 /// `editing` flag on the same frame the double-click fires.
+#[allow(clippy::too_many_arguments)]
 pub fn handle_name_edit(
     mut egui_ctx: EguiContexts,
     windows: Query<&Window>,
@@ -684,6 +690,7 @@ pub fn handle_name_edit(
     time: Res<Time>,
     model: Res<model::Model>,
     mut name_edit: ResMut<NameEditState>,
+    mut scope: ResMut<ViewScope>,
     block_query: Query<(&BlockSprite, &Transform, &Sprite)>,
     label_query: Query<(&labels::RowLabel, &Transform)>,
 ) {
@@ -726,7 +733,9 @@ pub fn handle_name_edit(
         }
     }
 
-    // Double-click on a block sprite → enter edit mode.
+    // Double-click on a block sprite.
+    // If the block has variants → drill into its children.
+    // If the block has no variants → enter inline name-edit mode.
     for (block_sprite, transform, sprite) in &block_query {
         let Some(size) = sprite.custom_size else { continue };
         let center = transform.translation.truncate();
@@ -739,10 +748,16 @@ pub fn handle_name_edit(
             let id = block_sprite.work_block_id;
             if let Some((last_id, last_time)) = name_edit.last_click {
                 if last_id == id && now - last_time < 0.4 {
+                    name_edit.last_click = None;
                     if let Some(wb) = model.work_blocks.get(&id) {
-                        name_edit.editing = Some(id);
-                        name_edit.text_buf = wb.name.clone();
-                        name_edit.last_click = None;
+                        if !wb.variants.is_empty() {
+                            // Drill into this block's children.
+                            scope.focused_block = Some(id);
+                        } else {
+                            // Rename the block inline.
+                            name_edit.editing = Some(id);
+                            name_edit.text_buf = wb.name.clone();
+                        }
                     }
                     return;
                 }
@@ -758,6 +773,7 @@ pub fn handle_name_edit(
 /// Renders an egui `TextEdit` overlay at the row label's screen position while
 /// `NameEditState::editing` is `Some`. Commits on Enter or focus-loss; cancels
 /// on Escape. Persists the new name to the model and DB on commit.
+#[allow(clippy::too_many_arguments)]
 pub fn draw_name_edit_overlay(
     mut contexts: EguiContexts,
     mut name_edit: ResMut<NameEditState>,

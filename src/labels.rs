@@ -6,7 +6,7 @@ use crate::{
     analysis::ScheduleAnalysis,
     constants::{PIXELS_PER_DAY, ROW_HEIGHT},
     model::{Model, WorkBlockId},
-    schedule::{self, Schedule},
+    schedule::{self, Schedule, ViewScope},
 };
 
 /// Y position of day-number labels above the block rows.
@@ -36,10 +36,11 @@ pub fn spawn_labels(
     mut commands: Commands,
     schedule: Res<Schedule>,
     model: Res<Model>,
+    scope: Res<ViewScope>,
     day_q: Query<Entity, With<DayLabel>>,
     row_q: Query<Entity, With<RowLabel>>,
 ) {
-    if !model.is_changed() {
+    if !model.is_changed() && !scope.is_changed() {
         return;
     }
     for e in &day_q {
@@ -66,7 +67,7 @@ pub fn spawn_labels(
     }
 
     // Row name labels — same sort order as block sprites for matching rows.
-    let ordered = schedule::sorted_blocks(&model);
+    let ordered = schedule::visible_blocks(&model, &scope);
 
     for (row, wb) in ordered.iter().enumerate() {
         let name = wb.name.clone();

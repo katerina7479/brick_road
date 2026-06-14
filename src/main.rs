@@ -35,6 +35,7 @@ fn main() {
         .insert_resource(blocks::DragState::default())
         .insert_resource(blocks::ResizeDragState::default())
         .insert_resource(blocks::DepDragState::default())
+        .insert_resource(schedule::ViewScope::default())
         .insert_resource(analysis::ScheduleAnalysis::default())
         .add_systems(Startup, (setup_db, setup_camera))
         .add_systems(Startup, setup_demo_schedule.after(setup_db))
@@ -204,12 +205,24 @@ fn side_panel_ui(
     mut schedule: ResMut<schedule::Schedule>,
     conn: NonSend<rusqlite::Connection>,
     mut cycle_error: Local<Option<String>>,
+    mut scope: ResMut<schedule::ViewScope>,
 ) {
     let Ok(ctx) = contexts.ctx_mut() else { return };
     egui::SidePanel::left("side_panel")
         .min_width(220.0)
         .show(ctx, |ui| {
             ui.heading("brick_road");
+            // Breadcrumb: show back button when drilled into a child view.
+            if let Some(focused_id) = scope.focused_block {
+                let name = model
+                    .work_blocks
+                    .get(&focused_id)
+                    .map(|wb| wb.name.clone())
+                    .unwrap_or_else(|| "?".to_string());
+                if ui.button(format!("← {name}")).clicked() {
+                    scope.focused_block = None;
+                }
+            }
             ui.separator();
 
             if ui.button("Auto-schedule").clicked() {
