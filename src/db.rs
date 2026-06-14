@@ -3,8 +3,8 @@ use std::collections::HashMap;
 use rusqlite::{Connection, Result};
 
 use crate::model::{
-    AvailabilitySegment, AvailabilityTimeline, Dependency, DependencyId, DependencyType,
-    Estimate, Milestone, MilestoneId, Model, Plan, PlanId, ResourceAllocation, ResourceBlock,
+    AvailabilitySegment, AvailabilityTimeline, Dependency, DependencyId, DependencyType, Estimate,
+    Milestone, MilestoneId, Model, Plan, PlanId, ResourceAllocation, ResourceBlock,
     ResourceBlockId, ResourceType, Variant, VariantId, WorkBlock, WorkBlockId, World, WorldId,
 };
 
@@ -22,7 +22,8 @@ pub fn save_model(conn: &Connection, model: &Model) -> Result<()> {
     let tx = conn.unchecked_transaction()?;
 
     // Clear in reverse FK order so no constraint is violated.
-    tx.execute_batch("
+    tx.execute_batch(
+        "
         DELETE FROM plan_milestone_targets;
         DELETE FROM resource_allocations;
         DELETE FROM plan_variant_selections;
@@ -36,7 +37,8 @@ pub fn save_model(conn: &Connection, model: &Model) -> Result<()> {
         DELETE FROM availability_segments;
         DELETE FROM resource_blocks;
         DELETE FROM worlds;
-    ")?;
+    ",
+    )?;
 
     // worlds
     for world in model.worlds.values() {
@@ -47,8 +49,7 @@ pub fn save_model(conn: &Connection, model: &Model) -> Result<()> {
     }
 
     // Build resource_block_id → world_id from World.resource_ids.
-    let mut rb_to_world: std::collections::HashMap<u64, u64> =
-        std::collections::HashMap::new();
+    let mut rb_to_world: std::collections::HashMap<u64, u64> = std::collections::HashMap::new();
     for world in model.worlds.values() {
         for &rb_id in &world.resource_ids {
             rb_to_world.insert(rb_id.0, world.id.0);
@@ -66,14 +67,25 @@ pub fn save_model(conn: &Connection, model: &Model) -> Result<()> {
         tx.execute(
             "INSERT INTO resource_blocks (id, world_id, name, resource_type)
              VALUES (?1, ?2, ?3, ?4)",
-            (rb.id.0, world_id, &rb.name, resource_type_str(rb.resource_type)),
+            (
+                rb.id.0,
+                world_id,
+                &rb.name,
+                resource_type_str(rb.resource_type),
+            ),
         )?;
         for (order, seg) in rb.availability.segments.iter().enumerate() {
             tx.execute(
                 "INSERT INTO availability_segments
                      (resource_block_id, start_day, end_day, factor, sort_order)
                  VALUES (?1, ?2, ?3, ?4, ?5)",
-                (rb.id.0, seg.start as f64, seg.end as f64, seg.factor as f64, order as i64),
+                (
+                    rb.id.0,
+                    seg.start as f64,
+                    seg.end as f64,
+                    seg.factor as f64,
+                    order as i64,
+                ),
             )?;
         }
     }
@@ -216,16 +228,19 @@ pub fn load_model(conn: &Connection) -> Result<Model> {
             bump!(id);
             model.worlds.insert(
                 WorldId(id as u64),
-                World { id: WorldId(id as u64), name, resource_ids: vec![] },
+                World {
+                    id: WorldId(id as u64),
+                    name,
+                    resource_ids: vec![],
+                },
             );
         }
     }
 
     // resource_blocks  (also populate world.resource_ids; ORDER BY id keeps the vec deterministic)
     {
-        let mut stmt = conn.prepare(
-            "SELECT id, world_id, name, resource_type FROM resource_blocks ORDER BY id",
-        )?;
+        let mut stmt = conn
+            .prepare("SELECT id, world_id, name, resource_type FROM resource_blocks ORDER BY id")?;
         let rows = stmt.query_map([], |row| {
             Ok((
                 row.get::<_, i64>(0)?,
@@ -270,7 +285,10 @@ pub fn load_model(conn: &Connection) -> Result<Model> {
         })?;
         for row in rows {
             let (rb_id, start, end, factor) = row?;
-            if let Some(rb) = model.resource_blocks.get_mut(&ResourceBlockId(rb_id as u64)) {
+            if let Some(rb) = model
+                .resource_blocks
+                .get_mut(&ResourceBlockId(rb_id as u64))
+            {
                 rb.availability.segments.push(AvailabilitySegment {
                     start: start as f32,
                     end: end as f32,
@@ -325,7 +343,11 @@ pub fn load_model(conn: &Connection) -> Result<Model> {
              ORDER BY parent_work_block_id, sort_order",
         )?;
         let rows = stmt.query_map([], |row| {
-            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)?))
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
         })?;
         for row in rows {
             let (id, name, parent_id) = row?;
@@ -334,7 +356,12 @@ pub fn load_model(conn: &Connection) -> Result<Model> {
             let parent = WorkBlockId(parent_id as u64);
             model.variants.insert(
                 var_id,
-                Variant { id: var_id, name, parent, children: vec![] },
+                Variant {
+                    id: var_id,
+                    name,
+                    parent,
+                    children: vec![],
+                },
             );
             if let Some(wb) = model.work_blocks.get_mut(&parent) {
                 wb.variants.push(var_id);
@@ -349,9 +376,7 @@ pub fn load_model(conn: &Connection) -> Result<Model> {
              FROM variant_children
              ORDER BY variant_id, sort_order",
         )?;
-        let rows = stmt.query_map([], |row| {
-            Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
-        })?;
+        let rows = stmt.query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)))?;
         for row in rows {
             let (var_id, child_id) = row?;
             if let Some(v) = model.variants.get_mut(&VariantId(var_id as u64)) {
@@ -396,14 +421,22 @@ pub fn load_model(conn: &Connection) -> Result<Model> {
     {
         let mut stmt = conn.prepare("SELECT id, name, date_day FROM milestones")?;
         let rows = stmt.query_map([], |row| {
-            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, f64>(2)?))
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, f64>(2)?,
+            ))
         })?;
         for row in rows {
             let (id, name, date) = row?;
             bump!(id);
             model.milestones.insert(
                 MilestoneId(id as u64),
-                Milestone { id: MilestoneId(id as u64), name, date: date as f32 },
+                Milestone {
+                    id: MilestoneId(id as u64),
+                    name,
+                    date: date as f32,
+                },
             );
         }
     }
@@ -412,7 +445,11 @@ pub fn load_model(conn: &Connection) -> Result<Model> {
     {
         let mut stmt = conn.prepare("SELECT id, name, world_id FROM plans")?;
         let rows = stmt.query_map([], |row| {
-            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)?))
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
         })?;
         for row in rows {
             let (id, name, world_id) = row?;
@@ -438,9 +475,7 @@ pub fn load_model(conn: &Connection) -> Result<Model> {
              FROM plan_root_blocks
              ORDER BY plan_id, sort_order",
         )?;
-        let rows = stmt.query_map([], |row| {
-            Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
-        })?;
+        let rows = stmt.query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)))?;
         for row in rows {
             let (plan_id, wb_id) = row?;
             if let Some(plan) = model.plans.get_mut(&PlanId(plan_id as u64)) {
@@ -451,11 +486,14 @@ pub fn load_model(conn: &Connection) -> Result<Model> {
 
     // plan_variant_selections
     {
-        let mut stmt = conn.prepare(
-            "SELECT plan_id, work_block_id, variant_id FROM plan_variant_selections",
-        )?;
+        let mut stmt =
+            conn.prepare("SELECT plan_id, work_block_id, variant_id FROM plan_variant_selections")?;
         let rows = stmt.query_map([], |row| {
-            Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?))
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
         })?;
         for row in rows {
             let (plan_id, wb_id, var_id) = row?;
@@ -672,7 +710,12 @@ mod tests {
     }
 
     fn est(ml: f32, opt: f32, pes: f32, conf: f32) -> Estimate {
-        Estimate { most_likely: ml, optimistic: opt, pessimistic: pes, confidence: conf }
+        Estimate {
+            most_likely: ml,
+            optimistic: opt,
+            pessimistic: pes,
+            confidence: conf,
+        }
     }
 
     #[test]
@@ -713,12 +756,26 @@ mod tests {
 
         // Resources created in ascending ID order so ORDER BY id on reload preserves world.resource_ids.
         let rb1 = m.create_resource_block("Alice", ResourceType::Person);
-        m.resource_blocks.get_mut(&rb1).unwrap().availability.segments.push(
-            AvailabilitySegment { start: 0.0, end: 100.0, factor: 1.0 },
-        );
-        m.resource_blocks.get_mut(&rb1).unwrap().availability.segments.push(
-            AvailabilitySegment { start: 100.0, end: 200.0, factor: 0.5 },
-        );
+        m.resource_blocks
+            .get_mut(&rb1)
+            .unwrap()
+            .availability
+            .segments
+            .push(AvailabilitySegment {
+                start: 0.0,
+                end: 100.0,
+                factor: 1.0,
+            });
+        m.resource_blocks
+            .get_mut(&rb1)
+            .unwrap()
+            .availability
+            .segments
+            .push(AvailabilitySegment {
+                start: 100.0,
+                end: 200.0,
+                factor: 0.5,
+            });
         let rb2 = m.create_resource_block("Team Alpha", ResourceType::Team);
         m.worlds.get_mut(&world_id).unwrap().resource_ids.push(rb1);
         m.worlds.get_mut(&world_id).unwrap().resource_ids.push(rb2);
@@ -741,17 +798,29 @@ mod tests {
         let plan_id = m.create_plan("alpha", world_id);
         m.plans.get_mut(&plan_id).unwrap().root_blocks.push(wb_a);
         m.plans.get_mut(&plan_id).unwrap().root_blocks.push(wb_b);
-        m.plans.get_mut(&plan_id).unwrap().selected_variants.insert(wb_b, v1);
-        m.plans.get_mut(&plan_id).unwrap().allocations.push(ResourceAllocation {
-            resource_id: rb1,
-            work_block_id: wb_a,
-            allocation_factor: 1.0,
-        });
-        m.plans.get_mut(&plan_id).unwrap().allocations.push(ResourceAllocation {
-            resource_id: rb2,
-            work_block_id: wb_b,
-            allocation_factor: 0.5,
-        });
+        m.plans
+            .get_mut(&plan_id)
+            .unwrap()
+            .selected_variants
+            .insert(wb_b, v1);
+        m.plans
+            .get_mut(&plan_id)
+            .unwrap()
+            .allocations
+            .push(ResourceAllocation {
+                resource_id: rb1,
+                work_block_id: wb_a,
+                allocation_factor: 1.0,
+            });
+        m.plans
+            .get_mut(&plan_id)
+            .unwrap()
+            .allocations
+            .push(ResourceAllocation {
+                resource_id: rb2,
+                work_block_id: wb_b,
+                allocation_factor: 0.5,
+            });
 
         save_model(&conn, &m).unwrap();
         let loaded = load_model(&conn).unwrap();
@@ -792,12 +861,20 @@ mod tests {
         let _dep = m.create_dependency(wb_a, wb_b, DependencyType::FinishToStart);
         let plan_id = m.create_plan("p", w);
         m.plans.get_mut(&plan_id).unwrap().root_blocks.push(wb_a);
-        m.plans.get_mut(&plan_id).unwrap().selected_variants.insert(wb_a, v);
-        m.plans.get_mut(&plan_id).unwrap().allocations.push(ResourceAllocation {
-            resource_id: rb,
-            work_block_id: wb_a,
-            allocation_factor: 1.0,
-        });
+        m.plans
+            .get_mut(&plan_id)
+            .unwrap()
+            .selected_variants
+            .insert(wb_a, v);
+        m.plans
+            .get_mut(&plan_id)
+            .unwrap()
+            .allocations
+            .push(ResourceAllocation {
+                resource_id: rb,
+                work_block_id: wb_a,
+                allocation_factor: 1.0,
+            });
         assert!(validate_model(&m).is_ok());
     }
 
@@ -817,7 +894,10 @@ mod tests {
             },
         );
         let err = validate_model(&m).unwrap_err().to_string();
-        assert!(err.contains("888"), "expected missing parent ID 888 in: {err}");
+        assert!(
+            err.contains("888"),
+            "expected missing parent ID 888 in: {err}"
+        );
     }
 
     #[test]
@@ -836,7 +916,10 @@ mod tests {
             },
         );
         let err = validate_model(&m).unwrap_err().to_string();
-        assert!(err.contains("888"), "expected missing world ID 888 in: {err}");
+        assert!(
+            err.contains("888"),
+            "expected missing world ID 888 in: {err}"
+        );
     }
 
     #[test]
@@ -849,9 +932,16 @@ mod tests {
         m.work_blocks.get_mut(&wb_a).unwrap().variants.push(v);
         let plan_id = m.create_plan("p", world_id);
         // Select variant v (parent = wb_a) for wb_b — wrong parent
-        m.plans.get_mut(&plan_id).unwrap().selected_variants.insert(wb_b, v);
+        m.plans
+            .get_mut(&plan_id)
+            .unwrap()
+            .selected_variants
+            .insert(wb_b, v);
         let err = validate_model(&m).unwrap_err().to_string();
-        assert!(err.contains("parent"), "expected parent mismatch message in: {err}");
+        assert!(
+            err.contains("parent"),
+            "expected parent mismatch message in: {err}"
+        );
     }
 }
 

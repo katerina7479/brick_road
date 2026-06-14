@@ -166,15 +166,35 @@ impl Model {
         id
     }
 
-    pub fn create_work_block(&mut self, name: impl Into<String>, estimate: Estimate) -> WorkBlockId {
+    pub fn create_work_block(
+        &mut self,
+        name: impl Into<String>,
+        estimate: Estimate,
+    ) -> WorkBlockId {
         let id = WorkBlockId(self.alloc_id());
-        self.work_blocks.insert(id, WorkBlock { id, name: name.into(), estimate, variants: vec![] });
+        self.work_blocks.insert(
+            id,
+            WorkBlock {
+                id,
+                name: name.into(),
+                estimate,
+                variants: vec![],
+            },
+        );
         id
     }
 
     pub fn create_variant(&mut self, name: impl Into<String>, parent: WorkBlockId) -> VariantId {
         let id = VariantId(self.alloc_id());
-        self.variants.insert(id, Variant { id, name: name.into(), parent, children: vec![] });
+        self.variants.insert(
+            id,
+            Variant {
+                id,
+                name: name.into(),
+                parent,
+                children: vec![],
+            },
+        );
         id
     }
 
@@ -184,12 +204,15 @@ impl Model {
         resource_type: ResourceType,
     ) -> ResourceBlockId {
         let id = ResourceBlockId(self.alloc_id());
-        self.resource_blocks.insert(id, ResourceBlock {
+        self.resource_blocks.insert(
             id,
-            name: name.into(),
-            resource_type,
-            availability: AvailabilityTimeline::default(),
-        });
+            ResourceBlock {
+                id,
+                name: name.into(),
+                resource_type,
+                availability: AvailabilityTimeline::default(),
+            },
+        );
         id
     }
 
@@ -200,38 +223,58 @@ impl Model {
         dependency_type: DependencyType,
     ) -> DependencyId {
         let id = DependencyId(self.alloc_id());
-        self.dependencies.insert(id, Dependency {
+        self.dependencies.insert(
             id,
-            predecessor,
-            successor,
-            dependency_type,
-            lag: 0.0,
-        });
+            Dependency {
+                id,
+                predecessor,
+                successor,
+                dependency_type,
+                lag: 0.0,
+            },
+        );
         id
     }
 
     pub fn create_milestone(&mut self, name: impl Into<String>, date: f32) -> MilestoneId {
         let id = MilestoneId(self.alloc_id());
-        self.milestones.insert(id, Milestone { id, name: name.into(), date });
+        self.milestones.insert(
+            id,
+            Milestone {
+                id,
+                name: name.into(),
+                date,
+            },
+        );
         id
     }
 
     pub fn create_world(&mut self, name: impl Into<String>) -> WorldId {
         let id = WorldId(self.alloc_id());
-        self.worlds.insert(id, World { id, name: name.into(), resource_ids: vec![] });
+        self.worlds.insert(
+            id,
+            World {
+                id,
+                name: name.into(),
+                resource_ids: vec![],
+            },
+        );
         id
     }
 
     pub fn create_plan(&mut self, name: impl Into<String>, world_id: WorldId) -> PlanId {
         let id = PlanId(self.alloc_id());
-        self.plans.insert(id, Plan {
+        self.plans.insert(
             id,
-            name: name.into(),
-            world_id,
-            root_blocks: vec![],
-            selected_variants: HashMap::new(),
-            allocations: vec![],
-        });
+            Plan {
+                id,
+                name: name.into(),
+                world_id,
+                root_blocks: vec![],
+                selected_variants: HashMap::new(),
+                allocations: vec![],
+            },
+        );
         id
     }
 
@@ -277,7 +320,12 @@ mod tests {
     use super::*;
 
     fn est() -> Estimate {
-        Estimate { most_likely: 3.0, optimistic: 1.0, pessimistic: 7.0, confidence: 0.8 }
+        Estimate {
+            most_likely: 3.0,
+            optimistic: 1.0,
+            pessimistic: 7.0,
+            confidence: 0.8,
+        }
     }
 
     #[test]
@@ -321,7 +369,11 @@ mod tests {
         let var_id = m.create_variant("fast path", block_id);
         let child_id = m.create_work_block("child", est());
 
-        m.work_blocks.get_mut(&block_id).unwrap().variants.push(var_id);
+        m.work_blocks
+            .get_mut(&block_id)
+            .unwrap()
+            .variants
+            .push(var_id);
         m.variants.get_mut(&var_id).unwrap().children.push(child_id);
 
         let block = m.get_work_block(block_id).unwrap();

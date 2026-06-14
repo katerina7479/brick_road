@@ -52,7 +52,10 @@ pub fn spawn_labels(
         commands.spawn((
             DayLabel,
             Text2d::new(format!("D{day}")),
-            TextFont { font_size: 11.0, ..default() },
+            TextFont {
+                font_size: 11.0,
+                ..default()
+            },
             TextColor(Color::srgba(0.6, 0.6, 0.9, 0.75)),
             Transform::from_xyz(x, DAY_LABEL_Y, 1.0),
         ));
@@ -74,9 +77,15 @@ pub fn spawn_labels(
         let y = -(row as f32) * ROW_HEIGHT;
 
         commands.spawn((
-            RowLabel { work_block_id: block.work_block_id, row },
+            RowLabel {
+                work_block_id: block.work_block_id,
+                row,
+            },
             Text2d::new(name),
-            TextFont { font_size: 11.0, ..default() },
+            TextFont {
+                font_size: 11.0,
+                ..default()
+            },
             TextColor(Color::srgba(0.85, 0.85, 0.95, 0.9)),
             Transform::from_xyz(x, y, 1.0),
         ));
@@ -132,8 +141,16 @@ pub fn draw_nesting_indicators(
         // Vertical bar.
         gizmos.line_2d(Vec2::new(bx, bot_y), Vec2::new(bx, top_y), bracket_color);
         // Horizontal serifs.
-        gizmos.line_2d(Vec2::new(bx, top_y), Vec2::new(bx + 4.0, top_y), bracket_color);
-        gizmos.line_2d(Vec2::new(bx, bot_y), Vec2::new(bx + 4.0, bot_y), bracket_color);
+        gizmos.line_2d(
+            Vec2::new(bx, top_y),
+            Vec2::new(bx + 4.0, top_y),
+            bracket_color,
+        );
+        gizmos.line_2d(
+            Vec2::new(bx, bot_y),
+            Vec2::new(bx + 4.0, bot_y),
+            bracket_color,
+        );
     }
 }
 
