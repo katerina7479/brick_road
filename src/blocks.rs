@@ -375,6 +375,7 @@ pub fn handle_dep_drag(
     mut drag: ResMut<DepDragState>,
     mut model: ResMut<model::Model>,
     block_query: Query<(&BlockSprite, &Transform, &Sprite)>,
+    conn: NonSend<rusqlite::Connection>,
 ) {
     if let Ok(ctx) = egui_ctx.ctx_mut() {
         if ctx.is_pointer_over_area() {
@@ -419,6 +420,9 @@ pub fn handle_dep_drag(
                     });
                     if !already {
                         model.create_dependency(from_id, to_id, DependencyType::FinishToStart);
+                        if let Err(e) = crate::db::save_model(&conn, &model) {
+                            error!("save_model failed: {e}");
+                        }
                     }
                 }
             }
