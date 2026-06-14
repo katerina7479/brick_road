@@ -1346,6 +1346,137 @@ pub fn draw_delete_confirm_overlay(
     }
 }
 
+/// State for rapid block creation mode (activated with `N`).
+#[derive(Resource, Default)]
+pub struct CreateModeState {
+    pub active: bool,
+    pub text_buf: String,
+}
+
+/// Toggles create mode with the `N` key. Skipped while a name edit or any
+/// egui text input is active so `N` can be typed freely in those contexts.
+pub fn handle_create_mode_toggle(
+    mut egui_ctx: EguiContexts,
+    keyboard: Res<ButtonInput<KeyCode>>,
+    name_edit: Res<NameEditState>,
+    mut state: ResMut<CreateModeState>,
+) {
+    if name_edit.editing.is_some() {
+        return;
+    }
+    if let Ok(ctx) = egui_ctx.ctx_mut() {
+        if ctx.wants_keyboard_input() {
+            return;
+        }
+    }
+    if keyboard.just_pressed(KeyCode::KeyN) {
+        state.active = !state.active;
+        if !state.active {
+            state.text_buf.clear();
+        }
+    }
+}
+
+/// Exits create mode when the user left-clicks on the timeline (outside egui).
+pub fn handle_create_mode_click_exit(
+    mut egui_ctx: EguiContexts,
+    mouse: Res<ButtonInput<MouseButton>>,
+    mut state: ResMut<CreateModeState>,
+) {
+    if !state.active {
+        return;
+    }
+    if !mouse.just_pressed(MouseButton::Left) {
+        return;
+    }
+    if let Ok(ctx) = egui_ctx.ctx_mut() {
+        if !ctx.is_pointer_over_area() {
+            state.active = false;
+            state.text_buf.clear();
+        }
+    }
+}
+
+/// Renders the quick-create overlay while create mode is active.
+///
+/// - Plain Enter: creates a block with the typed name, clears the buffer, stays
+///   in create mode so the user can immediately type the next name.
+/// - Ctrl+Enter / Cmd+Enter: inserts a newline within the current block name.
+/// - Escape: exits create mode.
+///
+/// New blocks are placed at day 0 with a 1-day default duration; the user can
+/// drag and resize them after bulk entry.
+pub fn draw_create_mode_overlay(
+    mut contexts: EguiContexts,
+    mut state: ResMut<CreateModeState>,
+    mut model: ResMut<model::Model>,
+    conn: NonSend<rusqlite::Connection>,
+) {
+    if !state.active {
+        return;
+    }
+    let Ok(ctx) = contexts.ctx_mut() else { return };
+
+    let mut create_block = false;
+    let mut exit_mode = false;
+
+    egui::Window::new("Quick Create  [N]")
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_TOP, [0.0, 60.0])
+        .show(ctx, |ui| {
+            ui.label("↵ to create  ·  Ctrl+↵ for newline  ·  Esc to exit");
+            let response = ui.add(
+                egui::TextEdit::multiline(&mut state.text_buf)
+                    .hint_text("Block name…")
+                    .desired_width(240.0)
+                    .desired_rows(2),
+            );
+            response.request_focus();
+            if response.has_focus() {
+                let plain_enter = ui.input(|i| {
+                    i.key_pressed(egui::Key::Enter)
+                        && !i.modifiers.ctrl
+                        && !i.modifiers.command
+                });
+                if plain_enter {
+                    if state.text_buf.ends_with('\n') {
+                        state.text_buf.pop();
+                    }
+                    create_block = true;
+                }
+                if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                    exit_mode = true;
+                }
+            }
+        });
+
+    if create_block {
+        let name = state.text_buf.trim().to_string();
+        if !name.is_empty() {
+            let est = Estimate {
+                most_likely: 1.0,
+                optimistic: 0.7,
+                pessimistic: 1.5,
+                confidence: 0.8,
+            };
+            let new_id = model.create_work_block(name, est);
+            if let Some(plan) = model.plans.values_mut().next() {
+                plan.root_blocks.push(new_id);
+            }
+            if let Err(e) = db::save_model(&conn, &model) {
+                error!("save_model failed: {e}");
+            }
+        }
+        state.text_buf.clear();
+    }
+
+    if exit_mode {
+        state.active = false;
+        state.text_buf.clear();
+    }
+}
+
 /// Shows a description tooltip when the pointer hovers over a block that has notes.
 /// Renders an egui Area near the cursor so it floats above all other UI.
 pub fn draw_description_tooltip(
