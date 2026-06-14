@@ -45,6 +45,9 @@ pub struct WorkBlock {
     /// User-defined placement: duration in days.
     /// 0.0 until the user manually sizes the block.
     pub duration_days: f32,
+    /// Optional user-defined HDR color [R, G, B] in linear space.
+    /// Values > 1.0 trigger bloom. `None` falls back to the palette default.
+    pub color: Option<[f32; 3]>,
 }
 
 /// One alternative decomposition of a parent WorkBlock into an ordered sequence
@@ -187,6 +190,7 @@ impl Model {
                 variants: vec![],
                 start_day: 0.0,
                 duration_days: 0.0,
+                color: None,
             },
         );
         id

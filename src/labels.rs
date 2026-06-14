@@ -114,6 +114,19 @@ pub fn draw_nesting_indicators(
     }
 }
 
+pub fn scale_labels_to_zoom(
+    cam_q: Query<&Projection, With<Camera2d>>,
+    mut label_q: Query<&mut Transform, With<DayLabel>>,
+) {
+    let Ok(proj) = cam_q.single() else { return };
+    let Projection::Orthographic(ortho) = proj else { return };
+    let s = ortho.scale;
+    for mut transform in &mut label_q {
+        transform.scale = Vec3::splat(s);
+    }
+}
+
+
 /// Draws a red connecting line between each pair of blocks that violates a
 /// dependency constraint. The line runs from the predecessor's right edge to
 /// the successor's left edge, using live BlockSprite Y positions.

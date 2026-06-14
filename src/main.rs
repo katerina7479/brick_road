@@ -90,6 +90,7 @@ fn main() {
         )
         .add_systems(Update, labels::draw_nesting_indicators)
         .add_systems(Update, labels::draw_violation_indicators)
+        .add_systems(Update, labels::scale_labels_to_zoom)
         .add_systems(EguiPrimaryContextPass, side_panel_ui)
         .add_systems(EguiPrimaryContextPass, blocks::draw_name_edit_overlay)
         .run();
@@ -301,6 +302,7 @@ fn side_panel_ui(
             let mut optimistic = wb.estimate.optimistic;
             let mut pessimistic = wb.estimate.pessimistic;
             let confidence = wb.estimate.confidence;
+            let color = wb.color;
 
             let (start_day, end_day) = (wb.start_day, wb.start_day + wb.duration_days);
 
@@ -353,6 +355,81 @@ fn side_panel_ui(
                     wb.estimate.most_likely = most_likely;
                     wb.estimate.optimistic = optimistic;
                     wb.estimate.pessimistic = pessimistic;
+                }
+                if let Err(e) = db::save_model(&conn, &model) {
+                    error!("save_model failed: {e}");
+                }
+            }
+
+            ui.separator();
+            ui.label("Color");
+
+            // Preset HDR-friendly swatches — channels > 1.0 trigger bloom.
+            const PRESETS: &[(&str, [f32; 3])] = &[
+                ("Amber",   [2.0, 0.5, 0.1]),
+                ("Green",   [0.2, 1.8, 0.5]),
+                ("Cyan",    [0.2, 0.8, 3.0]),
+                ("Magenta", [2.2, 0.3, 1.5]),
+                ("Yellow",  [2.5, 1.8, 0.1]),
+                ("Blue",    [0.5, 0.5, 3.0]),
+                ("Pink",    [2.5, 0.3, 2.0]),
+                ("Teal",    [0.2, 2.5, 1.5]),
+                ("Orange",  [3.0, 1.0, 0.1]),
+                ("Purple",  [1.2, 0.2, 2.5]),
+            ];
+
+            let mut color_changed = false;
+            let mut new_color = color;
+
+            ui.horizontal_wrapped(|ui| {
+                for (label, rgb) in PRESETS {
+                    let [r, g, b] = *rgb;
+                    // Tone-map HDR → 8-bit for the swatch background.
+                    let fill = egui::Color32::from_rgb(
+                        ((r / 3.5).min(1.0) * 220.0) as u8,
+                        ((g / 3.5).min(1.0) * 220.0) as u8,
+                        ((b / 3.5).min(1.0) * 220.0) as u8,
+                    );
+                    let active = color.is_some_and(|c| {
+                        (c[0] - r).abs() < 0.01
+                            && (c[1] - g).abs() < 0.01
+                            && (c[2] - b).abs() < 0.01
+                    });
+                    let mut btn = egui::Button::new("")
+                        .fill(fill)
+                        .min_size(egui::Vec2::splat(18.0));
+                    if active {
+                        btn = btn.stroke(egui::Stroke::new(2.0, egui::Color32::WHITE));
+                    }
+                    if ui.add(btn).on_hover_text(*label).clicked() {
+                        new_color = Some(*rgb);
+                        color_changed = true;
+                    }
+                }
+                if ui
+                    .small_button("×")
+                    .on_hover_text("Reset to palette color")
+                    .clicked()
+                {
+                    new_color = None;
+                    color_changed = true;
+                }
+            });
+
+            // Custom HDR sliders — allow values > 1.0 for bloom.
+            ui.label("Custom (R / G / B)");
+            let mut custom = color.unwrap_or([1.0, 1.0, 1.0]);
+            let cr = ui.add(egui::Slider::new(&mut custom[0], 0.0f32..=3.0).text("R").step_by(0.05)).changed();
+            let cg = ui.add(egui::Slider::new(&mut custom[1], 0.0f32..=3.0).text("G").step_by(0.05)).changed();
+            let cb = ui.add(egui::Slider::new(&mut custom[2], 0.0f32..=3.0).text("B").step_by(0.05)).changed();
+            if cr || cg || cb {
+                new_color = Some(custom);
+                color_changed = true;
+            }
+
+            if color_changed {
+                if let Some(wb) = model.work_blocks.get_mut(&sel_id) {
+                    wb.color = new_color;
                 }
                 if let Err(e) = db::save_model(&conn, &model) {
                     error!("save_model failed: {e}");
