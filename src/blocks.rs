@@ -1,8 +1,7 @@
 use bevy::prelude::*;
 
-use crate::{constants::PIXELS_PER_DAY, model::WorkBlockId, schedule::Schedule};
+use crate::{constants::{PIXELS_PER_DAY, ROW_HEIGHT}, model::WorkBlockId, schedule::Schedule};
 
-const ROW_HEIGHT: f32 = 40.0;
 const BLOCK_HEIGHT: f32 = 28.0;
 
 /// HDR linear palette — one or more channels > 1.0 so the Bloom post-process fires.
@@ -43,16 +42,26 @@ pub fn spawn_block_sprites(
             .then(a.work_block_id.0.cmp(&b.work_block_id.0))
     });
 
+    let on_critical_path: std::collections::HashSet<WorkBlockId> =
+        schedule.critical_path.iter().copied().collect();
+
     for (row, block) in ordered.iter().enumerate() {
         let width = block.duration_days * PIXELS_PER_DAY;
         // Sprite origin is at its center in Bevy 2D.
         let x = block.start_day * PIXELS_PER_DAY + width * 0.5;
         let y = -(row as f32) * ROW_HEIGHT;
 
+        // Critical-path blocks glow gold; others cycle through the palette.
+        let color = if on_critical_path.contains(&block.work_block_id) {
+            Color::from(LinearRgba::new(3.0, 2.2, 0.1, 1.0))
+        } else {
+            Color::from(PALETTE[row % PALETTE.len()])
+        };
+
         commands.spawn((
             BlockSprite { work_block_id: block.work_block_id, row },
             Sprite {
-                color: Color::from(PALETTE[row % PALETTE.len()]),
+                color,
                 custom_size: Some(Vec2::new(width, BLOCK_HEIGHT)),
                 ..default()
             },

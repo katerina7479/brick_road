@@ -11,6 +11,7 @@ pub mod camera;
 pub mod constants;
 pub mod db;
 pub mod graph;
+pub mod labels;
 pub mod model;
 pub mod schedule;
 
@@ -33,9 +34,11 @@ fn main() {
         .add_systems(Startup, (setup_db, setup_camera))
         .add_systems(Startup, setup_demo_schedule.after(setup_db))
         .add_systems(PostStartup, blocks::spawn_block_sprites)
+        .add_systems(PostStartup, labels::spawn_labels.after(blocks::spawn_block_sprites))
         .add_systems(Update, (update_camera_target, smooth_camera).chain())
         .add_systems(Update, draw_grid)
         .add_systems(Update, blocks::sync_block_sprites)
+        .add_systems(Update, labels::draw_nesting_indicators)
         .add_systems(EguiPrimaryContextPass, side_panel_ui)
         .run();
 }
