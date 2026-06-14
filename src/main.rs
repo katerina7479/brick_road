@@ -470,8 +470,20 @@ fn side_panel_ui(
             let confidence = wb.estimate.confidence;
             let color = wb.color;
             let priority = wb.priority;
+            let block_variant_ids = wb.variants.clone();
 
             let (start_day, end_day) = (wb.start_day, wb.start_day + wb.duration_days);
+
+            // Clone variant names and current selection before any mutable model borrow.
+            let variant_names: Vec<(model::VariantId, String)> = block_variant_ids
+                .iter()
+                .filter_map(|&vid| model.variants.get(&vid).map(|v| (vid, v.name.clone())))
+                .collect();
+            let plan_id = schedule.plan_id;
+            let current_var = model
+                .plans
+                .get(&plan_id)
+                .and_then(|p| p.selected_variants.get(&sel_id).copied());
 
             let name_changed = ui.text_edit_singleline(&mut name).changed();
             if name_changed && !name.trim().is_empty() {
@@ -495,6 +507,64 @@ fn side_panel_ui(
                     error!("save_model failed: {e}");
                 }
             }
+
+            // Variant selector — only shown when the block has variants.
+            if !variant_names.is_empty() {
+                ui.separator();
+                ui.label("Variants");
+                let mut new_sel: Option<Option<model::VariantId>> = None;
+                if ui.radio(current_var.is_none(), "None").clicked() {
+                    new_sel = Some(None);
+                }
+                for &(var_id, ref var_name) in &variant_names {
+                    if ui.radio(current_var == Some(var_id), var_name.as_str()).clicked() {
+                        new_sel = Some(Some(var_id));
+                    }
+                }
+                if let Some(selection) = new_sel {
+                    // Zero out the old variant's children so they disappear from the timeline.
+                    if let Some(old_vid) = current_var {
+                        if let Some(old_v) = model.variants.get(&old_vid) {
+                            let children: Vec<_> = old_v.children.clone();
+                            for child_id in children {
+                                if let Some(wb) = model.work_blocks.get_mut(&child_id) {
+                                    wb.start_day = 0.0;
+                                    wb.duration_days = 0.0;
+                                }
+                            }
+                        }
+                    }
+                    // Apply new selection (or remove it when "None" was chosen).
+                    if let Some(plan) = model.plans.get_mut(&plan_id) {
+                        match selection {
+                            Some(var_id) => {
+                                plan.selected_variants.insert(sel_id, var_id);
+                            }
+                            None => {
+                                plan.selected_variants.remove(&sel_id);
+                            }
+                        }
+                    }
+                    // Recompute schedule from the updated variant selection.
+                    if let Some(plan) = model.plans.get(&plan_id).cloned() {
+                        let dep_graph = graph::build_graph(&model, &plan);
+                        if let Ok(new_sched) = schedule::forward_pass(&model, &plan, &dep_graph) {
+                            *cycle_error = None;
+                            for sb in new_sched.blocks.values() {
+                                if let Some(wb) = model.work_blocks.get_mut(&sb.work_block_id) {
+                                    wb.start_day = sb.start_day;
+                                    wb.duration_days = sb.duration_days;
+                                }
+                            }
+                            *schedule = new_sched;
+                        }
+                    }
+                    if let Err(e) = db::save_model(&conn, &model) {
+                        error!("save_model failed: {e}");
+                    }
+                }
+            }
+
             ui.separator();
             ui.label(format!("Start:  day {:.1}", start_day));
             ui.label(format!("End:    day {:.1}", end_day));
