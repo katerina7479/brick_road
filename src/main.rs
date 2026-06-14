@@ -673,12 +673,17 @@ fn side_panel_ui(
                 let names: Vec<String> = scope
                     .scope_stack
                     .iter()
-                    .map(|&id| {
-                        model
+                    .map(|entry| match entry {
+                        schedule::ScopeEntry::Block(id) => model
                             .work_blocks
-                            .get(&id)
+                            .get(id)
                             .map(|wb| wb.name.clone())
-                            .unwrap_or_else(|| "?".to_string())
+                            .unwrap_or_else(|| "?".to_string()),
+                        schedule::ScopeEntry::Variant(vid) => model
+                            .variants
+                            .get(vid)
+                            .map(|v| format!("⬡ {}", v.name))
+                            .unwrap_or_else(|| "?".to_string()),
                     })
                     .collect();
                 let mut truncate_to: Option<usize> = None;
@@ -1332,13 +1337,13 @@ fn side_panel_ui(
                 .map(|wb| wb.variants.clone())
                 .unwrap_or_default();
 
-            let mut drill_in = false;
+            let mut drill_variant: Option<model::VariantId> = None;
 
-            for vid in &variant_ids {
-                if let Some(v) = model.variants.get(vid) {
+            for &vid in &variant_ids {
+                if let Some(v) = model.variants.get(&vid) {
                     let label = format!("{} ({} blocks)", v.name, v.children.len());
                     if ui.link(label).on_hover_text("Drill in to edit").clicked() {
-                        drill_in = true;
+                        drill_variant = Some(vid);
                     }
                 }
             }
@@ -1349,14 +1354,17 @@ fn side_panel_ui(
                 if let Some(wb) = model.work_blocks.get_mut(&sel_id) {
                     wb.variants.push(vid);
                 }
-                drill_in = true;
+                drill_variant = Some(vid);
                 if let Err(e) = db::save_model(&conn, &model) {
                     error!("save_model failed: {e}");
                 }
             }
 
-            if drill_in && !scope.scope_stack.contains(&sel_id) {
-                scope.scope_stack.push(sel_id);
+            if let Some(vid) = drill_variant {
+                let entry = schedule::ScopeEntry::Variant(vid);
+                if !scope.scope_stack.contains(&entry) {
+                    scope.scope_stack.push(entry);
+                }
             }
         });
 }

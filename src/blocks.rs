@@ -1318,7 +1318,7 @@ pub fn handle_name_edit(
                     if let Some(wb) = model.work_blocks.get(&id) {
                         if !wb.variants.is_empty() {
                             // Push onto the stack to drill into this block's children.
-                            scope.scope_stack.push(id);
+                            scope.scope_stack.push(schedule::ScopeEntry::Block(id));
                         } else {
                             // Rename the block inline.
                             name_edit.editing = Some(id);
