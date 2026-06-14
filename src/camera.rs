@@ -122,11 +122,12 @@ pub fn fit_to_blocks(
 
     let zoom = ((x_span / avail_w).max(y_span / avail_h) * MARGIN).clamp(0.15, 6.0);
 
-    // Centre the blocks in the timeline area (window minus side panel).
-    // Camera pos maps to the window centre, so shift right by half the panel.
+    // Centre the blocks in the timeline area (left portion of window, right panel excluded).
+    // The camera pos maps to the window centre; shift left by half the panel width
+    // so blocks appear centred in the available area to the left of the panel.
     let blocks_cx = (x_min + x_max) * 0.5;
     let blocks_cy = (y_min + y_max) * 0.5;
-    let pos_x = blocks_cx - zoom * SIDE_PANEL_WIDTH * 0.5;
+    let pos_x = blocks_cx + zoom * SIDE_PANEL_WIDTH * 0.5;
 
     Some(CameraTarget {
         pos: Vec2::new(pos_x, blocks_cy),

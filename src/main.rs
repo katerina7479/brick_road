@@ -396,7 +396,7 @@ fn resource_row_labels_ui(
         .fixed_pos(egui::Pos2::ZERO)
         .interactable(false)
         .show(ctx, |ui| {
-            let label_x = constants::SIDE_PANEL_WIDTH + 6.0;
+            let label_x = 6.0;
             for (row, resource) in resources.iter().enumerate() {
                 let world_y = -(row as f32) * constants::ROW_HEIGHT;
                 let sy = world_y_to_screen(world_y);
@@ -605,12 +605,9 @@ fn side_panel_ui(
     mut camera_target: ResMut<CameraTarget>,
 ) {
     let Ok(ctx) = contexts.ctx_mut() else { return };
-    egui::SidePanel::left("side_panel")
+    egui::SidePanel::right("side_panel")
         .min_width(SIDE_PANEL_WIDTH)
         .show(ctx, |ui| {
-            // Space reserved for the floating logo button (logo_ui anchored at LEFT_TOP+(8,8)).
-            ui.add_space(28.0);
-
             // Plan selector — tabs across the top of the panel.
             {
                 let mut sorted_plans: Vec<_> = model
