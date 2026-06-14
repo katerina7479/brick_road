@@ -122,6 +122,10 @@ pub struct Variant {
     pub parent: WorkBlockId,
     /// Ordered child WorkBlocks that collectively implement this variant.
     pub children: Vec<WorkBlockId>,
+    /// Saved (start_day, duration_days) for each child, snapshotted when this
+    /// variant is deactivated and restored when it is re-activated. Only
+    /// entries for blocks that were placed (duration_days > 0) are stored.
+    pub block_positions: HashMap<WorkBlockId, (Day, Day)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -215,6 +219,10 @@ pub struct Plan {
     pub selected_variants: HashMap<WorkBlockId, VariantId>,
     /// Resource allocations for this plan.
     pub allocations: Vec<ResourceAllocation>,
+    /// When `Some(d)`, this plan is a future branch: block start_day is
+    /// clamped to ≥ d (the working-day offset of "today" at branch creation).
+    /// `None` for the baseline plan, which may contain historical blocks.
+    pub branch_start_day: Option<Day>,
 }
 
 /// Central data store. All entities are keyed by their ID type.
@@ -276,6 +284,7 @@ impl Model {
                 name: name.into(),
                 parent,
                 children: vec![],
+                block_positions: HashMap::new(),
             },
         );
         id
@@ -345,7 +354,12 @@ impl Model {
         id
     }
 
-    pub fn create_plan(&mut self, name: impl Into<String>, world_id: WorldId) -> PlanId {
+    pub fn create_plan(
+        &mut self,
+        name: impl Into<String>,
+        world_id: WorldId,
+        branch_start_day: Option<Day>,
+    ) -> PlanId {
         let id = PlanId(self.alloc_id());
         self.plans.insert(
             id,
@@ -356,6 +370,7 @@ impl Model {
                 root_blocks: vec![],
                 selected_variants: HashMap::new(),
                 allocations: vec![],
+                branch_start_day,
             },
         );
         id
@@ -479,7 +494,7 @@ mod tests {
     fn create_and_retrieve_all_entity_types() {
         let mut m = Model::default();
         let world_id = m.create_world("baseline");
-        let plan_id = m.create_plan("plan A", world_id);
+        let plan_id = m.create_plan("plan A", world_id, None);
         let res_id = m.create_resource_block("Alice", ResourceType::Person);
         let ms_id = m.create_milestone("launch", 90);
         let block_a = m.create_work_block("a", est());

@@ -177,7 +177,7 @@ mod tests {
 
     fn empty_plan(model: &mut Model) -> Plan {
         let world_id = model.create_world("w");
-        let plan_id = model.create_plan("p", world_id);
+        let plan_id = model.create_plan("p", world_id, None);
         model.plans.remove(&plan_id).unwrap()
     }
 
@@ -194,7 +194,7 @@ mod tests {
     fn linear_chain() {
         let mut model = Model::default();
         let world_id = model.create_world("w");
-        let plan_id = model.create_plan("p", world_id);
+        let plan_id = model.create_plan("p", world_id, None);
 
         let a = model.create_work_block("A", est());
         let b = model.create_work_block("B", est());
@@ -217,7 +217,7 @@ mod tests {
     fn diamond() {
         let mut model = Model::default();
         let world_id = model.create_world("w");
-        let plan_id = model.create_plan("p", world_id);
+        let plan_id = model.create_plan("p", world_id, None);
 
         let a = model.create_work_block("A", est());
         let b = model.create_work_block("B", est());
@@ -251,7 +251,7 @@ mod tests {
     fn cycle_detected() {
         let mut model = Model::default();
         let world_id = model.create_world("w");
-        let plan_id = model.create_plan("p", world_id);
+        let plan_id = model.create_plan("p", world_id, None);
 
         let a = model.create_work_block("A", est());
         let b = model.create_work_block("B", est());
@@ -277,7 +277,7 @@ mod tests {
     fn variant_selection_expands_correct_children() {
         let mut model = Model::default();
         let world_id = model.create_world("w");
-        let plan_id = model.create_plan("p", world_id);
+        let plan_id = model.create_plan("p", world_id, None);
 
         let parent = model.create_work_block("parent", est());
         let child_a = model.create_work_block("child_a", est());
@@ -317,7 +317,7 @@ mod tests {
         // must appear in the graph as a leaf — no children expanded.
         let mut model = Model::default();
         let world_id = model.create_world("w");
-        let plan_id = model.create_plan("p", world_id);
+        let plan_id = model.create_plan("p", world_id, None);
 
         let parent = model.create_work_block("parent", est());
         let child = model.create_work_block("child", est());
@@ -345,7 +345,7 @@ mod tests {
         // must not appear in the graph, even if dependencies reference them.
         let mut model = Model::default();
         let world_id = model.create_world("w");
-        let plan_id = model.create_plan("p", world_id);
+        let plan_id = model.create_plan("p", world_id, None);
 
         let a = model.create_work_block("A", est());
         let b = model.create_work_block("B", est()); // NOT in plan

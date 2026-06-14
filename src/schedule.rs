@@ -6,7 +6,7 @@ use chrono::NaiveDate;
 use crate::graph::{CycleError, DependencyGraph};
 use crate::model::{
     AvailabilitySegment, CalendarConfig, Day, DependencyType, Model, Plan, PlanId, ResourceBlockId,
-    WorkBlock, WorkBlockId,
+    VariantId, WorkBlock, WorkBlockId,
 };
 
 /// Converts a working-day position to a calendar date using the plan's calendar.
@@ -91,14 +91,24 @@ pub fn sorted_blocks(model: &Model) -> Vec<&WorkBlock> {
     blocks
 }
 
+/// One level in the drill-in navigation stack.
+///
+/// A `Block` entry shows children from *all* variants of that block (the old
+/// behaviour, kept for any programmatic callers). A `Variant` entry shows only
+/// the children of that specific variant, allowing per-variant isolation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScopeEntry {
+    Block(WorkBlockId),
+    Variant(VariantId),
+}
+
 /// Tracks the navigation stack of drill-in levels currently displayed.
 ///
 /// An empty stack means the top-level plan view (all placed blocks).
-/// Each element is a block whose variant children are shown at that depth.
 /// `scope_stack.last()` is the innermost (currently visible) level.
 #[derive(Debug, Clone, Resource, Default)]
 pub struct ViewScope {
-    pub scope_stack: Vec<WorkBlockId>,
+    pub scope_stack: Vec<ScopeEntry>,
 }
 
 /// Which rendering mode the timeline is in.
@@ -114,35 +124,62 @@ pub enum TimelineViewMode {
 /// Returns the blocks visible at the current view scope, sorted by
 /// ascending `start_day` with id as a tie-breaker.
 ///
-/// - Top-level view (`scope.scope_stack` is empty): same as `sorted_blocks`.
-/// - Drilled-in view: only the placed children from all variants of the
-///   innermost focused block. Falls back to the top-level view if the
-///   focused block has no variants or no placed children.
+/// - Empty stack: same as `sorted_blocks` (top-level plan view).
+/// - `ScopeEntry::Variant(vid)`: only the placed children of that specific
+///   variant. Falls back to `sorted_blocks` when the variant has no placed
+///   children.
+/// - `ScopeEntry::Block(id)`: placed children from *all* variants of the
+///   focused block (legacy / programmatic path). Falls back to `sorted_blocks`
+///   when the block has no placed variant children.
 pub fn visible_blocks<'a>(model: &'a Model, scope: &ViewScope) -> Vec<&'a WorkBlock> {
-    if let Some(&focused_id) = scope.scope_stack.last() {
-        if let Some(wb) = model.work_blocks.get(&focused_id) {
-            let child_ids: std::collections::HashSet<WorkBlockId> = wb
-                .variants
-                .iter()
-                .filter_map(|vid| model.variants.get(vid))
-                .flat_map(|v| v.children.iter().copied())
-                .collect();
-            if !child_ids.is_empty() {
-                let mut children: Vec<&WorkBlock> = model
-                    .work_blocks
-                    .values()
-                    .filter(|wb| child_ids.contains(&wb.id) && wb.duration_days > 0)
+    let sorted = |children: Vec<&'a WorkBlock>| {
+        let mut v = children;
+        v.sort_by(|a, b| {
+            a.start_day
+                .cmp(&b.start_day)
+                .then(a.id.0.cmp(&b.id.0))
+        });
+        v
+    };
+
+    match scope.scope_stack.last() {
+        Some(ScopeEntry::Variant(vid)) => {
+            if let Some(variant) = model.variants.get(vid) {
+                let children: Vec<&WorkBlock> = variant
+                    .children
+                    .iter()
+                    .filter_map(|id| model.work_blocks.get(id))
+                    .filter(|wb| wb.duration_days > 0)
                     .collect();
-                children.sort_by(|a, b| {
-                    a.start_day
-                        .cmp(&b.start_day)
-                        .then(a.id.0.cmp(&b.id.0))
-                });
-                return children;
+                if !children.is_empty() {
+                    return sorted(children);
+                }
             }
+            sorted_blocks(model)
         }
+        Some(ScopeEntry::Block(focused_id)) => {
+            if let Some(wb) = model.work_blocks.get(focused_id) {
+                let child_ids: std::collections::HashSet<WorkBlockId> = wb
+                    .variants
+                    .iter()
+                    .filter_map(|vid| model.variants.get(vid))
+                    .flat_map(|v| v.children.iter().copied())
+                    .collect();
+                if !child_ids.is_empty() {
+                    let children: Vec<&WorkBlock> = model
+                        .work_blocks
+                        .values()
+                        .filter(|wb| child_ids.contains(&wb.id) && wb.duration_days > 0)
+                        .collect();
+                    if !children.is_empty() {
+                        return sorted(children);
+                    }
+                }
+            }
+            sorted_blocks(model)
+        }
+        None => sorted_blocks(model),
     }
-    sorted_blocks(model)
 }
 
 /// Cached result of `visible_blocks()`, recomputed only when `Model` or
@@ -173,6 +210,39 @@ pub fn update_visible_blocks(
     if new_ids != cache.ids {
         cache.ids = new_ids;
     }
+}
+
+/// Tracks today's position on the timeline as a working-day number.
+#[derive(Debug, Default, Resource)]
+pub struct TodayMarker {
+    pub day: Day,
+}
+
+/// Recomputes `TodayMarker` when the model's calendar changes.
+///
+/// Converts the UTC Unix timestamp to a Gregorian date using the
+/// Howard Hinnant algorithm — no `chrono/clock` feature required.
+pub fn update_today_marker(model: Res<Model>, mut today: ResMut<TodayMarker>) {
+    if !model.is_changed() {
+        return;
+    }
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    // Civil date from Unix day count (Hinnant algorithm, public domain).
+    let z = (secs / 86400) as i64 + 719468;
+    let era = (if z >= 0 { z } else { z - 146096 }) / 146097;
+    let doe = (z - era * 146097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe as i64 + era * 400 + if m <= 2 { 1 } else { 0 };
+    let today_date = NaiveDate::from_ymd_opt(y as i32, m as u32, d as u32)
+        .unwrap_or_else(|| NaiveDate::from_ymd_opt(2025, 1, 1).unwrap());
+    today.day = crate::calendar::date_to_day(today_date, &model.calendar);
 }
 
 /// Propagate dependency constraints to all blocks reachable (transitively)
@@ -949,7 +1019,7 @@ mod tests {
     fn base() -> (Model, crate::model::PlanId) {
         let mut m = Model::default();
         let wid = m.create_world("w");
-        let pid = m.create_plan("p", wid);
+        let pid = m.create_plan("p", wid, None);
         (m, pid)
     }
 
@@ -1928,5 +1998,77 @@ mod tests {
         assert_eq!(avail_at(&sorted, 2), 1.0);
         assert_eq!(avail_at(&sorted, 7), 0.5);
         assert_eq!(avail_at(&sorted, 11), 1.0); // gap defaults to 1.0
+    }
+
+    // ── visible_blocks / ScopeEntry tests ──────────────────────────────────────
+
+    fn placed_block(m: &mut Model, name: &str, start: Day, dur: Day) -> WorkBlockId {
+        let id = m.create_work_block(name, est(dur));
+        let wb = m.work_blocks.get_mut(&id).unwrap();
+        wb.start_day = start;
+        wb.duration_days = dur;
+        id
+    }
+
+    #[test]
+    fn visible_blocks_empty_scope_returns_sorted_blocks() {
+        let mut m = Model::default();
+        let a = placed_block(&mut m, "A", 0, 2);
+        let b = placed_block(&mut m, "B", 3, 1);
+        let scope = ViewScope::default();
+        let ids: Vec<WorkBlockId> = visible_blocks(&m, &scope).iter().map(|wb| wb.id).collect();
+        assert_eq!(ids, vec![a, b]);
+    }
+
+    #[test]
+    fn visible_blocks_variant_scope_shows_only_that_variants_children() {
+        let mut m = Model::default();
+        let parent = placed_block(&mut m, "Parent", 0, 5);
+        let var_a = m.create_variant("Variant A", parent);
+        let var_b = m.create_variant("Variant B", parent);
+        let child_a = placed_block(&mut m, "Child A1", 0, 3);
+        let child_b = placed_block(&mut m, "Child B1", 0, 4);
+        m.work_blocks.get_mut(&parent).unwrap().variants.extend([var_a, var_b]);
+        m.variants.get_mut(&var_a).unwrap().children.push(child_a);
+        m.variants.get_mut(&var_b).unwrap().children.push(child_b);
+
+        let scope_a = ViewScope { scope_stack: vec![ScopeEntry::Variant(var_a)] };
+        let ids_a: Vec<WorkBlockId> = visible_blocks(&m, &scope_a).iter().map(|wb| wb.id).collect();
+        assert_eq!(ids_a, vec![child_a], "variant A scope shows only child A");
+
+        let scope_b = ViewScope { scope_stack: vec![ScopeEntry::Variant(var_b)] };
+        let ids_b: Vec<WorkBlockId> = visible_blocks(&m, &scope_b).iter().map(|wb| wb.id).collect();
+        assert_eq!(ids_b, vec![child_b], "variant B scope shows only child B");
+    }
+
+    #[test]
+    fn visible_blocks_block_scope_shows_all_variant_children() {
+        let mut m = Model::default();
+        let parent = placed_block(&mut m, "Parent", 0, 5);
+        let var_a = m.create_variant("Variant A", parent);
+        let var_b = m.create_variant("Variant B", parent);
+        let child_a = placed_block(&mut m, "CA", 0, 3);
+        let child_b = placed_block(&mut m, "CB", 4, 2);
+        m.work_blocks.get_mut(&parent).unwrap().variants.extend([var_a, var_b]);
+        m.variants.get_mut(&var_a).unwrap().children.push(child_a);
+        m.variants.get_mut(&var_b).unwrap().children.push(child_b);
+
+        let scope = ViewScope { scope_stack: vec![ScopeEntry::Block(parent)] };
+        let ids: Vec<WorkBlockId> = visible_blocks(&m, &scope).iter().map(|wb| wb.id).collect();
+        assert!(ids.contains(&child_a), "block scope includes child A");
+        assert!(ids.contains(&child_b), "block scope includes child B");
+    }
+
+    #[test]
+    fn visible_blocks_variant_scope_falls_back_when_no_placed_children() {
+        let mut m = Model::default();
+        let top = placed_block(&mut m, "Top", 0, 3);
+        let parent = m.create_work_block("Parent", est(5)); // not placed
+        let vid = m.create_variant("V", parent);
+        // vid has no children at all
+
+        let scope = ViewScope { scope_stack: vec![ScopeEntry::Variant(vid)] };
+        let ids: Vec<WorkBlockId> = visible_blocks(&m, &scope).iter().map(|wb| wb.id).collect();
+        assert_eq!(ids, vec![top], "falls back to top-level sorted blocks");
     }
 }

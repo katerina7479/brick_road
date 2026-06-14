@@ -3,6 +3,11 @@ name = "brick_road"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+# Enable Bevy dynamic linking for faster incremental dev builds.
+# Use via: cargo run --features dev  (or the `cargo dev` alias in .cargo/config.toml)
+dev = ["bevy/dynamic_linking"]
+
 [dependencies]
 bevy = "0.18.0"
 bevy_egui = "0.39.1"
@@ -11,6 +16,10 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 
 [profile.dev]
 opt-level = 1
+# Level 1 debug info is enough for backtraces; full (2) bloats link time.
+debug = 1
+# macOS: write .dSYM incrementally instead of one monolithic file.
+split-debuginfo = "unpacked"
 
 [profile.dev.package."*"]
 opt-level = 3

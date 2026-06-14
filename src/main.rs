@@ -44,8 +44,10 @@ fn main() {
         .insert_resource(schedule::TimelineViewMode::default())
         .insert_resource(schedule::VisibleBlocks::default())
         .insert_resource(analysis::ScheduleAnalysis::default())
+        .insert_resource(schedule::TodayMarker::default())
         .insert_resource(blocks::BlockSpriteMap::default())
         .insert_resource(labels::NestingDepthMap::default())
+        .insert_resource(ResourceDragState::default())
         .add_systems(Startup, (setup_db, setup_camera))
         .add_systems(Startup, setup_demo_schedule.after(setup_db))
         .add_systems(PostStartup, update_analysis.before(blocks::reconcile_block_sprites))
@@ -69,6 +71,7 @@ fn main() {
         )
         .add_systems(Update, (camera_nav_keys, update_camera_target, smooth_camera).chain())
         .add_systems(Update, draw_grid)
+        .add_systems(Update, schedule::update_today_marker)
         .add_systems(Update, sync_weekend_bands)
         .add_systems(Update, update_analysis)
         .add_systems(
@@ -135,6 +138,13 @@ fn main() {
         )
         .add_systems(
             Update,
+            blocks::sync_past_overlays
+                .after(blocks::reconcile_block_sprites)
+                .after(schedule::update_today_marker)
+                .run_if(task_view_active),
+        )
+        .add_systems(
+            Update,
             blocks::handle_dep_drag
                 .before(blocks::handle_block_selection)
                 .before(blocks::handle_block_drag)
@@ -186,6 +196,7 @@ fn main() {
                 .run_if(task_view_active),
         )
         .add_systems(Update, draw_resource_timeline)
+        .add_systems(Update, handle_resource_drag)
         .add_systems(EguiPrimaryContextPass, side_panel_ui)
         .add_systems(EguiPrimaryContextPass, camera_nav_ui)
         .add_systems(EguiPrimaryContextPass, logo_ui)
@@ -211,11 +222,14 @@ fn setup_camera(mut commands: Commands) {
 
 fn draw_grid(
     mut gizmos: Gizmos,
+    today: Res<schedule::TodayMarker>,
     cam_q: Query<(&Transform, &Projection), With<Camera2d>>,
     windows: Query<&Window>,
 ) {
-    let line_color = Color::srgba(0.3, 0.3, 0.5, 0.15);
-    let baseline_color = Color::srgba(0.4, 0.4, 0.6, 0.35);
+    let line_color       = Color::srgba(0.3, 0.3, 0.5, 0.15);
+    let past_line_color  = Color::srgba(0.3, 0.3, 0.5, 0.05);
+    let baseline_color   = Color::srgba(0.4, 0.4, 0.6, 0.35);
+    let today_line_color = Color::from(LinearRgba::new(4.0, 2.0, 0.5, 1.0)); // HDR → Bloom
 
     let Ok((cam_t, proj)) = cam_q.single() else { return };
     let Projection::Orthographic(ortho) = proj else { return };
@@ -239,10 +253,15 @@ fn draw_grid(
 
     for day in day_min..=day_max {
         let x = day as f32 * PIXELS_PER_DAY;
-        gizmos.line_2d(Vec2::new(x, y_bottom), Vec2::new(x, y_top), line_color);
+        let color = if day < today.day { past_line_color } else { line_color };
+        gizmos.line_2d(Vec2::new(x, y_bottom), Vec2::new(x, y_top), color);
     }
 
     gizmos.line_2d(Vec2::new(x_left, 0.0), Vec2::new(x_right, 0.0), baseline_color);
+
+    // Prominent today marker — HDR color triggers Bloom.
+    let x_today = today.day as f32 * PIXELS_PER_DAY;
+    gizmos.line_2d(Vec2::new(x_today, y_bottom), Vec2::new(x_today, y_top), today_line_color);
 }
 
 /// Marker for weekend and holiday band sprites behind the timeline grid.
@@ -313,6 +332,126 @@ fn task_view_active(mode: Res<schedule::TimelineViewMode>) -> bool {
     *mode == schedule::TimelineViewMode::Task
 }
 
+/// Tracks an in-progress drag in the resource timeline view.
+#[derive(Resource, Default)]
+struct ResourceDragState {
+    /// The block being dragged and the resource row it came from.
+    dragging: Option<(model::WorkBlockId, model::ResourceBlockId)>,
+}
+
+/// Handles drag-to-reassign in the resource view: the user presses on an
+/// allocated block bar and releases over a different resource row to change
+/// which resource that block is assigned to.
+///
+/// Hit-test geometry mirrors `draw_resource_timeline` (same row Y and bar
+/// height). On release, the matching `ResourceAllocation` in the current plan
+/// has its `resource_id` updated and the model is persisted.
+fn handle_resource_drag(
+    mode: Res<schedule::TimelineViewMode>,
+    mut model: ResMut<model::Model>,
+    schedule: Res<schedule::Schedule>,
+    windows: Query<&Window>,
+    camera: Query<(&Camera, &GlobalTransform), With<Camera2d>>,
+    mouse: Res<ButtonInput<MouseButton>>,
+    conn: NonSend<rusqlite::Connection>,
+    mut drag: ResMut<ResourceDragState>,
+    mut egui_ctx: EguiContexts,
+) {
+    if *mode != schedule::TimelineViewMode::Resource {
+        drag.dragging = None;
+        return;
+    }
+    if let Ok(ctx) = egui_ctx.ctx_mut() {
+        if ctx.is_pointer_over_area() {
+            drag.dragging = None;
+            return;
+        }
+    }
+
+    let Ok(window) = windows.single() else { return };
+    let Ok((cam, cam_transform)) = camera.single() else { return };
+    let Some(cursor_pos) = window.cursor_position() else {
+        drag.dragging = None;
+        return;
+    };
+    let Ok(world_pos) = cam.viewport_to_world_2d(cam_transform, cursor_pos) else { return };
+
+    // Sorted resource list — same order as draw_resource_timeline.
+    let mut resource_ids: Vec<model::ResourceBlockId> =
+        model.resource_blocks.keys().copied().collect();
+    resource_ids.sort_by_key(|id| id.0);
+
+    let bar_h = constants::ROW_HEIGHT * 0.65;
+
+    if mouse.just_pressed(MouseButton::Left) {
+        drag.dragging = None;
+        // Clone allocations to avoid borrow conflict with model.work_blocks below.
+        let plan_id = schedule.plan_id;
+        let allocs: Vec<_> = model
+            .plans
+            .get(&plan_id)
+            .map(|p| p.allocations.iter().map(|a| (a.work_block_id, a.resource_id)).collect())
+            .unwrap_or_default();
+
+        'hit: for (block_id, resource_id) in allocs {
+            let Some(row) = resource_ids.iter().position(|&rid| rid == resource_id) else {
+                continue;
+            };
+            let Some(wb) = model.work_blocks.get(&block_id) else { continue };
+            if wb.duration_days <= 0 {
+                continue;
+            }
+            let x0 = wb.start_day as f32 * PIXELS_PER_DAY;
+            let w = (wb.duration_days as f32 * PIXELS_PER_DAY).max(4.0);
+            let cx = x0 + w * 0.5;
+            let y = -(row as f32) * constants::ROW_HEIGHT;
+
+            if world_pos.x >= cx - w * 0.5
+                && world_pos.x <= cx + w * 0.5
+                && world_pos.y >= y - bar_h * 0.5
+                && world_pos.y <= y + bar_h * 0.5
+            {
+                drag.dragging = Some((block_id, resource_id));
+                break 'hit;
+            }
+        }
+        return;
+    }
+
+    if mouse.just_released(MouseButton::Left) {
+        if let Some((block_id, old_resource_id)) = drag.dragging.take() {
+            // Determine which resource row the cursor is over on release.
+            let new_resource_id =
+                resource_ids.iter().enumerate().find_map(|(row, &rid)| {
+                    let y = -(row as f32) * constants::ROW_HEIGHT;
+                    if (world_pos.y - y).abs() <= constants::ROW_HEIGHT * 0.5 {
+                        Some(rid)
+                    } else {
+                        None
+                    }
+                });
+
+            if let Some(new_rid) = new_resource_id {
+                if new_rid != old_resource_id {
+                    let plan_id = schedule.plan_id;
+                    if let Some(plan) = model.plans.get_mut(&plan_id) {
+                        if let Some(alloc) = plan
+                            .allocations
+                            .iter_mut()
+                            .find(|a| a.work_block_id == block_id && a.resource_id == old_resource_id)
+                        {
+                            alloc.resource_id = new_rid;
+                        }
+                    }
+                    if let Err(e) = db::save_model(&conn, &model) {
+                        error!("save_model failed: {e}");
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Draws one row per resource block when `TimelineViewMode::Resource` is active.
 /// Each row shows bars for every work block allocated to that resource, coloured
 /// red if the window overlaps a detected resource conflict.
@@ -321,11 +460,22 @@ fn draw_resource_timeline(
     model: Res<model::Model>,
     schedule: Res<schedule::Schedule>,
     sa: Res<analysis::ScheduleAnalysis>,
+    drag: Res<ResourceDragState>,
     mut gizmos: Gizmos,
+    cam_q: Query<(&Transform, &Projection), With<Camera2d>>,
+    windows: Query<&Window>,
 ) {
     if *mode != schedule::TimelineViewMode::Resource {
         return;
     }
+
+    let Ok((cam_t, proj)) = cam_q.single() else { return };
+    let Projection::Orthographic(ortho) = proj else { return };
+    let Ok(window) = windows.single() else { return };
+
+    let half_w = (window.width() * 0.5 + PIXELS_PER_DAY) * ortho.scale;
+    let x_left  = cam_t.translation.x - half_w;
+    let x_right = cam_t.translation.x + half_w;
 
     let Some(plan) = model.plans.get(&schedule.plan_id) else { return };
 
@@ -352,8 +502,8 @@ fn draw_resource_timeline(
 
         // Row separator.
         gizmos.line_2d(
-            Vec2::new(-50_000.0, y - constants::ROW_HEIGHT * 0.5),
-            Vec2::new(50_000.0,  y - constants::ROW_HEIGHT * 0.5),
+            Vec2::new(x_left,  y - constants::ROW_HEIGHT * 0.5),
+            Vec2::new(x_right, y - constants::ROW_HEIGHT * 0.5),
             row_sep,
         );
 
@@ -376,6 +526,9 @@ fn draw_resource_timeline(
                 })
             });
 
+            let is_dragged = drag
+                .dragging
+                .is_some_and(|(bid, rid)| bid == alloc.work_block_id && rid == alloc.resource_id);
             let color = if is_conflicted { alloc_conflict } else { alloc_ok };
             let (x_lo, x_hi) = (cx - w * 0.5, cx + w * 0.5);
             let (y_lo, y_hi) = (y - bar_h * 0.5, y + bar_h * 0.5);
@@ -383,6 +536,15 @@ fn draw_resource_timeline(
             gizmos.line_2d(Vec2::new(x_hi, y_lo), Vec2::new(x_hi, y_hi), color);
             gizmos.line_2d(Vec2::new(x_hi, y_hi), Vec2::new(x_lo, y_hi), color);
             gizmos.line_2d(Vec2::new(x_lo, y_hi), Vec2::new(x_lo, y_lo), color);
+            if is_dragged {
+                // Bright white outer outline to indicate the block is being dragged.
+                let pad = 3.0;
+                let drag_color = Color::srgba(3.0, 3.0, 3.0, 1.0);
+                gizmos.line_2d(Vec2::new(x_lo - pad, y_lo - pad), Vec2::new(x_hi + pad, y_lo - pad), drag_color);
+                gizmos.line_2d(Vec2::new(x_hi + pad, y_lo - pad), Vec2::new(x_hi + pad, y_hi + pad), drag_color);
+                gizmos.line_2d(Vec2::new(x_hi + pad, y_hi + pad), Vec2::new(x_lo - pad, y_hi + pad), drag_color);
+                gizmos.line_2d(Vec2::new(x_lo - pad, y_hi + pad), Vec2::new(x_lo - pad, y_lo - pad), drag_color);
+            }
         }
     }
 
@@ -400,8 +562,8 @@ fn draw_resource_timeline(
         let y = -(row as f32) * constants::ROW_HEIGHT;
 
         gizmos.line_2d(
-            Vec2::new(-50_000.0, y - constants::ROW_HEIGHT * 0.5),
-            Vec2::new(50_000.0,  y - constants::ROW_HEIGHT * 0.5),
+            Vec2::new(x_left,  y - constants::ROW_HEIGHT * 0.5),
+            Vec2::new(x_right, y - constants::ROW_HEIGHT * 0.5),
             row_sep,
         );
 
@@ -509,7 +671,7 @@ fn setup_demo_schedule(mut model: ResMut<model::Model>, mut commands: Commands) 
     };
 
     let world_id = model.create_world("Demo");
-    let plan_id = model.create_plan("Demo Plan", world_id);
+    let plan_id = model.create_plan("Demo Plan", world_id, None);
 
     let design = model.create_work_block("Design", est(5));
     let build = model.create_work_block("Build", est(8));
@@ -670,6 +832,8 @@ fn side_panel_ui(
     mut new_size_label: Local<String>,
     mut new_size_error: Local<Option<String>>,
     mut camera_target: ResMut<CameraTarget>,
+    mut compare_plan: Local<Option<model::PlanId>>,
+    today: Res<schedule::TodayMarker>,
 ) {
     let Ok(ctx) = contexts.ctx_mut() else { return };
     egui::SidePanel::right("side_panel")
@@ -719,7 +883,8 @@ fn side_panel_ui(
                         .or_else(|| model.worlds.keys().next().copied());
                     if let Some(wid) = world_id {
                         let n = model.plans.len() + 1;
-                        let new_id = model.create_plan(format!("Plan {n}"), wid);
+                        let new_id =
+                            model.create_plan(format!("Plan {n}"), wid, Some(today.day));
                         *schedule = schedule::Schedule::new(new_id);
                         scope.scope_stack.clear();
                         selected.0 = None;
@@ -737,12 +902,17 @@ fn side_panel_ui(
                 let names: Vec<String> = scope
                     .scope_stack
                     .iter()
-                    .map(|&id| {
-                        model
+                    .map(|entry| match entry {
+                        schedule::ScopeEntry::Block(id) => model
                             .work_blocks
-                            .get(&id)
+                            .get(id)
                             .map(|wb| wb.name.clone())
-                            .unwrap_or_else(|| "?".to_string())
+                            .unwrap_or_else(|| "?".to_string()),
+                        schedule::ScopeEntry::Variant(vid) => model
+                            .variants
+                            .get(vid)
+                            .map(|v| format!("⬡ {}", v.name))
+                            .unwrap_or_else(|| "?".to_string()),
                     })
                     .collect();
                 let mut truncate_to: Option<usize> = None;
@@ -965,6 +1135,195 @@ fn side_panel_ui(
                 }
             });
 
+            // ── Plan Comparison ───────────────────────────────────────────────────
+            ui.separator();
+            ui.collapsing("Compare Plans", |ui| {
+                let current_plan_id = schedule.plan_id;
+
+                // Sorted list of other plans for the picker.
+                let mut other_plans: Vec<(model::PlanId, String)> = model
+                    .plans
+                    .values()
+                    .filter(|p| p.id != current_plan_id)
+                    .map(|p| (p.id, p.name.clone()))
+                    .collect();
+                other_plans.sort_by_key(|(id, _)| id.0);
+
+                // Invalidate compare selection if that plan no longer exists.
+                if let Some(cmp_id) = *compare_plan {
+                    if !model.plans.contains_key(&cmp_id) {
+                        *compare_plan = None;
+                    }
+                }
+
+                let compare_label = compare_plan
+                    .and_then(|id| model.plans.get(&id))
+                    .map(|p| p.name.clone())
+                    .unwrap_or_else(|| "None".to_string());
+
+                egui::ComboBox::from_label("vs.")
+                    .selected_text(&compare_label)
+                    .show_ui(ui, |ui| {
+                        if ui.selectable_label(compare_plan.is_none(), "None").clicked() {
+                            *compare_plan = None;
+                        }
+                        for (pid, ref name) in &other_plans {
+                            if ui
+                                .selectable_label(*compare_plan == Some(*pid), name.as_str())
+                                .clicked()
+                            {
+                                *compare_plan = Some(*pid);
+                            }
+                        }
+                    });
+
+                let Some(cmp_id) = *compare_plan else { return };
+
+                let plan_a = match model.plans.get(&current_plan_id).cloned() {
+                    Some(p) => p,
+                    None => return,
+                };
+                let plan_b = match model.plans.get(&cmp_id).cloned() {
+                    Some(p) => p,
+                    None => return,
+                };
+                let name_a = plan_a.name.clone();
+                let name_b = plan_b.name.clone();
+
+                let graph_a = graph::build_graph(&model, &plan_a);
+                let graph_b = graph::build_graph(&model, &plan_b);
+                let sched_a = schedule::forward_pass(&model, &plan_a, &graph_a).ok();
+                let sched_b = schedule::forward_pass(&model, &plan_b, &graph_b).ok();
+                let conflicts_a = analysis::analyze_resources(&model, &plan_a).len();
+                let conflicts_b = analysis::analyze_resources(&model, &plan_b).len();
+
+                // Build id→duration maps for each plan.
+                let map_a: std::collections::HashMap<model::WorkBlockId, Day> = sched_a
+                    .as_ref()
+                    .map(|s| s.blocks.iter().map(|(&id, sb)| (id, sb.duration_days)).collect())
+                    .unwrap_or_default();
+                let map_b: std::collections::HashMap<model::WorkBlockId, Day> = sched_b
+                    .as_ref()
+                    .map(|s| s.blocks.iter().map(|(&id, sb)| (id, sb.duration_days)).collect())
+                    .unwrap_or_default();
+                let total_a = sched_a.as_ref().map(|s| s.total_duration_days).unwrap_or(0);
+                let total_b = sched_b.as_ref().map(|s| s.total_duration_days).unwrap_or(0);
+
+                // Collect all block IDs that differ between the two plans.
+                let mut all_ids: Vec<model::WorkBlockId> = {
+                    let mut ids: std::collections::HashSet<model::WorkBlockId> = std::collections::HashSet::new();
+                    ids.extend(map_a.keys());
+                    ids.extend(map_b.keys());
+                    ids.into_iter().collect()
+                };
+                all_ids.sort_by_key(|id| id.0);
+
+                // ── Summary ───────────────────────────────────────────────────────
+                ui.separator();
+                egui::Grid::new("plan_compare_summary")
+                    .num_columns(3)
+                    .spacing([8.0, 2.0])
+                    .show(ui, |ui| {
+                        ui.label("");
+                        ui.strong(&name_a);
+                        ui.strong(&name_b);
+                        ui.end_row();
+
+                        ui.label("Duration:");
+                        ui.label(format!("{} d", total_a));
+                        ui.label(format!("{} d", total_b));
+                        ui.end_row();
+
+                        ui.label("Blocks:");
+                        ui.label(format!("{}", map_a.len()));
+                        ui.label(format!("{}", map_b.len()));
+                        ui.end_row();
+
+                        ui.label("Conflicts:");
+                        ui.label(format!("{}", conflicts_a));
+                        ui.label(format!("{}", conflicts_b));
+                        ui.end_row();
+                    });
+
+                // ── Block-level diff ─────────────────────────────────────────────
+                let diff_rows: Vec<(String, Option<Day>, Option<Day>)> = all_ids
+                    .iter()
+                    .filter_map(|id| {
+                        let dur_a = map_a.get(id).copied();
+                        let dur_b = map_b.get(id).copied();
+                        let differs = match (dur_a, dur_b) {
+                            (Some(a), Some(b)) => a != b,
+                            _ => true,
+                        };
+                        if !differs {
+                            return None;
+                        }
+                        let name = model
+                            .work_blocks
+                            .get(id)
+                            .map(|wb| wb.name.clone())
+                            .unwrap_or_else(|| format!("#{}", id.0));
+                        Some((name, dur_a, dur_b))
+                    })
+                    .collect();
+
+                if diff_rows.is_empty() {
+                    ui.weak("Plans are identical.");
+                } else {
+                    ui.separator();
+                    ui.weak(format!("{} differing block(s):", diff_rows.len()));
+                    egui::ScrollArea::vertical()
+                        .id_salt("plan_compare_scroll")
+                        .max_height(180.0)
+                        .show(ui, |ui| {
+                            egui::Grid::new("plan_compare_diff")
+                                .num_columns(4)
+                                .spacing([6.0, 2.0])
+                                .striped(true)
+                                .show(ui, |ui| {
+                                    ui.weak("Block");
+                                    ui.weak(&name_a);
+                                    ui.weak(&name_b);
+                                    ui.weak("Δ");
+                                    ui.end_row();
+                                    for (name, dur_a, dur_b) in &diff_rows {
+                                        let only_a = dur_b.is_none();
+                                        let only_b = dur_a.is_none();
+                                        let row_color = if only_a {
+                                            egui::Color32::from_rgb(80, 160, 80)
+                                        } else if only_b {
+                                            egui::Color32::from_rgb(180, 80, 80)
+                                        } else {
+                                            egui::Color32::from_rgb(180, 160, 80)
+                                        };
+                                        ui.colored_label(row_color, name.as_str());
+                                        match dur_a {
+                                            Some(d) => ui.label(format!("{d}d")),
+                                            None => ui.weak("—"),
+                                        };
+                                        match dur_b {
+                                            Some(d) => ui.label(format!("{d}d")),
+                                            None => ui.weak("—"),
+                                        };
+                                        let delta_label = match (dur_a, dur_b) {
+                                            (Some(a), Some(b)) => {
+                                                let d = b - a;
+                                                if d > 0 {
+                                                    format!("+{d}")
+                                                } else {
+                                                    format!("{d}")
+                                                }
+                                            }
+                                            _ => "—".to_string(),
+                                        };
+                                        ui.label(delta_label);
+                                        ui.end_row();
+                                    }
+                                });
+                        });
+                }
+            });
+
             ui.separator();
 
             let Some(sel_id) = selected.0 else {
@@ -1045,15 +1404,42 @@ fn side_panel_ui(
                     }
                 }
                 if let Some(selection) = new_sel {
-                    // Zero out the old variant's children so they disappear from the timeline.
+                    // Snapshot placed positions for the old variant before zeroing children.
                     if let Some(old_vid) = current_var {
-                        if let Some(old_v) = model.variants.get(&old_vid) {
-                            let children: Vec<_> = old_v.children.clone();
-                            for child_id in children {
-                                if let Some(wb) = model.work_blocks.get_mut(&child_id) {
-                                    wb.start_day = 0;
-                                    wb.duration_days = 0;
-                                }
+                        let snapshot: Vec<(model::WorkBlockId, Day, Day)> = model
+                            .variants
+                            .get(&old_vid)
+                            .map(|v| {
+                                v.children
+                                    .iter()
+                                    .filter_map(|&cid| {
+                                        model.work_blocks.get(&cid).filter(|wb| wb.duration_days > 0)
+                                            .map(|wb| (cid, wb.start_day, wb.duration_days))
+                                    })
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        if let Some(old_v) = model.variants.get_mut(&old_vid) {
+                            old_v.block_positions.clear();
+                            for &(cid, sd, dd) in &snapshot {
+                                old_v.block_positions.insert(cid, (sd, dd));
+                            }
+                        }
+                        for &(cid, _, _) in &snapshot {
+                            if let Some(wb) = model.work_blocks.get_mut(&cid) {
+                                wb.start_day = 0;
+                                wb.duration_days = 0;
+                            }
+                        }
+                        let unplaced: Vec<_> = model
+                            .variants
+                            .get(&old_vid)
+                            .map(|v| v.children.clone())
+                            .unwrap_or_default();
+                        for cid in unplaced {
+                            if let Some(wb) = model.work_blocks.get_mut(&cid) {
+                                wb.start_day = 0;
+                                wb.duration_days = 0;
                             }
                         }
                     }
@@ -1080,6 +1466,26 @@ fn side_panel_ui(
                                 }
                             }
                             *schedule = new_sched;
+                        }
+                    }
+                    // Restore saved positions for the newly activated variant,
+                    // overriding what forward_pass derived from estimate.most_likely.
+                    if let Some(new_vid) = selection {
+                        let saved: Vec<(model::WorkBlockId, Day, Day)> = model
+                            .variants
+                            .get(&new_vid)
+                            .map(|v| {
+                                v.block_positions
+                                    .iter()
+                                    .map(|(&cid, &(sd, dd))| (cid, sd, dd))
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        for (cid, sd, dd) in saved {
+                            if let Some(wb) = model.work_blocks.get_mut(&cid) {
+                                wb.start_day = sd;
+                                wb.duration_days = dd;
+                            }
                         }
                     }
                     if let Err(e) = db::save_model(&conn, &model) {
@@ -1396,13 +1802,13 @@ fn side_panel_ui(
                 .map(|wb| wb.variants.clone())
                 .unwrap_or_default();
 
-            let mut drill_in = false;
+            let mut drill_variant: Option<model::VariantId> = None;
 
-            for vid in &variant_ids {
-                if let Some(v) = model.variants.get(vid) {
+            for &vid in &variant_ids {
+                if let Some(v) = model.variants.get(&vid) {
                     let label = format!("{} ({} blocks)", v.name, v.children.len());
                     if ui.link(label).on_hover_text("Drill in to edit").clicked() {
-                        drill_in = true;
+                        drill_variant = Some(vid);
                     }
                 }
             }
@@ -1413,14 +1819,17 @@ fn side_panel_ui(
                 if let Some(wb) = model.work_blocks.get_mut(&sel_id) {
                     wb.variants.push(vid);
                 }
-                drill_in = true;
+                drill_variant = Some(vid);
                 if let Err(e) = db::save_model(&conn, &model) {
                     error!("save_model failed: {e}");
                 }
             }
 
-            if drill_in && !scope.scope_stack.contains(&sel_id) {
-                scope.scope_stack.push(sel_id);
+            if let Some(vid) = drill_variant {
+                let entry = schedule::ScopeEntry::Variant(vid);
+                if !scope.scope_stack.contains(&entry) {
+                    scope.scope_stack.push(entry);
+                }
             }
         });
 }
