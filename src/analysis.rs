@@ -440,4 +440,32 @@ mod tests {
         assert!((cs[0].capacity - 0.5).abs() < 1e-5);
         assert!((cs[0].overload - 0.5).abs() < 1e-5);
     }
+
+    #[test]
+    fn gap_between_segments_defaults_to_full_capacity() {
+        // R has segments [0,5) and [8,12) both at factor 0.5, leaving a gap [5,8).
+        // A block placed entirely in that gap at factor 1.2 exceeds capacity 1.0
+        // (the gap-is-full-capacity rule), producing a conflict with capacity=1.0.
+        let mut m = Model::default();
+        let wid = m.create_world("w");
+        let r = m.create_resource_block("R", ResourceType::Person);
+        m.worlds.get_mut(&wid).unwrap().resource_ids.push(r);
+        m.resource_blocks.get_mut(&r).unwrap().availability = AvailabilityTimeline {
+            segments: vec![
+                AvailabilitySegment { start: 0.0, end: 5.0, factor: 0.5 },
+                AvailabilitySegment { start: 8.0, end: 12.0, factor: 0.5 },
+            ],
+        };
+        let a = placed(&mut m, "A", 5.0, 3.0); // [5, 8) — entirely in the gap
+        let pid = make_plan(&mut m, vec![alloc(r, a, 1.2)]);
+        let plan = m.plans[&pid].clone();
+        let cs = analyze_resources(&m, &plan);
+        assert_eq!(cs.len(), 1, "expected exactly one conflict window in the gap");
+        let c = &cs[0];
+        assert!((c.capacity - 1.0).abs() < 1e-5, "gap capacity must default to 1.0");
+        assert!((c.demand - 1.2).abs() < 1e-5);
+        assert!((c.overload - 0.2).abs() < 1e-5);
+        assert!((c.window_start - 5.0).abs() < 1e-5);
+        assert!((c.window_end - 8.0).abs() < 1e-5);
+    }
 }
