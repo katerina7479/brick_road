@@ -1,5 +1,7 @@
 use std::collections::HashMap;
 
+use bevy::prelude::Resource;
+
 use crate::graph::{CycleError, DependencyGraph};
 use crate::model::{DependencyType, Model, Plan, PlanId, ResourceBlock, ResourceBlockId, WorkBlockId};
 
@@ -14,7 +16,7 @@ pub struct ScheduledBlock {
 }
 
 /// The full output of a scheduler run over a Plan.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Resource)]
 pub struct Schedule {
     pub plan_id: PlanId,
     /// Placement for every block that was scheduled.

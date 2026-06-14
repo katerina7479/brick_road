@@ -6,6 +6,7 @@ use bevy::{
 };
 use bevy_egui::{egui, EguiContexts, EguiPlugin, EguiPrimaryContextPass};
 
+pub mod blocks;
 pub mod camera;
 pub mod constants;
 pub mod db;
@@ -30,8 +31,11 @@ fn main() {
         .insert_resource(ClearColor(Color::srgb(0.02, 0.02, 0.05)))
         .insert_resource(CameraTarget::default())
         .add_systems(Startup, (setup_db, setup_camera))
+        .add_systems(Startup, setup_demo_schedule.after(setup_db))
+        .add_systems(PostStartup, blocks::spawn_block_sprites)
         .add_systems(Update, (update_camera_target, smooth_camera).chain())
         .add_systems(Update, draw_grid)
+        .add_systems(Update, blocks::sync_block_sprites)
         .add_systems(EguiPrimaryContextPass, side_panel_ui)
         .run();
 }
@@ -66,6 +70,37 @@ fn draw_grid(mut gizmos: Gizmos) {
 
     // Horizontal baseline at y=0
     gizmos.line_2d(Vec2::new(-5000.0, 0.0), Vec2::new(5000.0, 0.0), baseline_color);
+}
+
+fn setup_demo_schedule(mut model: ResMut<model::Model>, mut commands: Commands) {
+    use model::{DependencyType, Estimate};
+
+    let est = |d: f32| Estimate { most_likely: d, optimistic: d * 0.7, pessimistic: d * 1.5, confidence: 0.8 };
+
+    let world_id = model.create_world("Demo");
+    let plan_id  = model.create_plan("Demo Plan", world_id);
+
+    let design  = model.create_work_block("Design",   est(5.0));
+    let build   = model.create_work_block("Build",    est(8.0));
+    let test    = model.create_work_block("Test",     est(4.0));
+    let review  = model.create_work_block("Review",   est(2.0));
+    let deploy  = model.create_work_block("Deploy",   est(1.0));
+
+    model.create_dependency(design, build,  DependencyType::FinishToStart);
+    model.create_dependency(build,  test,   DependencyType::FinishToStart);
+    model.create_dependency(test,   review, DependencyType::FinishToStart);
+    model.create_dependency(review, deploy, DependencyType::FinishToStart);
+
+    let plan = {
+        let p = model.plans.get_mut(&plan_id).unwrap();
+        p.root_blocks = vec![design, build, test, review, deploy];
+        p.clone()
+    };
+
+    let dep_graph = graph::build_graph(&model, &plan);
+    if let Ok(sched) = schedule::forward_pass(&model, &plan, &dep_graph) {
+        commands.insert_resource(sched);
+    }
 }
 
 fn side_panel_ui(mut contexts: EguiContexts) {
