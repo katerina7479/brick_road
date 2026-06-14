@@ -669,6 +669,7 @@ fn side_panel_ui(
     mut new_size_label: Local<String>,
     mut new_size_error: Local<Option<String>>,
     mut camera_target: ResMut<CameraTarget>,
+    mut compare_plan: Local<Option<model::PlanId>>,
 ) {
     let Ok(ctx) = contexts.ctx_mut() else { return };
     egui::SidePanel::right("side_panel")
@@ -961,6 +962,197 @@ fn side_panel_ui(
                     if let Err(e) = db::save_model(&conn, &model) {
                         error!("save_model failed: {e}");
                     }
+                }
+            });
+
+            // ── Plan Comparison ───────────────────────────────────────────────────
+            ui.separator();
+            ui.collapsing("Compare Plans", |ui| {
+                let current_plan_id = schedule.plan_id;
+
+                // Sorted list of other plans for the picker.
+                let mut other_plans: Vec<(model::PlanId, String)> = model
+                    .plans
+                    .values()
+                    .filter(|p| p.id != current_plan_id)
+                    .map(|p| (p.id, p.name.clone()))
+                    .collect();
+                other_plans.sort_by_key(|(id, _)| id.0);
+
+                // Invalidate compare selection if that plan no longer exists.
+                if let Some(cmp_id) = *compare_plan {
+                    if !model.plans.contains_key(&cmp_id) {
+                        *compare_plan = None;
+                    }
+                }
+
+                let compare_label = compare_plan
+                    .and_then(|id| model.plans.get(&id))
+                    .map(|p| p.name.clone())
+                    .unwrap_or_else(|| "None".to_string());
+
+                egui::ComboBox::from_label("vs.")
+                    .selected_text(&compare_label)
+                    .show_ui(ui, |ui| {
+                        if ui.selectable_label(compare_plan.is_none(), "None").clicked() {
+                            *compare_plan = None;
+                        }
+                        for (pid, ref name) in &other_plans {
+                            if ui
+                                .selectable_label(*compare_plan == Some(*pid), name.as_str())
+                                .clicked()
+                            {
+                                *compare_plan = Some(*pid);
+                            }
+                        }
+                    });
+
+                let Some(cmp_id) = *compare_plan else { return };
+
+                let plan_a = match model.plans.get(&current_plan_id).cloned() {
+                    Some(p) => p,
+                    None => return,
+                };
+                let plan_b = match model.plans.get(&cmp_id).cloned() {
+                    Some(p) => p,
+                    None => return,
+                };
+                let name_a = plan_a.name.clone();
+                let name_b = plan_b.name.clone();
+
+                let graph_a = graph::build_graph(&model, &plan_a);
+                let graph_b = graph::build_graph(&model, &plan_b);
+                let sched_a = schedule::forward_pass(&model, &plan_a, &graph_a).ok();
+                let sched_b = schedule::forward_pass(&model, &plan_b, &graph_b).ok();
+                let conflicts_a = analysis::analyze_resources(&model, &plan_a).len();
+                let conflicts_b = analysis::analyze_resources(&model, &plan_b).len();
+
+                // Build id→duration maps for each plan.
+                let map_a: std::collections::HashMap<model::WorkBlockId, f32> = sched_a
+                    .as_ref()
+                    .map(|s| s.blocks.iter().map(|(&id, sb)| (id, sb.duration_days)).collect())
+                    .unwrap_or_default();
+                let map_b: std::collections::HashMap<model::WorkBlockId, f32> = sched_b
+                    .as_ref()
+                    .map(|s| s.blocks.iter().map(|(&id, sb)| (id, sb.duration_days)).collect())
+                    .unwrap_or_default();
+                let total_a = sched_a.as_ref().map(|s| s.total_duration_days).unwrap_or(0.0);
+                let total_b = sched_b.as_ref().map(|s| s.total_duration_days).unwrap_or(0.0);
+
+                // Collect all block IDs that differ between the two plans.
+                let mut all_ids: Vec<model::WorkBlockId> = {
+                    let mut ids: std::collections::HashSet<model::WorkBlockId> = std::collections::HashSet::new();
+                    ids.extend(map_a.keys());
+                    ids.extend(map_b.keys());
+                    ids.into_iter().collect()
+                };
+                all_ids.sort_by_key(|id| id.0);
+
+                // ── Summary ───────────────────────────────────────────────────────
+                ui.separator();
+                egui::Grid::new("plan_compare_summary")
+                    .num_columns(3)
+                    .spacing([8.0, 2.0])
+                    .show(ui, |ui| {
+                        ui.label("");
+                        ui.strong(&name_a);
+                        ui.strong(&name_b);
+                        ui.end_row();
+
+                        ui.label("Duration:");
+                        ui.label(format!("{:.1} d", total_a));
+                        ui.label(format!("{:.1} d", total_b));
+                        ui.end_row();
+
+                        ui.label("Blocks:");
+                        ui.label(format!("{}", map_a.len()));
+                        ui.label(format!("{}", map_b.len()));
+                        ui.end_row();
+
+                        ui.label("Conflicts:");
+                        ui.label(format!("{}", conflicts_a));
+                        ui.label(format!("{}", conflicts_b));
+                        ui.end_row();
+                    });
+
+                // ── Block-level diff ─────────────────────────────────────────────
+                let diff_rows: Vec<(String, Option<f32>, Option<f32>)> = all_ids
+                    .iter()
+                    .filter_map(|id| {
+                        let dur_a = map_a.get(id).copied();
+                        let dur_b = map_b.get(id).copied();
+                        // Only show blocks that differ: unique to one plan or
+                        // present in both with a meaningful duration difference.
+                        let differs = match (dur_a, dur_b) {
+                            (Some(a), Some(b)) => (a - b).abs() > 0.05,
+                            _ => true,
+                        };
+                        if !differs {
+                            return None;
+                        }
+                        let name = model
+                            .work_blocks
+                            .get(id)
+                            .map(|wb| wb.name.clone())
+                            .unwrap_or_else(|| format!("#{}", id.0));
+                        Some((name, dur_a, dur_b))
+                    })
+                    .collect();
+
+                if diff_rows.is_empty() {
+                    ui.weak("Plans are identical.");
+                } else {
+                    ui.separator();
+                    ui.weak(format!("{} differing block(s):", diff_rows.len()));
+                    egui::ScrollArea::vertical()
+                        .id_salt("plan_compare_scroll")
+                        .max_height(180.0)
+                        .show(ui, |ui| {
+                            egui::Grid::new("plan_compare_diff")
+                                .num_columns(4)
+                                .spacing([6.0, 2.0])
+                                .striped(true)
+                                .show(ui, |ui| {
+                                    ui.weak("Block");
+                                    ui.weak(&name_a);
+                                    ui.weak(&name_b);
+                                    ui.weak("Δ");
+                                    ui.end_row();
+                                    for (name, dur_a, dur_b) in &diff_rows {
+                                        let only_a = dur_b.is_none();
+                                        let only_b = dur_a.is_none();
+                                        let row_color = if only_a {
+                                            egui::Color32::from_rgb(80, 160, 80)
+                                        } else if only_b {
+                                            egui::Color32::from_rgb(180, 80, 80)
+                                        } else {
+                                            egui::Color32::from_rgb(180, 160, 80)
+                                        };
+                                        ui.colored_label(row_color, name.as_str());
+                                        match dur_a {
+                                            Some(d) => ui.label(format!("{d:.1}d")),
+                                            None => ui.weak("—"),
+                                        };
+                                        match dur_b {
+                                            Some(d) => ui.label(format!("{d:.1}d")),
+                                            None => ui.weak("—"),
+                                        };
+                                        let delta_label = match (dur_a, dur_b) {
+                                            (Some(a), Some(b)) => {
+                                                let d = b - a;
+                                                if d > 0.0 {
+                                                    format!("+{d:.1}")
+                                                } else {
+                                                    format!("{d:.1}")
+                                                }
+                                            }
+                                            _ => "—".to_string(),
+                                        };
+                                        ui.label(delta_label);
+                                        ui.end_row();
+                                    }
+                                });
+                        });
                 }
             });
 
