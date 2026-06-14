@@ -364,14 +364,40 @@ fn draw_arrowhead(gizmos: &mut Gizmos, src: Vec2, dst: Vec2, color: Color) {
     gizmos.line_2d(dst, dst - dir * 8.0 - perp * 4.0, color);
 }
 
-/// Right-click drag from one block to another to create a `FinishToStart`
-/// dependency. Press right button on source, release on target.
-/// Self-loops and duplicate FS edges in the same direction are silently ignored.
+/// Returns the dependency type to create based on held modifier keys.
+///
+/// - Shift → StartToStart
+/// - Ctrl  → FinishToFinish
+/// - Alt   → StartToFinish
+/// - none  → FinishToStart (default)
+fn dep_type_from_modifiers(keys: &ButtonInput<KeyCode>) -> DependencyType {
+    if keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]) {
+        DependencyType::StartToStart
+    } else if keys.any_pressed([KeyCode::ControlLeft, KeyCode::ControlRight]) {
+        DependencyType::FinishToFinish
+    } else if keys.any_pressed([KeyCode::AltLeft, KeyCode::AltRight]) {
+        DependencyType::StartToFinish
+    } else {
+        DependencyType::FinishToStart
+    }
+}
+
+/// Right-click drag from one block to another to create a dependency edge.
+///
+/// Press right button on the source block, then release on the target.
+/// Hold a modifier key at release to select the dependency type:
+///   - No modifier → FinishToStart (default)
+///   - Shift       → StartToStart
+///   - Ctrl        → FinishToFinish
+///   - Alt         → StartToFinish
+///
+/// Self-loops and duplicate edges of the same type and direction are ignored.
 pub fn handle_dep_drag(
     mut egui_ctx: EguiContexts,
     windows: Query<&Window>,
     camera: Query<(&Camera, &GlobalTransform)>,
     mouse: Res<ButtonInput<MouseButton>>,
+    keyboard: Res<ButtonInput<KeyCode>>,
     mut drag: ResMut<DepDragState>,
     mut model: ResMut<model::Model>,
     block_query: Query<(&BlockSprite, &Transform, &Sprite)>,
@@ -413,13 +439,14 @@ pub fn handle_dep_drag(
         if let Some(from_id) = drag.from.take() {
             if let Some(to_id) = block_at(world_pos) {
                 if to_id != from_id {
+                    let dep_type = dep_type_from_modifiers(&keyboard);
                     let already = model.dependencies.values().any(|d| {
                         d.predecessor == from_id
                             && d.successor == to_id
-                            && d.dependency_type == DependencyType::FinishToStart
+                            && d.dependency_type == dep_type
                     });
                     if !already {
-                        model.create_dependency(from_id, to_id, DependencyType::FinishToStart);
+                        model.create_dependency(from_id, to_id, dep_type);
                         if let Err(e) = crate::db::save_model(&conn, &model) {
                             error!("save_model failed: {e}");
                         }
