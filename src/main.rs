@@ -15,7 +15,7 @@ pub mod model;
 pub mod schedule;
 
 use camera::{camera_nav_keys, smooth_camera, update_camera_target, CameraTarget};
-use constants::PIXELS_PER_DAY;
+use constants::{PIXELS_PER_DAY, SIDE_PANEL_WIDTH};
 
 fn main() {
     App::new()
@@ -242,7 +242,7 @@ fn side_panel_ui(
 ) {
     let Ok(ctx) = contexts.ctx_mut() else { return };
     egui::SidePanel::left("side_panel")
-        .min_width(220.0)
+        .min_width(SIDE_PANEL_WIDTH)
         .show(ctx, |ui| {
             ui.heading("brick_road");
             // Breadcrumb: show full navigation path when drilled in.

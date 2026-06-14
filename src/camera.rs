@@ -4,13 +4,9 @@ use bevy::{
 };
 
 use crate::{
-    constants::{PIXELS_PER_DAY, ROW_HEIGHT},
+    constants::{PIXELS_PER_DAY, ROW_HEIGHT, SIDE_PANEL_WIDTH},
     model::Model,
 };
-
-/// Egui side panel width — used to offset fit-to-view centering so blocks
-/// appear centred in the timeline area rather than the full window.
-const SIDE_PANEL_WIDTH: f32 = 220.0;
 
 /// Desired camera state. Input systems write here; the smoothing system reads it.
 #[derive(Resource)]
