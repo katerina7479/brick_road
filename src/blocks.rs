@@ -1,4 +1,5 @@
 use bevy::prelude::*;
+use bevy_egui::EguiContexts;
 
 use crate::{constants::{PIXELS_PER_DAY, ROW_HEIGHT}, model::WorkBlockId, schedule::Schedule};
 
@@ -13,6 +14,10 @@ const PALETTE: &[LinearRgba] = &[
     LinearRgba::new(2.5, 1.8, 0.1, 1.0), // yellow
     LinearRgba::new(0.5, 0.5, 3.0, 1.0), // blue
 ];
+
+/// Tracks the currently selected work block (if any).
+#[derive(Resource, Default)]
+pub struct SelectedBlock(pub Option<WorkBlockId>);
 
 /// Marker: this sprite visualises one ScheduledBlock.
 #[derive(Component)]
@@ -70,10 +75,11 @@ pub fn spawn_block_sprites(
     }
 }
 
-/// Recomputes `Transform` and `Sprite::custom_size` every frame from the
-/// current `Schedule` so the view stays in sync when the schedule changes.
+/// Recomputes `Transform`, `Sprite::custom_size`, and color every frame.
+/// Selected blocks are drawn at 2× palette intensity for a bright HDR bloom.
 pub fn sync_block_sprites(
     schedule: Res<Schedule>,
+    selected: Res<SelectedBlock>,
     mut query: Query<(&BlockSprite, &mut Transform, &mut Sprite)>,
 ) {
     for (block_sprite, mut transform, mut sprite) in &mut query {
@@ -86,5 +92,72 @@ pub fn sync_block_sprites(
         transform.translation.x = x;
         transform.translation.y = y;
         sprite.custom_size = Some(Vec2::new(width, BLOCK_HEIGHT));
+
+        let base = PALETTE[block_sprite.row % PALETTE.len()];
+        sprite.color = if selected.0 == Some(block_sprite.work_block_id) {
+            Color::from(LinearRgba::new(
+                base.red * 2.0,
+                base.green * 2.0,
+                base.blue * 2.0,
+                1.0,
+            ))
+        } else {
+            Color::from(base)
+        };
     }
+}
+
+/// Converts a left-click to a block selection.
+///
+/// Clicks that land inside egui areas (e.g. the side panel) are ignored.
+/// Clicking the currently selected block deselects it; clicking empty space
+/// clears the selection.
+pub fn handle_block_selection(
+    mut egui_ctx: EguiContexts,
+    windows: Query<&Window>,
+    camera: Query<(&Camera, &GlobalTransform)>,
+    mouse: Res<ButtonInput<MouseButton>>,
+    mut selected: ResMut<SelectedBlock>,
+    block_query: Query<(&BlockSprite, &Transform, &Sprite)>,
+) {
+    // Guard: egui owns the pointer when the cursor is over any egui area.
+    if let Ok(ctx) = egui_ctx.ctx_mut() {
+        if ctx.is_pointer_over_area() {
+            return;
+        }
+    }
+
+    if !mouse.just_pressed(MouseButton::Left) {
+        return;
+    }
+
+    let Ok(window) = windows.single() else { return };
+    let Ok((camera, camera_transform)) = camera.single() else { return };
+    let Some(cursor_pos) = window.cursor_position() else { return };
+    let Ok(world_pos) = camera.viewport_to_world_2d(camera_transform, cursor_pos) else {
+        return;
+    };
+
+    // Hit-test each block sprite against its axis-aligned bounding rect.
+    let mut clicked: Option<WorkBlockId> = None;
+    for (block_sprite, transform, sprite) in &block_query {
+        let Some(size) = sprite.custom_size else { continue };
+        let center = transform.translation.truncate();
+        let half = size * 0.5;
+        if world_pos.x >= center.x - half.x
+            && world_pos.x <= center.x + half.x
+            && world_pos.y >= center.y - half.y
+            && world_pos.y <= center.y + half.y
+        {
+            clicked = Some(block_sprite.work_block_id);
+            break;
+        }
+    }
+
+    // Re-clicking the selected block toggles it off; otherwise set/clear.
+    selected.0 = if clicked.is_some() && clicked == selected.0 {
+        None
+    } else {
+        clicked
+    };
 }
