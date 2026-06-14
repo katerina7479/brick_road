@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use chrono::NaiveDate;
 use rusqlite::{Connection, Result};
 
 use crate::model::{
@@ -76,6 +77,8 @@ pub fn save_model(conn: &Connection, model: &Model) -> Result<()> {
         DELETE FROM availability_segments;
         DELETE FROM resource_blocks;
         DELETE FROM worlds;
+        DELETE FROM calendar_non_working_dates;
+        DELETE FROM calendar_config;
     ",
     )?;
 
@@ -240,6 +243,21 @@ pub fn save_model(conn: &Connection, model: &Model) -> Result<()> {
                 ),
             )?;
         }
+    }
+
+    // calendar_config (singleton)
+    tx.execute(
+        "INSERT INTO calendar_config (id, start_date, working_days_per_week) VALUES (1, ?1, ?2)",
+        (
+            model.calendar.start_date.format("%Y-%m-%d").to_string(),
+            model.calendar.working_days_per_week as i64,
+        ),
+    )?;
+    for date in &model.calendar.non_working_dates {
+        tx.execute(
+            "INSERT INTO calendar_non_working_dates (date) VALUES (?1)",
+            (&date.format("%Y-%m-%d").to_string(),),
+        )?;
     }
 
     tx.commit()
@@ -587,6 +605,38 @@ pub fn load_model(conn: &Connection) -> Result<Model> {
                     work_block_id: WorkBlockId(wb_id as u64),
                     allocation_factor: factor as f32,
                 });
+            }
+        }
+    }
+
+    // calendar_config
+    {
+        let mut stmt = conn.prepare(
+            "SELECT start_date, working_days_per_week FROM calendar_config WHERE id = 1",
+        )?;
+        match stmt.query_row([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        }) {
+            Ok((date_str, wdpw)) => {
+                if let Ok(date) = NaiveDate::parse_from_str(&date_str, "%Y-%m-%d") {
+                    model.calendar.start_date = date;
+                }
+                model.calendar.working_days_per_week = wdpw.clamp(1, 7) as u8;
+            }
+            Err(rusqlite::Error::QueryReturnedNoRows) => {}
+            Err(e) => return Err(e),
+        }
+    }
+
+    // calendar_non_working_dates
+    {
+        let mut stmt =
+            conn.prepare("SELECT date FROM calendar_non_working_dates ORDER BY date")?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        for row in rows {
+            let date_str = row?;
+            if let Ok(date) = NaiveDate::parse_from_str(&date_str, "%Y-%m-%d") {
+                model.calendar.non_working_dates.push(date);
             }
         }
     }
@@ -1195,5 +1245,15 @@ CREATE TABLE IF NOT EXISTS estimate_snapshots (
     duration_days  REAL    NOT NULL,
     confidence     REAL    NOT NULL,
     recorded_at    INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS calendar_config (
+    id                    INTEGER PRIMARY KEY CHECK (id = 1),
+    start_date            TEXT    NOT NULL DEFAULT '2025-01-01',
+    working_days_per_week INTEGER NOT NULL DEFAULT 5
+);
+
+CREATE TABLE IF NOT EXISTS calendar_non_working_dates (
+    date TEXT PRIMARY KEY
 );
 ";
