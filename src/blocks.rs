@@ -83,13 +83,18 @@ pub fn spawn_block_sprites(
     sa: Res<ScheduleAnalysis>,
     model: Res<model::Model>,
     scope: Res<ViewScope>,
+    mode: Res<schedule::TimelineViewMode>,
     existing: Query<Entity, With<BlockSprite>>,
 ) {
-    if !model.is_changed() && !scope.is_changed() {
+    if !model.is_changed() && !scope.is_changed() && !mode.is_changed() {
         return;
     }
     for entity in &existing {
         commands.entity(entity).despawn();
+    }
+    // In resource view the timeline shows resource rows instead of block rows.
+    if *mode == schedule::TimelineViewMode::Resource {
+        return;
     }
 
     let ordered = schedule::visible_blocks(&model, &scope);
