@@ -891,6 +891,23 @@ mod tests {
     }
 
     #[test]
+    fn nonzero_start_day_and_duration_round_trip() {
+        let conn = open_in_memory();
+        let mut m = Model::default();
+        let id = m.create_work_block("placed task", est(4.0, 2.0, 8.0, 0.8));
+        let wb = m.work_blocks.get_mut(&id).unwrap();
+        wb.start_day = 3.5;
+        wb.duration_days = 7.0;
+
+        save_model(&conn, &m).unwrap();
+        let loaded = load_model(&conn).unwrap();
+
+        let loaded_wb = loaded.work_blocks.get(&id).unwrap();
+        assert_eq!(loaded_wb.start_day, 3.5);
+        assert_eq!(loaded_wb.duration_days, 7.0);
+    }
+
+    #[test]
     fn validate_accepts_valid_model() {
         let mut m = Model::default();
         let w = m.create_world("w");
