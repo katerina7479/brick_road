@@ -13,7 +13,7 @@ use crate::{
     schedule::{self, ViewScope},
 };
 
-const BLOCK_HEIGHT: f32 = 28.0;
+const BLOCK_HEIGHT: f32 = 44.0;
 /// Minimum logical block width (px) below which the inline name label is hidden.
 const MIN_LABEL_WIDTH: f32 = 20.0;
 /// Approximate pixel width per character at font_size 11 (used for truncation).
@@ -132,7 +132,7 @@ pub fn spawn_block_sprites(
                 parent.spawn((
                     BlockLabel { full_name: wb.name.clone() },
                     Text2d::new(display),
-                    TextFont { font_size: 11.0, ..default() },
+                    TextFont { font_size: 13.0, ..default() },
                     TextColor(Color::srgba(1.0, 1.0, 1.0, 0.9)),
                     Anchor::CENTER_LEFT,
                     // Position from the parent center: 2px padding from the left edge.
