@@ -170,6 +170,27 @@ fn side_panel_ui(
             ui.heading("brick_road");
             ui.separator();
 
+            if ui.button("Auto-schedule").clicked() {
+                let plan_id = schedule.plan_id;
+                if let Some(plan) = model.plans.get(&plan_id).cloned() {
+                    let dep_graph = graph::build_graph(&model, &plan);
+                    if let Ok(new_sched) = schedule::forward_pass(&model, &plan, &dep_graph) {
+                        for sb in new_sched.blocks.values() {
+                            if let Some(wb) = model.work_blocks.get_mut(&sb.work_block_id) {
+                                wb.start_day = sb.start_day;
+                                wb.duration_days = sb.duration_days;
+                            }
+                        }
+                        *schedule = new_sched;
+                    }
+                }
+                if let Err(e) = db::save_model(&conn, &model) {
+                    error!("save_model failed: {e}");
+                }
+            }
+
+            ui.separator();
+
             let Some(sel_id) = selected.0 else {
                 ui.label("Click a block to inspect.");
                 return;
@@ -221,16 +242,9 @@ fn side_panel_ui(
                 if let Some(wb) = model.work_blocks.get_mut(&sel_id) {
                     wb.estimate.most_likely = most_likely;
                 }
-                let plan_id = schedule.plan_id;
-                if let Some(plan) = model.plans.get(&plan_id).cloned() {
-                    let dep_graph = graph::build_graph(&model, &plan);
-                    if let Ok(new_sched) = schedule::forward_pass(&model, &plan, &dep_graph) {
-                        *schedule = new_sched;
-                    }
+                if let Err(e) = db::save_model(&conn, &model) {
+                    error!("save_model failed: {e}");
                 }
-            }
-            if let Err(e) = db::save_model(&conn, &model) {
-                error!("save_model failed: {e}");
             }
         });
 }
