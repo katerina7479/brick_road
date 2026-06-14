@@ -111,7 +111,7 @@ pub fn forward_pass(
                     DependencyType::FinishToFinish => {
                         let new = earliest_end + edge.lag;
                         let v = min_end.entry(s).or_insert(None);
-                        let update = v.map_or(true, |cur| new > cur);
+                        let update = v.is_none_or(|cur| new > cur);
                         if update {
                             *v = Some(new);
                             *driver.entry(s).or_insert(None) = Some(id);
@@ -120,7 +120,7 @@ pub fn forward_pass(
                     DependencyType::StartToFinish => {
                         let new = earliest_start + edge.lag;
                         let v = min_end.entry(s).or_insert(None);
-                        let update = v.map_or(true, |cur| new > cur);
+                        let update = v.is_none_or(|cur| new > cur);
                         if update {
                             *v = Some(new);
                             *driver.entry(s).or_insert(None) = Some(id);
