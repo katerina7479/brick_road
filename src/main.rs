@@ -3,6 +3,7 @@ use bevy::{
     render::view::Hdr,
 };
 use bevy_egui::{egui, EguiContexts, EguiPlugin, EguiPrimaryContextPass};
+use chrono::NaiveDate;
 
 pub mod analysis;
 pub mod blocks;
@@ -36,12 +37,18 @@ fn main() {
         .insert_resource(blocks::ResizeDragState::default())
         .insert_resource(blocks::DepDragState::default())
         .insert_resource(blocks::DeleteConfirmState::default())
+        .insert_resource(blocks::CreateModeState::default())
         .insert_resource(schedule::ViewScope::default())
         .insert_resource(schedule::TimelineViewMode::default())
+        .insert_resource(schedule::VisibleBlocks::default())
         .insert_resource(analysis::ScheduleAnalysis::default())
         .add_systems(Startup, (setup_db, setup_camera))
         .add_systems(Startup, setup_demo_schedule.after(setup_db))
         .add_systems(PostStartup, update_analysis.before(blocks::spawn_block_sprites))
+        .add_systems(
+            PostStartup,
+            schedule::update_visible_blocks.before(blocks::spawn_block_sprites),
+        )
         .add_systems(PostStartup, blocks::spawn_block_sprites)
         .add_systems(
             PostStartup,
@@ -54,11 +61,25 @@ fn main() {
         .add_systems(Update, (camera_nav_keys, update_camera_target, smooth_camera).chain())
         .add_systems(Update, draw_grid)
         .add_systems(Update, update_analysis)
+        .add_systems(
+            Update,
+            schedule::update_visible_blocks
+                .before(blocks::spawn_block_sprites)
+                .before(blocks::sync_conflict_overlays)
+                .before(blocks::sync_uncertainty_overlays)
+                .before(blocks::draw_dependency_edges)
+                .before(blocks::draw_block_handles),
+        )
         .add_systems(Update, blocks::handle_name_edit)
         .add_systems(
             Update,
             blocks::handle_block_delete.after(blocks::handle_name_edit),
         )
+        .add_systems(
+            Update,
+            blocks::handle_create_mode_toggle.after(blocks::handle_name_edit),
+        )
+        .add_systems(Update, blocks::handle_create_mode_click_exit)
         .add_systems(
             Update,
             blocks::handle_block_selection.after(blocks::handle_name_edit),
@@ -143,6 +164,7 @@ fn main() {
         .add_systems(EguiPrimaryContextPass, logo_ui)
         .add_systems(EguiPrimaryContextPass, blocks::draw_name_edit_overlay)
         .add_systems(EguiPrimaryContextPass, blocks::draw_delete_confirm_overlay)
+        .add_systems(EguiPrimaryContextPass, blocks::draw_create_mode_overlay)
         .add_systems(EguiPrimaryContextPass, blocks::draw_description_tooltip)
         .run();
 }
@@ -442,12 +464,69 @@ fn side_panel_ui(
     conn: NonSend<rusqlite::Connection>,
     mut cycle_error: Local<Option<String>>,
     mut scope: ResMut<schedule::ViewScope>,
+    mut create_state: ResMut<blocks::CreateModeState>,
 ) {
     let Ok(ctx) = contexts.ctx_mut() else { return };
     egui::SidePanel::left("side_panel")
         .min_width(SIDE_PANEL_WIDTH)
         .show(ctx, |ui| {
             ui.heading("brick_road");
+
+            // Plan selector — tabs across the top of the panel.
+            {
+                let mut sorted_plans: Vec<_> = model
+                    .plans
+                    .values()
+                    .map(|p| (p.id, p.name.clone()))
+                    .collect();
+                sorted_plans.sort_by_key(|(id, _)| id.0);
+
+                let current_plan_id = schedule.plan_id;
+                let mut switch_to: Option<model::PlanId> = None;
+                let mut create_plan = false;
+
+                ui.horizontal_wrapped(|ui| {
+                    for (pid, name) in &sorted_plans {
+                        if ui.selectable_label(current_plan_id == *pid, name).clicked()
+                            && current_plan_id != *pid
+                        {
+                            switch_to = Some(*pid);
+                        }
+                    }
+                    if ui.small_button("+").on_hover_text("New plan").clicked() {
+                        create_plan = true;
+                    }
+                });
+
+                if let Some(target_id) = switch_to {
+                    if let Some(plan) = model.plans.get(&target_id).cloned() {
+                        let dep_graph = graph::build_graph(&model, &plan);
+                        *schedule = schedule::forward_pass(&model, &plan, &dep_graph)
+                            .unwrap_or_else(|_| schedule::Schedule::new(target_id));
+                    }
+                    scope.scope_stack.clear();
+                    selected.0 = None;
+                }
+
+                if create_plan {
+                    let world_id = model
+                        .plans
+                        .get(&current_plan_id)
+                        .map(|p| p.world_id)
+                        .or_else(|| model.worlds.keys().next().copied());
+                    if let Some(wid) = world_id {
+                        let n = model.plans.len() + 1;
+                        let new_id = model.create_plan(format!("Plan {n}"), wid);
+                        *schedule = schedule::Schedule::new(new_id);
+                        scope.scope_stack.clear();
+                        selected.0 = None;
+                        if let Err(e) = db::save_model(&conn, &model) {
+                            error!("save_model failed: {e}");
+                        }
+                    }
+                }
+            }
+
             // Breadcrumb: show full navigation path when drilled in.
             // Clicking an ancestor segment truncates the stack back to that level.
             if !scope.scope_stack.is_empty() {
@@ -513,6 +592,55 @@ fn side_panel_ui(
 
             if let Some(msg) = &*cycle_error {
                 ui.colored_label(egui::Color32::from_rgb(220, 60, 60), msg);
+            }
+
+            ui.separator();
+            ui.label("Calendar");
+
+            let cal_start = model.calendar.start_date;
+            let cal_wdpw = model.calendar.working_days_per_week;
+            let mut date_str = cal_start.format("%Y-%m-%d").to_string();
+            let mut new_wdpw = cal_wdpw;
+
+            ui.label("Plan Start Date");
+            let date_changed = ui.text_edit_singleline(&mut date_str).changed();
+
+            ui.label("Working Days / Week");
+            ui.horizontal(|ui| {
+                for days in [4u8, 5, 6, 7] {
+                    if ui.radio(cal_wdpw == days, days.to_string()).clicked() {
+                        new_wdpw = days;
+                    }
+                }
+            });
+
+            if date_changed {
+                if let Ok(d) = NaiveDate::parse_from_str(&date_str, "%Y-%m-%d") {
+                    model.calendar.start_date = d;
+                    if let Err(e) = db::save_model(&conn, &model) {
+                        error!("save_model failed: {e}");
+                    }
+                }
+            }
+            if new_wdpw != cal_wdpw {
+                model.calendar.working_days_per_week = new_wdpw;
+                if let Err(e) = db::save_model(&conn, &model) {
+                    error!("save_model failed: {e}");
+                }
+            }
+
+            ui.separator();
+
+            let label = if create_state.active {
+                "⏹ Creating Blocks [N]"
+            } else {
+                "＋ Create Blocks [N]"
+            };
+            if ui.selectable_label(create_state.active, label).clicked() {
+                create_state.active = !create_state.active;
+                if !create_state.active {
+                    create_state.text_buf.clear();
+                }
             }
 
             ui.separator();
@@ -800,6 +928,42 @@ fn side_panel_ui(
             }
             if let Some(target_id) = jump_to {
                 selected.0 = Some(target_id);
+            }
+
+            ui.separator();
+            ui.label("Variants");
+
+            let variant_ids: Vec<_> = model
+                .work_blocks
+                .get(&sel_id)
+                .map(|wb| wb.variants.clone())
+                .unwrap_or_default();
+
+            let mut drill_in = false;
+
+            for vid in &variant_ids {
+                if let Some(v) = model.variants.get(vid) {
+                    let label = format!("{} ({} blocks)", v.name, v.children.len());
+                    if ui.link(label).on_hover_text("Drill in to edit").clicked() {
+                        drill_in = true;
+                    }
+                }
+            }
+
+            if ui.button("+ New Variant").clicked() {
+                let variant_name = format!("Variant {}", variant_ids.len() + 1);
+                let vid = model.create_variant(&variant_name, sel_id);
+                if let Some(wb) = model.work_blocks.get_mut(&sel_id) {
+                    wb.variants.push(vid);
+                }
+                drill_in = true;
+                if let Err(e) = db::save_model(&conn, &model) {
+                    error!("save_model failed: {e}");
+                }
+            }
+
+            if drill_in && !scope.scope_stack.contains(&sel_id) {
+                scope.scope_stack.push(sel_id);
             }
         });
 }

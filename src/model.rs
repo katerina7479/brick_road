@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use bevy::prelude::Resource;
+use chrono::NaiveDate;
 
 macro_rules! id_newtype {
     ($name:ident) => {
@@ -53,6 +54,28 @@ pub struct WorkBlock {
     /// User-set priority: 0=Low, 1=Normal (default), 2=High, 3=Critical.
     /// Conveyed visually as border weight on the block bar.
     pub priority: u8,
+}
+
+/// Calendar settings for the plan: anchors "day 0" to a real date and defines
+/// which days count as working days.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CalendarConfig {
+    /// The calendar date that corresponds to day 0 in the timeline.
+    pub start_date: NaiveDate,
+    /// Number of working days per week (1–7). Default 5 (Mon–Fri).
+    pub working_days_per_week: u8,
+    /// Specific calendar dates excluded from working-day counting (holidays, shutdowns).
+    pub non_working_dates: Vec<NaiveDate>,
+}
+
+impl Default for CalendarConfig {
+    fn default() -> Self {
+        Self {
+            start_date: NaiveDate::from_ymd_opt(2025, 1, 1).unwrap(),
+            working_days_per_week: 5,
+            non_working_dates: vec![],
+        }
+    }
 }
 
 /// One alternative decomposition of a parent WorkBlock into an ordered sequence
@@ -171,6 +194,7 @@ pub struct Model {
     pub milestones: HashMap<MilestoneId, Milestone>,
     pub worlds: HashMap<WorldId, World>,
     pub plans: HashMap<PlanId, Plan>,
+    pub calendar: CalendarConfig,
 }
 
 impl Model {

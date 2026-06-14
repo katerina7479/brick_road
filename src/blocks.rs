@@ -82,11 +82,11 @@ pub fn spawn_block_sprites(
     mut commands: Commands,
     sa: Res<ScheduleAnalysis>,
     model: Res<model::Model>,
-    scope: Res<ViewScope>,
+    visible_blocks: Res<schedule::VisibleBlocks>,
     mode: Res<schedule::TimelineViewMode>,
     existing: Query<Entity, With<BlockSprite>>,
 ) {
-    if !model.is_changed() && !scope.is_changed() && !mode.is_changed() {
+    if !model.is_changed() && !visible_blocks.is_changed() && !mode.is_changed() {
         return;
     }
     for entity in &existing {
@@ -97,12 +97,11 @@ pub fn spawn_block_sprites(
         return;
     }
 
-    let ordered = schedule::visible_blocks(&model, &scope);
-
     let on_critical_path: std::collections::HashSet<WorkBlockId> =
         sa.critical_path.iter().copied().collect();
 
-    for (row, wb) in ordered.iter().enumerate() {
+    for (row, &id) in visible_blocks.ids.iter().enumerate() {
+        let Some(wb) = model.work_blocks.get(&id) else { continue };
         let width = wb.duration_days * PIXELS_PER_DAY;
         // Sprite origin is at its center in Bevy 2D.
         let x = wb.start_day * PIXELS_PER_DAY + width * 0.5;
@@ -611,8 +610,7 @@ const CONFLICT_PADDING: f32 = 5.0;
 pub fn sync_conflict_overlays(
     mut commands: Commands,
     sa: Res<ScheduleAnalysis>,
-    model: Res<model::Model>,
-    scope: Res<ViewScope>,
+    visible_blocks: Res<schedule::VisibleBlocks>,
     existing: Query<Entity, With<ConflictOverlay>>,
 ) {
     for entity in &existing {
@@ -624,10 +622,13 @@ pub fn sync_conflict_overlays(
     }
 
     // Row lookup: WorkBlockId → row index (same ordering as block sprites).
-    let ordered = schedule::visible_blocks(&model, &scope);
-    let row_of: HashMap<WorkBlockId, usize> =
-        ordered.iter().enumerate().map(|(i, wb)| (wb.id, i)).collect();
-    let total_rows = ordered.len().max(1);
+    let row_of: HashMap<WorkBlockId, usize> = visible_blocks
+        .ids
+        .iter()
+        .enumerate()
+        .map(|(i, &id)| (id, i))
+        .collect();
+    let total_rows = visible_blocks.ids.len().max(1);
 
     for conflict in &sa.resource_conflicts {
         let width = (conflict.window_end - conflict.window_start) * PIXELS_PER_DAY;
@@ -690,19 +691,18 @@ pub struct UncertaintyOverlay;
 pub fn sync_uncertainty_overlays(
     mut commands: Commands,
     model: Res<model::Model>,
-    scope: Res<ViewScope>,
+    visible_blocks: Res<schedule::VisibleBlocks>,
     existing: Query<Entity, With<UncertaintyOverlay>>,
 ) {
-    if !model.is_changed() && !scope.is_changed() {
+    if !model.is_changed() && !visible_blocks.is_changed() {
         return;
     }
     for entity in &existing {
         commands.entity(entity).despawn();
     }
 
-    let ordered = schedule::visible_blocks(&model, &scope);
-
-    for (row, wb) in ordered.iter().enumerate() {
+    for (row, &id) in visible_blocks.ids.iter().enumerate() {
+        let Some(wb) = model.work_blocks.get(&id) else { continue };
         let y = -(row as f32) * ROW_HEIGHT;
         let confidence = wb.estimate.confidence.clamp(0.0, 1.0);
         let tail_alpha = (1.0 - confidence) * 0.55;
@@ -823,23 +823,24 @@ pub fn draw_dependency_edges(
     model: Res<model::Model>,
     sa: Res<ScheduleAnalysis>,
     drag: Res<DepDragState>,
-    scope: Res<ViewScope>,
+    visible_blocks: Res<schedule::VisibleBlocks>,
     windows: Query<&Window>,
     camera: Query<(&Camera, &GlobalTransform)>,
 ) {
-    let ordered = schedule::visible_blocks(&model, &scope);
-    let geom: HashMap<WorkBlockId, BlockGeom> = ordered
+    let geom: HashMap<WorkBlockId, BlockGeom> = visible_blocks
+        .ids
         .iter()
         .enumerate()
-        .map(|(row, wb)| {
-            (
+        .filter_map(|(row, &id)| {
+            let wb = model.work_blocks.get(&id)?;
+            Some((
                 wb.id,
                 BlockGeom {
                     xl: wb.start_day * PIXELS_PER_DAY,
                     xr: (wb.start_day + wb.duration_days) * PIXELS_PER_DAY,
                     y: -(row as f32) * ROW_HEIGHT,
                 },
-            )
+            ))
         })
         .collect();
 
@@ -922,7 +923,7 @@ fn dep_type_from_modifiers(keys: &ButtonInput<KeyCode>) -> DependencyType {
 pub fn draw_block_handles(
     mut gizmos: Gizmos,
     model: Res<model::Model>,
-    scope: Res<ViewScope>,
+    visible_blocks: Res<schedule::VisibleBlocks>,
     drag: Res<DepDragState>,
     windows: Query<&Window>,
     camera: Query<(&Camera, &GlobalTransform)>,
@@ -932,13 +933,12 @@ pub fn draw_block_handles(
     let Some(cursor) = window.cursor_position() else { return };
     let Ok(world_pos) = cam.viewport_to_world_2d(cam_tr, cursor) else { return };
 
-    let ordered = schedule::visible_blocks(&model, &scope);
-
     let cyan = Color::srgba(0.3, 0.9, 1.0, 0.9);   // left handle (incoming)
     let amber = Color::srgba(1.0, 0.75, 0.2, 0.9);  // right handle (outgoing)
     let white = Color::WHITE;
 
-    for (row, wb) in ordered.iter().enumerate() {
+    for (row, &id) in visible_blocks.ids.iter().enumerate() {
+        let Some(wb) = model.work_blocks.get(&id) else { continue };
         if wb.duration_days <= 0.0 {
             continue;
         }
@@ -1348,6 +1348,137 @@ pub fn draw_delete_confirm_overlay(
         delete_confirm.pending = None;
     } else if cancelled {
         delete_confirm.pending = None;
+    }
+}
+
+/// State for rapid block creation mode (activated with `N`).
+#[derive(Resource, Default)]
+pub struct CreateModeState {
+    pub active: bool,
+    pub text_buf: String,
+}
+
+/// Toggles create mode with the `N` key. Skipped while a name edit or any
+/// egui text input is active so `N` can be typed freely in those contexts.
+pub fn handle_create_mode_toggle(
+    mut egui_ctx: EguiContexts,
+    keyboard: Res<ButtonInput<KeyCode>>,
+    name_edit: Res<NameEditState>,
+    mut state: ResMut<CreateModeState>,
+) {
+    if name_edit.editing.is_some() {
+        return;
+    }
+    if let Ok(ctx) = egui_ctx.ctx_mut() {
+        if ctx.wants_keyboard_input() {
+            return;
+        }
+    }
+    if keyboard.just_pressed(KeyCode::KeyN) {
+        state.active = !state.active;
+        if !state.active {
+            state.text_buf.clear();
+        }
+    }
+}
+
+/// Exits create mode when the user left-clicks on the timeline (outside egui).
+pub fn handle_create_mode_click_exit(
+    mut egui_ctx: EguiContexts,
+    mouse: Res<ButtonInput<MouseButton>>,
+    mut state: ResMut<CreateModeState>,
+) {
+    if !state.active {
+        return;
+    }
+    if !mouse.just_pressed(MouseButton::Left) {
+        return;
+    }
+    if let Ok(ctx) = egui_ctx.ctx_mut() {
+        if !ctx.is_pointer_over_area() {
+            state.active = false;
+            state.text_buf.clear();
+        }
+    }
+}
+
+/// Renders the quick-create overlay while create mode is active.
+///
+/// - Plain Enter: creates a block with the typed name, clears the buffer, stays
+///   in create mode so the user can immediately type the next name.
+/// - Ctrl+Enter / Cmd+Enter: inserts a newline within the current block name.
+/// - Escape: exits create mode.
+///
+/// New blocks are placed at day 0 with a 1-day default duration; the user can
+/// drag and resize them after bulk entry.
+pub fn draw_create_mode_overlay(
+    mut contexts: EguiContexts,
+    mut state: ResMut<CreateModeState>,
+    mut model: ResMut<model::Model>,
+    conn: NonSend<rusqlite::Connection>,
+) {
+    if !state.active {
+        return;
+    }
+    let Ok(ctx) = contexts.ctx_mut() else { return };
+
+    let mut create_block = false;
+    let mut exit_mode = false;
+
+    egui::Window::new("Quick Create  [N]")
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_TOP, [0.0, 60.0])
+        .show(ctx, |ui| {
+            ui.label("↵ to create  ·  Ctrl+↵ for newline  ·  Esc to exit");
+            let response = ui.add(
+                egui::TextEdit::multiline(&mut state.text_buf)
+                    .hint_text("Block name…")
+                    .desired_width(240.0)
+                    .desired_rows(2),
+            );
+            response.request_focus();
+            if response.has_focus() {
+                let plain_enter = ui.input(|i| {
+                    i.key_pressed(egui::Key::Enter)
+                        && !i.modifiers.ctrl
+                        && !i.modifiers.command
+                });
+                if plain_enter {
+                    if state.text_buf.ends_with('\n') {
+                        state.text_buf.pop();
+                    }
+                    create_block = true;
+                }
+                if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                    exit_mode = true;
+                }
+            }
+        });
+
+    if create_block {
+        let name = state.text_buf.trim().to_string();
+        if !name.is_empty() {
+            let est = Estimate {
+                most_likely: 1.0,
+                optimistic: 0.7,
+                pessimistic: 1.5,
+                confidence: 0.8,
+            };
+            let new_id = model.create_work_block(name, est);
+            if let Some(plan) = model.plans.values_mut().next() {
+                plan.root_blocks.push(new_id);
+            }
+            if let Err(e) = db::save_model(&conn, &model) {
+                error!("save_model failed: {e}");
+            }
+        }
+        state.text_buf.clear();
+    }
+
+    if exit_mode {
+        state.active = false;
+        state.text_buf.clear();
     }
 }
 
