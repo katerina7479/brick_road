@@ -62,23 +62,18 @@ pub fn spawn_labels(
     }
 
     // Row name labels — same sort order as block sprites for matching rows.
-    let ordered = schedule::sorted_blocks(&schedule);
+    let ordered = schedule::sorted_blocks(&model);
 
-    for (row, block) in ordered.iter().enumerate() {
-        let name = model
-            .work_blocks
-            .get(&block.work_block_id)
-            .map(|wb| wb.name.as_str())
-            .unwrap_or("?")
-            .to_string();
+    for (row, wb) in ordered.iter().enumerate() {
+        let name = wb.name.clone();
 
-        let depth = nesting_depth(&model, block.work_block_id);
+        let depth = nesting_depth(&model, wb.id);
         let x = ROW_LABEL_X + depth as f32 * INDENT_PX;
         let y = -(row as f32) * ROW_HEIGHT;
 
         commands.spawn((
             RowLabel {
-                work_block_id: block.work_block_id,
+                work_block_id: wb.id,
                 row,
             },
             Text2d::new(name),
