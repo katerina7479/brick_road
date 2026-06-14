@@ -83,6 +83,9 @@ pub fn sync_block_sprites(
     selected: Res<SelectedBlock>,
     mut query: Query<(&BlockSprite, &mut Transform, &mut Sprite)>,
 ) {
+    let on_critical: std::collections::HashSet<WorkBlockId> =
+        schedule.critical_path.iter().copied().collect();
+
     for (block_sprite, mut transform, mut sprite) in &mut query {
         let Some(block) = schedule.blocks.get(&block_sprite.work_block_id) else {
             continue;
@@ -96,7 +99,7 @@ pub fn sync_block_sprites(
 
         let base = PALETTE[block_sprite.row % PALETTE.len()];
         let id = block_sprite.work_block_id;
-        sprite.color = if schedule.critical_path.contains(&id) {
+        sprite.color = if on_critical.contains(&id) {
             Color::from(CRITICAL_PATH_COLOR)
         } else if selected.0 == Some(id) {
             Color::from(LinearRgba::new(
