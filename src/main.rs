@@ -37,10 +37,15 @@ fn main() {
         .insert_resource(blocks::DepDragState::default())
         .insert_resource(blocks::DeleteConfirmState::default())
         .insert_resource(schedule::ViewScope::default())
+        .insert_resource(schedule::VisibleBlocks::default())
         .insert_resource(analysis::ScheduleAnalysis::default())
         .add_systems(Startup, (setup_db, setup_camera))
         .add_systems(Startup, setup_demo_schedule.after(setup_db))
         .add_systems(PostStartup, update_analysis.before(blocks::spawn_block_sprites))
+        .add_systems(
+            PostStartup,
+            schedule::update_visible_blocks.before(blocks::spawn_block_sprites),
+        )
         .add_systems(PostStartup, blocks::spawn_block_sprites)
         .add_systems(
             PostStartup,
@@ -53,6 +58,15 @@ fn main() {
         .add_systems(Update, (camera_nav_keys, update_camera_target, smooth_camera).chain())
         .add_systems(Update, draw_grid)
         .add_systems(Update, update_analysis)
+        .add_systems(
+            Update,
+            schedule::update_visible_blocks
+                .before(blocks::spawn_block_sprites)
+                .before(blocks::sync_conflict_overlays)
+                .before(blocks::sync_uncertainty_overlays)
+                .before(blocks::draw_dependency_edges)
+                .before(blocks::draw_block_handles),
+        )
         .add_systems(Update, blocks::handle_name_edit)
         .add_systems(
             Update,

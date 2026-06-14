@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use bevy::prelude::Resource;
+use bevy::prelude::{DetectChanges, Res, ResMut, Resource};
 
 use crate::graph::{CycleError, DependencyGraph};
 use crate::model::{
@@ -112,6 +112,29 @@ pub fn visible_blocks<'a>(model: &'a Model, scope: &ViewScope) -> Vec<&'a WorkBl
         }
     }
     sorted_blocks(model)
+}
+
+/// Cached result of `visible_blocks()`, recomputed only when `Model` or
+/// `ViewScope` changes.  All per-frame consumers read from this resource
+/// instead of calling `visible_blocks()` directly.
+#[derive(Debug, Default, Resource)]
+pub struct VisibleBlocks {
+    pub ids: Vec<WorkBlockId>,
+}
+
+/// Refreshes `VisibleBlocks` when the model or view scope changes.
+pub fn update_visible_blocks(
+    model: Res<Model>,
+    scope: Res<ViewScope>,
+    mut cache: ResMut<VisibleBlocks>,
+) {
+    if !model.is_changed() && !scope.is_changed() {
+        return;
+    }
+    cache.ids = visible_blocks(&model, &scope)
+        .into_iter()
+        .map(|wb| wb.id)
+        .collect();
 }
 
 /// Propagate dependency constraints to all blocks reachable (transitively)
