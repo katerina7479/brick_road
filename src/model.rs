@@ -18,12 +18,17 @@ id_newtype!(MilestoneId);
 id_newtype!(WorldId);
 id_newtype!(PlanId);
 
+/// A duration or position on the timeline, measured in working days from the plan origin.
+/// Phase 1 of the f32→i32 migration: tagging all day-valued fields as `Day` makes
+/// Phase 2 (flipping the alias to `i32`) a focused mechanical change.
+pub type Day = f32;
+
 /// Three-point effort estimate in workdays.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Estimate {
-    pub most_likely: f32,
-    pub optimistic: f32,
-    pub pessimistic: f32,
+    pub most_likely: Day,
+    pub optimistic: Day,
+    pub pessimistic: Day,
     /// Subjective confidence that the true value falls in the given range (0.0–1.0).
     pub confidence: f32,
 }
@@ -42,10 +47,10 @@ pub struct WorkBlock {
     pub variants: Vec<VariantId>,
     /// User-defined placement: start offset in days from the plan origin.
     /// 0.0 until the user manually positions the block.
-    pub start_day: f32,
+    pub start_day: Day,
     /// User-defined placement: duration in days.
     /// 0.0 until the user manually sizes the block.
-    pub duration_days: f32,
+    pub duration_days: Day,
     /// Optional user-defined HDR color [R, G, B] in linear space.
     /// Values > 1.0 trigger bloom. `None` falls back to the palette default.
     pub color: Option<[f32; 3]>,
@@ -63,7 +68,7 @@ pub struct WorkBlock {
 #[derive(Debug, Clone, PartialEq)]
 pub struct TShirtSize {
     pub label: String,
-    pub days: f32,
+    pub days: Day,
 }
 
 /// Per-confidence-level multipliers that control how wide the uncertainty spread
@@ -145,8 +150,8 @@ pub struct ResourceBlock {
 /// Start and end are in days relative to the plan origin.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AvailabilitySegment {
-    pub start: f32,
-    pub end: f32,
+    pub start: Day,
+    pub end: Day,
     /// Fraction of full capacity available in this segment (0.0–1.0).
     pub factor: f32,
 }
@@ -172,7 +177,7 @@ pub struct Dependency {
     pub successor: WorkBlockId,
     pub dependency_type: DependencyType,
     /// Optional lag in days (positive = delay, negative = lead).
-    pub lag: f32,
+    pub lag: Day,
 }
 
 /// A significant named date in the plan timeline.
@@ -181,7 +186,7 @@ pub struct Dependency {
 pub struct Milestone {
     pub id: MilestoneId,
     pub name: String,
-    pub date: f32,
+    pub date: Day,
 }
 
 /// Assignment of a fraction of a resource's capacity to a work block.
@@ -320,7 +325,7 @@ impl Model {
         id
     }
 
-    pub fn create_milestone(&mut self, name: impl Into<String>, date: f32) -> MilestoneId {
+    pub fn create_milestone(&mut self, name: impl Into<String>, date: Day) -> MilestoneId {
         let id = MilestoneId(self.alloc_id());
         self.milestones.insert(
             id,
