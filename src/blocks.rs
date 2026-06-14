@@ -294,6 +294,8 @@ pub fn handle_block_selection(
     }
 
     if let Some(id) = clicked {
+        // Reset so a later empty-space click doesn't inherit a stale timestamp.
+        *last_empty_click = 0.0;
         // Re-clicking the selected block toggles it off; otherwise select it.
         selected.0 = if Some(id) == selected.0 { None } else { Some(id) };
     } else {
