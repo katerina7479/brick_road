@@ -157,7 +157,7 @@ pub fn forward_pass(
         .map(|b| b.end_day)
         .fold(0.0_f32, f32::max);
 
-    sched.critical_path = backward_pass(graph, &sched).critical_path;
+    sched.critical_path = backward_pass(&order, graph, &sched).critical_path;
 
     Ok(sched)
 }
@@ -173,13 +173,10 @@ pub fn forward_pass(
 ///
 /// Float (total slack) = LF − EF.  Blocks with zero float are critical.
 pub fn backward_pass(
+    order: &[WorkBlockId],
     graph: &DependencyGraph,
     schedule: &Schedule,
 ) -> CriticalPathAnalysis {
-    let order = match crate::graph::topological_sort(graph) {
-        Ok(o) => o,
-        Err(_) => return CriticalPathAnalysis { critical_path: vec![], float: HashMap::new() },
-    };
 
     // Build reverse edge map: successor → [(predecessor, dependency_type, lag)].
     let mut reverse: HashMap<WorkBlockId, Vec<(WorkBlockId, DependencyType, f32)>> =
@@ -670,13 +667,14 @@ mod tests {
     // --- backward_pass / float tests ---
 
     fn analyze(model: &Model, roots: Vec<WorkBlockId>) -> (Schedule, CriticalPathAnalysis) {
-        use crate::graph::build_graph;
+        use crate::graph::{build_graph, topological_sort};
         let plan = model.plans.values().next().cloned().unwrap();
         let mut p = plan.clone();
         p.root_blocks = roots;
         let graph = build_graph(model, &p);
+        let order = topological_sort(&graph).expect("no cycle");
         let sched = forward_pass(model, &p, &graph).expect("no cycle");
-        let analysis = backward_pass(&graph, &sched);
+        let analysis = backward_pass(&order, &graph, &sched);
         (sched, analysis)
     }
 
