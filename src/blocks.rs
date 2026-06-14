@@ -1546,6 +1546,7 @@ fn has_variant_children(model: &model::Model, id: WorkBlockId) -> bool {
 pub fn delete_work_block(model: &mut model::Model, id: WorkBlockId) {
     // BFS to collect the block and all of its variant descendants.
     let mut to_delete: Vec<WorkBlockId> = vec![id];
+    let mut visited: HashSet<WorkBlockId> = HashSet::from([id]);
     let mut i = 0;
     while i < to_delete.len() {
         let cur = to_delete[i];
@@ -1553,7 +1554,7 @@ pub fn delete_work_block(model: &mut model::Model, id: WorkBlockId) {
             for &var_id in &wb.variants.clone() {
                 if let Some(var) = model.variants.get(&var_id) {
                     for &child_id in &var.children.clone() {
-                        if !to_delete.contains(&child_id) {
+                        if visited.insert(child_id) {
                             to_delete.push(child_id);
                         }
                     }
