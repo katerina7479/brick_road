@@ -5,6 +5,10 @@ use bevy::{
     render::view::Hdr,
 };
 
+pub mod camera;
+
+use camera::{smooth_camera, update_camera_target, CameraTarget};
+
 fn main() {
     App::new()
         .add_plugins(DefaultPlugins.set(WindowPlugin {
@@ -16,7 +20,9 @@ fn main() {
             ..default()
         }))
         .insert_resource(ClearColor(Color::srgb(0.02, 0.02, 0.05)))
+        .insert_resource(CameraTarget::default())
         .add_systems(Startup, setup_camera)
+        .add_systems(Update, (update_camera_target, smooth_camera).chain())
         .run();
 }
 
