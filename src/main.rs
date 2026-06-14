@@ -142,22 +142,40 @@ fn setup_camera(mut commands: Commands) {
     commands.spawn((Camera2d, Hdr, Tonemapping::TonyMcMapface, Bloom::default()));
 }
 
-fn draw_grid(mut gizmos: Gizmos) {
+fn draw_grid(
+    mut gizmos: Gizmos,
+    cam_q: Query<(&Transform, &Projection), With<Camera2d>>,
+    windows: Query<&Window>,
+) {
     let line_color = Color::srgba(0.3, 0.3, 0.5, 0.15);
     let baseline_color = Color::srgba(0.4, 0.4, 0.6, 0.35);
 
-    // Vertical lines at day boundaries
-    for day in -50i32..=50 {
+    let Ok((cam_t, proj)) = cam_q.single() else { return };
+    let Projection::Orthographic(ortho) = proj else { return };
+    let Ok(window) = windows.single() else { return };
+
+    let scale = ortho.scale;
+    let cam_x = cam_t.translation.x;
+    let cam_y = cam_t.translation.y;
+
+    // Visible world-space extents with a one-day margin to avoid edge pop-in.
+    let half_w = (window.width() * 0.5 + PIXELS_PER_DAY) * scale;
+    let half_h = (window.height() * 0.5 + 100.0) * scale;
+
+    let x_left   = cam_x - half_w;
+    let x_right  = cam_x + half_w;
+    let y_bottom = cam_y - half_h;
+    let y_top    = cam_y + half_h;
+
+    let day_min = (x_left / PIXELS_PER_DAY).floor() as i32;
+    let day_max = (x_right / PIXELS_PER_DAY).ceil() as i32;
+
+    for day in day_min..=day_max {
         let x = day as f32 * PIXELS_PER_DAY;
-        gizmos.line_2d(Vec2::new(x, -5000.0), Vec2::new(x, 5000.0), line_color);
+        gizmos.line_2d(Vec2::new(x, y_bottom), Vec2::new(x, y_top), line_color);
     }
 
-    // Horizontal baseline at y=0
-    gizmos.line_2d(
-        Vec2::new(-5000.0, 0.0),
-        Vec2::new(5000.0, 0.0),
-        baseline_color,
-    );
+    gizmos.line_2d(Vec2::new(x_left, 0.0), Vec2::new(x_right, 0.0), baseline_color);
 }
 
 fn setup_demo_schedule(mut model: ResMut<model::Model>, mut commands: Commands) {
