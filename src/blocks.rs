@@ -494,6 +494,78 @@ pub fn sync_conflict_overlays(
     }
 }
 
+// ── Estimate uncertainty overlays ────────────────────────────────────────────
+
+/// Marker for estimate uncertainty overlay sprites.
+#[derive(Component)]
+pub struct UncertaintyOverlay;
+
+/// Spawns two visual cues per visible block that encode estimate uncertainty:
+///
+/// - **Pessimistic tail**: a translucent warm-glow sprite extending rightward
+///   from the block's right edge to `(start_day + pessimistic) * PPD`.
+///   Opacity scales with `(1 − confidence)` so high-confidence blocks have
+///   barely-visible tails.
+///
+/// - **Optimistic marker**: a narrow white vertical bar inside the block at
+///   `(start_day + optimistic) * PPD`, only drawn when the optimistic end
+///   falls meaningfully inside the block (i.e. `optimistic < duration_days`).
+///
+/// Re-spawns whenever the model or view scope changes.
+pub fn sync_uncertainty_overlays(
+    mut commands: Commands,
+    model: Res<model::Model>,
+    scope: Res<ViewScope>,
+    existing: Query<Entity, With<UncertaintyOverlay>>,
+) {
+    if !model.is_changed() && !scope.is_changed() {
+        return;
+    }
+    for entity in &existing {
+        commands.entity(entity).despawn();
+    }
+
+    let ordered = schedule::visible_blocks(&model, &scope);
+
+    for (row, wb) in ordered.iter().enumerate() {
+        let y = -(row as f32) * ROW_HEIGHT;
+        let confidence = wb.estimate.confidence.clamp(0.0, 1.0);
+        let tail_alpha = (1.0 - confidence) * 0.55;
+
+        // Pessimistic tail — extends past the right edge of the main block.
+        let x_block_right = (wb.start_day + wb.duration_days) * PIXELS_PER_DAY;
+        let x_pes_right = (wb.start_day + wb.estimate.pessimistic) * PIXELS_PER_DAY;
+        let tail_w = (x_pes_right - x_block_right).max(0.0);
+
+        if tail_w > 0.5 && tail_alpha > 0.01 {
+            commands.spawn((
+                UncertaintyOverlay,
+                Sprite {
+                    color: Color::from(LinearRgba::new(1.8, 1.3, 0.5, tail_alpha)),
+                    custom_size: Some(Vec2::new(tail_w, BLOCK_HEIGHT * 0.65)),
+                    ..default()
+                },
+                Transform::from_xyz(x_block_right + tail_w * 0.5, y, -0.1),
+            ));
+        }
+
+        // Optimistic marker — narrow bar inside the block at the optimistic end.
+        let x_block_left = wb.start_day * PIXELS_PER_DAY;
+        let x_opt_end = (wb.start_day + wb.estimate.optimistic) * PIXELS_PER_DAY;
+        if x_opt_end > x_block_left + 1.0 && x_opt_end < x_block_right - 1.0 {
+            commands.spawn((
+                UncertaintyOverlay,
+                Sprite {
+                    color: Color::from(LinearRgba::new(1.4, 1.4, 1.4, 0.55)),
+                    custom_size: Some(Vec2::new(2.0, BLOCK_HEIGHT * 0.9)),
+                    ..default()
+                },
+                Transform::from_xyz(x_opt_end, y, 0.3),
+            ));
+        }
+    }
+}
+
 // ── Dependency edges ──────────────────────────────────────────────────────────
 
 /// Persistent state for the right-click drag-to-create-dependency gesture.
