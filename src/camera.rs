@@ -59,11 +59,19 @@ pub fn update_camera_target(
 /// Must run before `update_camera_target` so pan/scroll input can still
 /// override in the same frame.
 pub fn camera_nav_keys(
+    mut egui_ctx: bevy_egui::EguiContexts,
     keyboard: Res<ButtonInput<KeyCode>>,
     mut target: ResMut<CameraTarget>,
     model: Res<Model>,
     windows: Query<&Window>,
 ) {
+    if egui_ctx
+        .ctx_mut()
+        .ok()
+        .is_some_and(|ctx| ctx.wants_keyboard_input())
+    {
+        return;
+    }
     if keyboard.just_pressed(KeyCode::Home) {
         target.pos = Vec2::ZERO;
         target.zoom = 1.0;
