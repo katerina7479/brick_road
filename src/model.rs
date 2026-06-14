@@ -47,3 +47,72 @@ pub struct Variant {
     /// Ordered child WorkBlocks that collectively implement this variant.
     pub children: Vec<WorkBlockId>,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResourceType {
+    Person,
+    Team,
+    Equipment,
+    Budget,
+}
+
+/// A resource that can be allocated to work blocks.
+#[derive(Debug, Clone)]
+pub struct ResourceBlock {
+    pub id: ResourceBlockId,
+    pub name: String,
+    pub resource_type: ResourceType,
+    pub availability: AvailabilityTimeline,
+}
+
+/// A contiguous span of time during which a resource is available.
+/// Start and end are in days relative to the plan origin.
+#[derive(Debug, Clone)]
+pub struct AvailabilitySegment {
+    pub start: f32,
+    pub end: f32,
+    /// Fraction of full capacity available in this segment (0.0–1.0).
+    pub factor: f32,
+}
+
+/// Ordered sequence of availability segments for a resource.
+#[derive(Debug, Clone, Default)]
+pub struct AvailabilityTimeline {
+    pub segments: Vec<AvailabilitySegment>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DependencyType {
+    FinishToStart,
+    StartToStart,
+    FinishToFinish,
+    StartToFinish,
+}
+
+#[derive(Debug, Clone)]
+pub struct Dependency {
+    pub id: DependencyId,
+    pub predecessor: WorkBlockId,
+    pub successor: WorkBlockId,
+    pub dependency_type: DependencyType,
+    /// Optional lag in days (positive = delay, negative = lead).
+    pub lag: f32,
+}
+
+/// A significant named date in the plan timeline.
+/// Date is in days relative to the plan origin.
+#[derive(Debug, Clone)]
+pub struct Milestone {
+    pub id: MilestoneId,
+    pub name: String,
+    pub date: f32,
+}
+
+/// Assignment of a fraction of a resource's capacity to a work block.
+#[derive(Debug, Clone)]
+pub struct ResourceAllocation {
+    pub resource_id: ResourceBlockId,
+    pub work_block_id: WorkBlockId,
+    /// Fraction of the resource's capacity assigned (0.0–1.0).
+    pub allocation_factor: f32,
+}
