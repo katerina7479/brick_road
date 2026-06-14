@@ -77,6 +77,10 @@ fn main() {
             Update,
             blocks::sync_conflict_overlays.after(update_analysis),
         )
+        .add_systems(
+            Update,
+            blocks::sync_uncertainty_overlays.after(blocks::spawn_block_sprites),
+        )
         .add_systems(Update, blocks::handle_dep_drag)
         .add_systems(
             Update,
