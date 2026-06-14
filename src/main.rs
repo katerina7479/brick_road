@@ -368,6 +368,62 @@ fn side_panel_ui(
         .min_width(SIDE_PANEL_WIDTH)
         .show(ctx, |ui| {
             ui.heading("brick_road");
+
+            // Plan selector — tabs across the top of the panel.
+            {
+                let mut sorted_plans: Vec<_> = model
+                    .plans
+                    .values()
+                    .map(|p| (p.id, p.name.clone()))
+                    .collect();
+                sorted_plans.sort_by_key(|(id, _)| id.0);
+
+                let current_plan_id = schedule.plan_id;
+                let mut switch_to: Option<model::PlanId> = None;
+                let mut create_plan = false;
+
+                ui.horizontal_wrapped(|ui| {
+                    for (pid, name) in &sorted_plans {
+                        if ui.selectable_label(current_plan_id == *pid, name).clicked()
+                            && current_plan_id != *pid
+                        {
+                            switch_to = Some(*pid);
+                        }
+                    }
+                    if ui.small_button("+").on_hover_text("New plan").clicked() {
+                        create_plan = true;
+                    }
+                });
+
+                if let Some(target_id) = switch_to {
+                    if let Some(plan) = model.plans.get(&target_id).cloned() {
+                        let dep_graph = graph::build_graph(&model, &plan);
+                        *schedule = schedule::forward_pass(&model, &plan, &dep_graph)
+                            .unwrap_or_else(|_| schedule::Schedule::new(target_id));
+                    }
+                    scope.scope_stack.clear();
+                    selected.0 = None;
+                }
+
+                if create_plan {
+                    let world_id = model
+                        .plans
+                        .get(&current_plan_id)
+                        .map(|p| p.world_id)
+                        .or_else(|| model.worlds.keys().next().copied());
+                    if let Some(wid) = world_id {
+                        let n = model.plans.len() + 1;
+                        let new_id = model.create_plan(format!("Plan {n}"), wid);
+                        *schedule = schedule::Schedule::new(new_id);
+                        scope.scope_stack.clear();
+                        selected.0 = None;
+                        if let Err(e) = db::save_model(&conn, &model) {
+                            error!("save_model failed: {e}");
+                        }
+                    }
+                }
+            }
+
             // Breadcrumb: show full navigation path when drilled in.
             // Clicking an ancestor segment truncates the stack back to that level.
             if !scope.scope_stack.is_empty() {
