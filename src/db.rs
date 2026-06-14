@@ -70,6 +70,13 @@ CREATE TABLE IF NOT EXISTS plans (
     world_id INTEGER NOT NULL REFERENCES worlds(id)
 );
 
+CREATE TABLE IF NOT EXISTS plan_root_blocks (
+    plan_id       INTEGER NOT NULL REFERENCES plans(id),
+    work_block_id INTEGER NOT NULL REFERENCES work_blocks(id),
+    sort_order    INTEGER NOT NULL,
+    PRIMARY KEY (plan_id, sort_order)
+);
+
 CREATE TABLE IF NOT EXISTS plan_variant_selections (
     plan_id       INTEGER NOT NULL REFERENCES plans(id),
     work_block_id INTEGER NOT NULL REFERENCES work_blocks(id),
