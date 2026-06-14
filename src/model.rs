@@ -18,7 +18,7 @@ id_newtype!(WorldId);
 id_newtype!(PlanId);
 
 /// Three-point effort estimate in workdays.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Estimate {
     pub most_likely: f32,
     pub optimistic: f32,
@@ -30,7 +30,7 @@ pub struct Estimate {
 /// A unit of work. Leaf blocks carry their own estimate; blocks with variants
 /// represent a choice between alternative implementations, each potentially
 /// containing further child blocks.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct WorkBlock {
     pub id: WorkBlockId,
     pub name: String,
@@ -43,7 +43,7 @@ pub struct WorkBlock {
 
 /// One alternative decomposition of a parent WorkBlock into an ordered sequence
 /// of child WorkBlocks.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Variant {
     pub id: VariantId,
     pub name: String,
@@ -61,7 +61,7 @@ pub enum ResourceType {
 }
 
 /// A resource that can be allocated to work blocks.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ResourceBlock {
     pub id: ResourceBlockId,
     pub name: String,
@@ -71,7 +71,7 @@ pub struct ResourceBlock {
 
 /// A contiguous span of time during which a resource is available.
 /// Start and end are in days relative to the plan origin.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct AvailabilitySegment {
     pub start: f32,
     pub end: f32,
@@ -80,7 +80,7 @@ pub struct AvailabilitySegment {
 }
 
 /// Ordered sequence of availability segments for a resource.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct AvailabilityTimeline {
     pub segments: Vec<AvailabilitySegment>,
 }
@@ -93,7 +93,7 @@ pub enum DependencyType {
     StartToFinish,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Dependency {
     pub id: DependencyId,
     pub predecessor: WorkBlockId,
@@ -105,7 +105,7 @@ pub struct Dependency {
 
 /// A significant named date in the plan timeline.
 /// Date is in days relative to the plan origin.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Milestone {
     pub id: MilestoneId,
     pub name: String,
@@ -113,7 +113,7 @@ pub struct Milestone {
 }
 
 /// Assignment of a fraction of a resource's capacity to a work block.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ResourceAllocation {
     pub resource_id: ResourceBlockId,
     pub work_block_id: WorkBlockId,
@@ -123,7 +123,7 @@ pub struct ResourceAllocation {
 
 /// Shared reality: the pool of resources (people, teams, equipment, budgets)
 /// that plans are evaluated against.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct World {
     pub id: WorldId,
     pub name: String,
@@ -132,7 +132,7 @@ pub struct World {
 
 /// A proposed future: a named scenario that selects blocks and variants
 /// and evaluates them against a specific World.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Plan {
     pub id: PlanId,
     pub name: String,
@@ -147,7 +147,7 @@ pub struct Plan {
 
 /// Central data store. All entities are keyed by their ID type.
 /// Derives `Resource` so Bevy can manage it as an ECS resource.
-#[derive(Debug, Default, Resource)]
+#[derive(Debug, Default, Resource, PartialEq)]
 pub struct Model {
     next_id: u64,
     pub work_blocks: HashMap<WorkBlockId, WorkBlock>,

@@ -221,10 +221,10 @@ pub fn load_model(conn: &Connection) -> Result<Model> {
         }
     }
 
-    // resource_blocks  (also populate world.resource_ids)
+    // resource_blocks  (also populate world.resource_ids; ORDER BY id keeps the vec deterministic)
     {
         let mut stmt = conn.prepare(
-            "SELECT id, world_id, name, resource_type FROM resource_blocks",
+            "SELECT id, world_id, name, resource_type FROM resource_blocks ORDER BY id",
         )?;
         let rows = stmt.query_map([], |row| {
             Ok((
@@ -493,7 +493,125 @@ pub fn load_model(conn: &Connection) -> Result<Model> {
     }
 
     model.set_next_id(max_id);
+    validate_model(&model)?;
     Ok(model)
+}
+
+/// Checks referential integrity invariants that the DB's FK constraints don't
+/// fully capture in-memory.  Called automatically by `load_model`; callers may
+/// also invoke it after mutating a Model in application code.
+pub fn validate_model(model: &Model) -> Result<()> {
+    let mut errors: Vec<String> = Vec::new();
+
+    for (wb_id, wb) in &model.work_blocks {
+        for &var_id in &wb.variants {
+            if !model.variants.contains_key(&var_id) {
+                errors.push(format!(
+                    "WorkBlock {} lists Variant {} which does not exist",
+                    wb_id.0, var_id.0
+                ));
+            }
+        }
+    }
+
+    for (var_id, v) in &model.variants {
+        if !model.work_blocks.contains_key(&v.parent) {
+            errors.push(format!(
+                "Variant {} has parent WorkBlock {} which does not exist",
+                var_id.0, v.parent.0
+            ));
+        }
+        for &child_id in &v.children {
+            if !model.work_blocks.contains_key(&child_id) {
+                errors.push(format!(
+                    "Variant {} child WorkBlock {} does not exist",
+                    var_id.0, child_id.0
+                ));
+            }
+        }
+    }
+
+    for (dep_id, dep) in &model.dependencies {
+        if !model.work_blocks.contains_key(&dep.predecessor) {
+            errors.push(format!(
+                "Dependency {} predecessor WorkBlock {} does not exist",
+                dep_id.0, dep.predecessor.0
+            ));
+        }
+        if !model.work_blocks.contains_key(&dep.successor) {
+            errors.push(format!(
+                "Dependency {} successor WorkBlock {} does not exist",
+                dep_id.0, dep.successor.0
+            ));
+        }
+    }
+
+    for (world_id, world) in &model.worlds {
+        for &rb_id in &world.resource_ids {
+            if !model.resource_blocks.contains_key(&rb_id) {
+                errors.push(format!(
+                    "World {} lists ResourceBlock {} which does not exist",
+                    world_id.0, rb_id.0
+                ));
+            }
+        }
+    }
+
+    for (plan_id, plan) in &model.plans {
+        if !model.worlds.contains_key(&plan.world_id) {
+            errors.push(format!(
+                "Plan {} references World {} which does not exist",
+                plan_id.0, plan.world_id.0
+            ));
+        }
+        for &wb_id in &plan.root_blocks {
+            if !model.work_blocks.contains_key(&wb_id) {
+                errors.push(format!(
+                    "Plan {} root_block WorkBlock {} does not exist",
+                    plan_id.0, wb_id.0
+                ));
+            }
+        }
+        for (&wb_id, &var_id) in &plan.selected_variants {
+            if !model.work_blocks.contains_key(&wb_id) {
+                errors.push(format!(
+                    "Plan {} selected_variants key WorkBlock {} does not exist",
+                    plan_id.0, wb_id.0
+                ));
+            }
+            match model.variants.get(&var_id) {
+                None => errors.push(format!(
+                    "Plan {} selected Variant {} does not exist",
+                    plan_id.0, var_id.0
+                )),
+                Some(v) if v.parent != wb_id => errors.push(format!(
+                    "Plan {} selects Variant {} for WorkBlock {} but Variant's parent is {}",
+                    plan_id.0, var_id.0, wb_id.0, v.parent.0
+                )),
+                Some(_) => {}
+            }
+        }
+        for alloc in &plan.allocations {
+            if !model.resource_blocks.contains_key(&alloc.resource_id) {
+                errors.push(format!(
+                    "Plan {} allocation ResourceBlock {} does not exist",
+                    plan_id.0, alloc.resource_id.0
+                ));
+            }
+            if !model.work_blocks.contains_key(&alloc.work_block_id) {
+                errors.push(format!(
+                    "Plan {} allocation WorkBlock {} does not exist",
+                    plan_id.0, alloc.work_block_id.0
+                ));
+            }
+        }
+    }
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(rusqlite::Error::InvalidParameterName(errors.join("; ")))
+    }
 }
 
 fn parse_resource_type(s: &str) -> Result<ResourceType> {
@@ -535,6 +653,205 @@ fn dependency_type_str(dt: DependencyType) -> &'static str {
         DependencyType::StartToStart => "StartToStart",
         DependencyType::FinishToFinish => "FinishToFinish",
         DependencyType::StartToFinish => "StartToFinish",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{
+        AvailabilitySegment, DependencyType, Estimate, Plan, ResourceAllocation, ResourceType,
+        Variant, VariantId, WorkBlockId, WorldId,
+    };
+    use rusqlite::Connection;
+
+    fn open_in_memory() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        create_tables(&conn).unwrap();
+        conn
+    }
+
+    fn est(ml: f32, opt: f32, pes: f32, conf: f32) -> Estimate {
+        Estimate { most_likely: ml, optimistic: opt, pessimistic: pes, confidence: conf }
+    }
+
+    #[test]
+    fn empty_model_round_trip() {
+        let conn = open_in_memory();
+        let m = Model::default();
+        save_model(&conn, &m).unwrap();
+        let loaded = load_model(&conn).unwrap();
+        assert_eq!(m, loaded);
+    }
+
+    #[test]
+    fn sparse_model_round_trip() {
+        let conn = open_in_memory();
+        let mut m = Model::default();
+        m.create_milestone("kickoff", 0.0);
+        m.create_milestone("launch", 120.0);
+        m.create_work_block("prep", est(5.0, 3.0, 10.0, 0.8));
+
+        save_model(&conn, &m).unwrap();
+        let loaded = load_model(&conn).unwrap();
+
+        assert_eq!(m.milestones, loaded.milestones);
+        assert_eq!(m.work_blocks, loaded.work_blocks);
+        assert!(loaded.worlds.is_empty());
+        assert!(loaded.plans.is_empty());
+        assert!(loaded.variants.is_empty());
+        assert!(loaded.dependencies.is_empty());
+        assert!(loaded.resource_blocks.is_empty());
+    }
+
+    #[test]
+    fn full_model_round_trip() {
+        let conn = open_in_memory();
+        let mut m = Model::default();
+
+        let world_id = m.create_world("baseline");
+
+        // Resources created in ascending ID order so ORDER BY id on reload preserves world.resource_ids.
+        let rb1 = m.create_resource_block("Alice", ResourceType::Person);
+        m.resource_blocks.get_mut(&rb1).unwrap().availability.segments.push(
+            AvailabilitySegment { start: 0.0, end: 100.0, factor: 1.0 },
+        );
+        m.resource_blocks.get_mut(&rb1).unwrap().availability.segments.push(
+            AvailabilitySegment { start: 100.0, end: 200.0, factor: 0.5 },
+        );
+        let rb2 = m.create_resource_block("Team Alpha", ResourceType::Team);
+        m.worlds.get_mut(&world_id).unwrap().resource_ids.push(rb1);
+        m.worlds.get_mut(&world_id).unwrap().resource_ids.push(rb2);
+
+        let wb_a = m.create_work_block("Design", est(3.0, 1.0, 7.0, 0.75));
+        let wb_b = m.create_work_block("Implement", est(10.0, 5.0, 20.0, 0.5));
+        let wb_child = m.create_work_block("Sub-task", est(4.0, 2.0, 8.0, 0.75));
+
+        let v1 = m.create_variant("fast", wb_b);
+        let v2 = m.create_variant("thorough", wb_b);
+        m.work_blocks.get_mut(&wb_b).unwrap().variants.push(v1);
+        m.work_blocks.get_mut(&wb_b).unwrap().variants.push(v2);
+        m.variants.get_mut(&v1).unwrap().children.push(wb_child);
+
+        let dep_id = m.create_dependency(wb_a, wb_b, DependencyType::FinishToStart);
+        m.dependencies.get_mut(&dep_id).unwrap().lag = 1.5;
+
+        m.create_milestone("launch", 90.0);
+
+        let plan_id = m.create_plan("alpha", world_id);
+        m.plans.get_mut(&plan_id).unwrap().root_blocks.push(wb_a);
+        m.plans.get_mut(&plan_id).unwrap().root_blocks.push(wb_b);
+        m.plans.get_mut(&plan_id).unwrap().selected_variants.insert(wb_b, v1);
+        m.plans.get_mut(&plan_id).unwrap().allocations.push(ResourceAllocation {
+            resource_id: rb1,
+            work_block_id: wb_a,
+            allocation_factor: 1.0,
+        });
+        m.plans.get_mut(&plan_id).unwrap().allocations.push(ResourceAllocation {
+            resource_id: rb2,
+            work_block_id: wb_b,
+            allocation_factor: 0.5,
+        });
+
+        save_model(&conn, &m).unwrap();
+        let loaded = load_model(&conn).unwrap();
+
+        assert_eq!(m.work_blocks, loaded.work_blocks);
+        assert_eq!(m.variants, loaded.variants);
+        assert_eq!(m.dependencies, loaded.dependencies);
+        assert_eq!(m.milestones, loaded.milestones);
+        assert_eq!(m.worlds, loaded.worlds);
+        assert_eq!(m.resource_blocks, loaded.resource_blocks);
+
+        // Allocations have no sort_order column, so compare as sorted sets.
+        assert_eq!(m.plans.len(), loaded.plans.len());
+        for (pid, orig) in &m.plans {
+            let got = loaded.plans.get(pid).expect("plan missing after load");
+            assert_eq!(orig.name, got.name);
+            assert_eq!(orig.world_id, got.world_id);
+            assert_eq!(orig.root_blocks, got.root_blocks);
+            assert_eq!(orig.selected_variants, got.selected_variants);
+            let mut a = orig.allocations.clone();
+            let mut b = got.allocations.clone();
+            a.sort_by_key(|x| (x.resource_id.0, x.work_block_id.0));
+            b.sort_by_key(|x| (x.resource_id.0, x.work_block_id.0));
+            assert_eq!(a, b, "plan allocations mismatch");
+        }
+    }
+
+    #[test]
+    fn validate_accepts_valid_model() {
+        let mut m = Model::default();
+        let w = m.create_world("w");
+        let rb = m.create_resource_block("Alice", ResourceType::Person);
+        m.worlds.get_mut(&w).unwrap().resource_ids.push(rb);
+        let wb_a = m.create_work_block("a", est(1.0, 0.5, 2.0, 1.0));
+        let wb_b = m.create_work_block("b", est(1.0, 0.5, 2.0, 1.0));
+        let v = m.create_variant("v", wb_a);
+        m.work_blocks.get_mut(&wb_a).unwrap().variants.push(v);
+        let _dep = m.create_dependency(wb_a, wb_b, DependencyType::FinishToStart);
+        let plan_id = m.create_plan("p", w);
+        m.plans.get_mut(&plan_id).unwrap().root_blocks.push(wb_a);
+        m.plans.get_mut(&plan_id).unwrap().selected_variants.insert(wb_a, v);
+        m.plans.get_mut(&plan_id).unwrap().allocations.push(ResourceAllocation {
+            resource_id: rb,
+            work_block_id: wb_a,
+            allocation_factor: 1.0,
+        });
+        assert!(validate_model(&m).is_ok());
+    }
+
+    #[test]
+    fn validate_catches_orphan_variant_parent() {
+        let mut m = Model::default();
+        let wb_id = m.create_work_block("wb", est(1.0, 0.5, 2.0, 1.0));
+        let v_id = m.create_variant("v", wb_id);
+        m.work_blocks.get_mut(&wb_id).unwrap().variants.push(v_id);
+        m.variants.insert(
+            VariantId(999),
+            Variant {
+                id: VariantId(999),
+                name: "orphan".into(),
+                parent: WorkBlockId(888),
+                children: vec![],
+            },
+        );
+        let err = validate_model(&m).unwrap_err().to_string();
+        assert!(err.contains("888"), "expected missing parent ID 888 in: {err}");
+    }
+
+    #[test]
+    fn validate_catches_plan_bad_world() {
+        let mut m = Model::default();
+        m.create_world("real");
+        m.plans.insert(
+            crate::model::PlanId(99),
+            Plan {
+                id: crate::model::PlanId(99),
+                name: "bad".into(),
+                world_id: WorldId(888),
+                root_blocks: vec![],
+                selected_variants: Default::default(),
+                allocations: vec![],
+            },
+        );
+        let err = validate_model(&m).unwrap_err().to_string();
+        assert!(err.contains("888"), "expected missing world ID 888 in: {err}");
+    }
+
+    #[test]
+    fn validate_catches_mismatched_variant_selection() {
+        let mut m = Model::default();
+        let world_id = m.create_world("w");
+        let wb_a = m.create_work_block("a", est(1.0, 0.5, 2.0, 1.0));
+        let wb_b = m.create_work_block("b", est(1.0, 0.5, 2.0, 1.0));
+        let v = m.create_variant("v", wb_a);
+        m.work_blocks.get_mut(&wb_a).unwrap().variants.push(v);
+        let plan_id = m.create_plan("p", world_id);
+        // Select variant v (parent = wb_a) for wb_b — wrong parent
+        m.plans.get_mut(&plan_id).unwrap().selected_variants.insert(wb_b, v);
+        let err = validate_model(&m).unwrap_err().to_string();
+        assert!(err.contains("parent"), "expected parent mismatch message in: {err}");
     }
 }
 

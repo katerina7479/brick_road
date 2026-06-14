@@ -30,14 +30,23 @@ fn main() {
         .add_plugins(EguiPlugin::default())
         .insert_resource(ClearColor(Color::srgb(0.02, 0.02, 0.05)))
         .insert_resource(CameraTarget::default())
-        .init_resource::<model::Model>()
-        .add_systems(Startup, (setup_camera, setup_demo_schedule))
+        .add_systems(Startup, (setup_db, setup_camera))
+        .add_systems(Startup, setup_demo_schedule.after(setup_db))
         .add_systems(PostStartup, blocks::spawn_block_sprites)
         .add_systems(Update, (update_camera_target, smooth_camera).chain())
         .add_systems(Update, draw_grid)
         .add_systems(Update, blocks::sync_block_sprites)
         .add_systems(EguiPrimaryContextPass, side_panel_ui)
         .run();
+}
+
+fn setup_db(world: &mut World) {
+    let conn = rusqlite::Connection::open("brick_road.db")
+        .expect("failed to open brick_road.db");
+    db::create_tables(&conn).expect("failed to create DB tables");
+    let model = db::load_model(&conn).expect("failed to load model");
+    world.insert_resource(model);
+    world.insert_non_send_resource(conn);
 }
 
 fn setup_camera(mut commands: Commands) {
