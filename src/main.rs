@@ -1237,6 +1237,50 @@ fn side_panel_ui(
                 }
             });
 
+            ui.collapsing("Quarter Colors", |ui| {
+                let mut changed = false;
+                for (q, label) in ["Q1", "Q2", "Q3", "Q4"].iter().enumerate() {
+                    ui.label(*label);
+                    let c = &mut model.calendar.quarter_colors[q];
+                    changed |= ui.horizontal(|ui| {
+                        let r = ui.add(
+                            egui::DragValue::new(&mut c[0])
+                                .speed(0.01)
+                                .range(0.0f32..=1.0)
+                                .prefix("R ")
+                                .max_decimals(2),
+                        ).changed();
+                        let g = ui.add(
+                            egui::DragValue::new(&mut c[1])
+                                .speed(0.01)
+                                .range(0.0f32..=1.0)
+                                .prefix("G ")
+                                .max_decimals(2),
+                        ).changed();
+                        let b = ui.add(
+                            egui::DragValue::new(&mut c[2])
+                                .speed(0.01)
+                                .range(0.0f32..=1.0)
+                                .prefix("B ")
+                                .max_decimals(2),
+                        ).changed();
+                        let a = ui.add(
+                            egui::DragValue::new(&mut c[3])
+                                .speed(0.005)
+                                .range(0.0f32..=1.0)
+                                .prefix("A ")
+                                .max_decimals(3),
+                        ).changed();
+                        r || g || b || a
+                    }).inner;
+                }
+                if changed {
+                    if let Err(e) = db::save_model(&conn, &model) {
+                        error!("save_model failed: {e}");
+                    }
+                }
+            });
+
             // ── Plan Comparison ───────────────────────────────────────────────────
             ui.separator();
             ui.collapsing("Compare Plans", |ui| {
