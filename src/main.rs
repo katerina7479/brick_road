@@ -33,6 +33,7 @@ fn main() {
         .insert_resource(blocks::SelectedBlock::default())
         .insert_resource(blocks::NameEditState::default())
         .insert_resource(blocks::DragState::default())
+        .insert_resource(blocks::ResizeDragState::default())
         .insert_resource(blocks::DepDragState::default())
         .insert_resource(analysis::ScheduleAnalysis::default())
         .add_systems(Startup, (setup_db, setup_camera))
@@ -53,7 +54,13 @@ fn main() {
         )
         .add_systems(
             Update,
-            blocks::handle_block_drag.after(blocks::handle_block_selection),
+            blocks::handle_block_resize.after(blocks::handle_block_selection),
+        )
+        .add_systems(
+            Update,
+            blocks::handle_block_drag
+                .after(blocks::handle_block_selection)
+                .after(blocks::handle_block_resize),
         )
         .add_systems(
             Update,

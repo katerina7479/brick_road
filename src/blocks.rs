@@ -239,13 +239,101 @@ pub struct DragState {
     dragging: Option<(WorkBlockId, f32)>,
 }
 
+/// Tracks an in-progress right-edge resize drag.
+#[derive(Resource, Default)]
+pub struct ResizeDragState {
+    dragging: Option<WorkBlockId>,
+}
+
+/// Pixels from the right edge of a block that count as the resize handle.
+const EDGE_GRAB_PX: f32 = 8.0;
+
+/// Drag the right edge of a block to resize its `duration_days`.
+///
+/// - Press: if the cursor is within `EDGE_GRAB_PX` of the right edge and inside
+///   the block's Y bounds, begin resize (takes priority over the move drag).
+/// - Held: update `duration_days` so the right edge tracks the cursor, snapped
+///   to the nearest 0.5-day grid and clamped to ≥ 0.5.
+/// - Release: cascade dependency constraints, persist to DB.
+#[allow(clippy::too_many_arguments)]
+pub fn handle_block_resize(
+    mut egui_ctx: EguiContexts,
+    windows: Query<&Window>,
+    camera: Query<(&Camera, &GlobalTransform)>,
+    mouse: Res<ButtonInput<MouseButton>>,
+    mut resize: ResMut<ResizeDragState>,
+    mut model: ResMut<model::Model>,
+    conn: NonSend<rusqlite::Connection>,
+    block_query: Query<(&BlockSprite, &Transform, &Sprite)>,
+) {
+    if let Ok(ctx) = egui_ctx.ctx_mut() {
+        if ctx.is_pointer_over_area() {
+            resize.dragging = None;
+            return;
+        }
+    }
+
+    let Ok(window) = windows.single() else { return };
+    let Ok((camera, camera_transform)) = camera.single() else { return };
+    let Some(cursor_pos) = window.cursor_position() else {
+        resize.dragging = None;
+        return;
+    };
+    let Ok(world_pos) = camera.viewport_to_world_2d(camera_transform, cursor_pos) else {
+        return;
+    };
+
+    // Press: hit-test the right-edge handle.
+    if mouse.just_pressed(MouseButton::Left) {
+        resize.dragging = None;
+        for (block_sprite, transform, sprite) in &block_query {
+            let Some(size) = sprite.custom_size else { continue };
+            let center = transform.translation.truncate();
+            let half = size * 0.5;
+            let right_x = center.x + half.x;
+            if (world_pos.x - right_x).abs() <= EDGE_GRAB_PX
+                && world_pos.y >= center.y - half.y
+                && world_pos.y <= center.y + half.y
+            {
+                resize.dragging = Some(block_sprite.work_block_id);
+                break;
+            }
+        }
+        return;
+    }
+
+    // Held: update duration_days so the right edge follows the cursor.
+    if mouse.pressed(MouseButton::Left) {
+        if let Some(id) = resize.dragging {
+            if let Some(wb) = model.work_blocks.get_mut(&id) {
+                let raw_dur =
+                    ((world_pos.x - wb.start_day * PIXELS_PER_DAY) / PIXELS_PER_DAY).max(0.5);
+                wb.duration_days = (raw_dur * 2.0).round() / 2.0;
+            }
+        }
+        return;
+    }
+
+    // Release: cascade constraints and persist.
+    if mouse.just_released(MouseButton::Left) {
+        if let Some(id) = resize.dragging.take() {
+            schedule::cascade_dependencies(&mut model, id);
+            if let Err(e) = db::save_model(&conn, &model) {
+                error!("save_model failed: {e}");
+            }
+        }
+    }
+}
+
 /// Center-drag a block left or right to reposition its `start_day`.
 ///
 /// - Press: hit-test blocks, record offset from left edge, set selection.
+///   Skipped if a resize drag is already in progress.
 /// - Held: slide `start_day` to follow the cursor (clamped to ≥ 0).
 /// - Release: cascade dependency constraints, persist to DB.
 ///
 /// Clicks that land inside egui areas are ignored (same guard as selection).
+#[allow(clippy::too_many_arguments)]
 pub fn handle_block_drag(
     mut egui_ctx: EguiContexts,
     windows: Query<&Window>,
@@ -256,6 +344,7 @@ pub fn handle_block_drag(
     mut model: ResMut<model::Model>,
     conn: NonSend<rusqlite::Connection>,
     block_query: Query<(&BlockSprite, &Transform, &Sprite)>,
+    resize: Res<ResizeDragState>,
 ) {
     // Guard: egui owns the pointer when the cursor is over any egui area.
     if let Ok(ctx) = egui_ctx.ctx_mut() {
@@ -277,9 +366,12 @@ pub fn handle_block_drag(
         return;
     };
 
-    // Press: hit-test and start drag.
+    // Press: hit-test and start drag. Skip if a resize is already in progress.
     if mouse.just_pressed(MouseButton::Left) {
         drag.dragging = None;
+        if resize.dragging.is_some() {
+            return;
+        }
         for (block_sprite, transform, sprite) in &block_query {
             let Some(size) = sprite.custom_size else { continue };
             let center = transform.translation.truncate();
@@ -503,12 +595,6 @@ fn draw_arrowhead(gizmos: &mut Gizmos, src: Vec2, dst: Vec2, color: Color) {
     gizmos.line_2d(dst, dst - dir * 8.0 - perp * 4.0, color);
 }
 
-/// Returns the dependency type to create based on held modifier keys.
-///
-/// - Shift → StartToStart
-/// - Ctrl  → FinishToFinish
-/// - Alt   → StartToFinish
-/// - none  → FinishToStart (default)
 fn dep_type_from_modifiers(keys: &ButtonInput<KeyCode>) -> DependencyType {
     if keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]) {
         DependencyType::StartToStart
@@ -520,17 +606,6 @@ fn dep_type_from_modifiers(keys: &ButtonInput<KeyCode>) -> DependencyType {
         DependencyType::FinishToStart
     }
 }
-
-/// Right-click drag from one block to another to create a dependency edge.
-///
-/// Press right button on the source block, then release on the target.
-/// Hold a modifier key at release to select the dependency type:
-///   - No modifier → FinishToStart (default)
-///   - Shift       → StartToStart
-///   - Ctrl        → FinishToFinish
-///   - Alt         → StartToFinish
-///
-/// Self-loops and duplicate edges of the same type and direction are ignored.
 pub fn handle_dep_drag(
     mut egui_ctx: EguiContexts,
     windows: Query<&Window>,
