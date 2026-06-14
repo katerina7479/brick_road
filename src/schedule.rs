@@ -62,8 +62,13 @@ pub fn forward_pass(
     // Lower bound on end day from FF/SF edges.
     let mut min_end: HashMap<WorkBlockId, Option<f32>> =
         graph.nodes.iter().map(|&id| (id, None)).collect();
-    // Which predecessor drove the tightest constraint for each block
-    // (used to reconstruct the critical path).
+    // Which predecessor drove the tightest start bound (FS/SS edges).
+    let mut start_driver: HashMap<WorkBlockId, Option<WorkBlockId>> =
+        graph.nodes.iter().map(|&id| (id, None)).collect();
+    // Which predecessor drove the tightest end bound (FF/SF edges).
+    let mut end_driver: HashMap<WorkBlockId, Option<WorkBlockId>> =
+        graph.nodes.iter().map(|&id| (id, None)).collect();
+    // Reconciled critical-path driver — set per block after earliest_start is known.
     let mut driver: HashMap<WorkBlockId, Option<WorkBlockId>> =
         graph.nodes.iter().map(|&id| (id, None)).collect();
 
@@ -86,8 +91,17 @@ pub fn forward_pass(
         let earliest_start = f32::max(0.0, f32::max(es_from_start, es_from_end));
         let earliest_end = earliest_start + dur;
 
-        // Propagate constraints to successors, tracking which predecessor
-        // produced each tightest constraint.
+        // Reconcile driver: the predecessor whose constraint produced the
+        // dominating bound on earliest_start is the critical-path driver.
+        // When both bounds are equal (or only a start bound is active),
+        // the start-bound driver is preferred for determinism.
+        *driver.entry(id).or_insert(None) = if es_from_end > es_from_start {
+            *end_driver.get(&id).unwrap_or(&None)
+        } else {
+            *start_driver.get(&id).unwrap_or(&None)
+        };
+
+        // Propagate constraints to successors, tracking each bound type separately.
         if let Some(edges) = graph.edges.get(&id) {
             for edge in edges {
                 let s = edge.successor;
@@ -97,7 +111,7 @@ pub fn forward_pass(
                         let v = min_start.entry(s).or_insert(0.0);
                         if new > *v {
                             *v = new;
-                            *driver.entry(s).or_insert(None) = Some(id);
+                            *start_driver.entry(s).or_insert(None) = Some(id);
                         }
                     }
                     DependencyType::StartToStart => {
@@ -105,25 +119,25 @@ pub fn forward_pass(
                         let v = min_start.entry(s).or_insert(0.0);
                         if new > *v {
                             *v = new;
-                            *driver.entry(s).or_insert(None) = Some(id);
+                            *start_driver.entry(s).or_insert(None) = Some(id);
                         }
                     }
                     DependencyType::FinishToFinish => {
                         let new = earliest_end + edge.lag;
                         let v = min_end.entry(s).or_insert(None);
-                        let update = v.map_or(true, |cur| new > cur);
+                        let update = v.is_none_or(|cur| new > cur);
                         if update {
                             *v = Some(new);
-                            *driver.entry(s).or_insert(None) = Some(id);
+                            *end_driver.entry(s).or_insert(None) = Some(id);
                         }
                     }
                     DependencyType::StartToFinish => {
                         let new = earliest_start + edge.lag;
                         let v = min_end.entry(s).or_insert(None);
-                        let update = v.map_or(true, |cur| new > cur);
+                        let update = v.is_none_or(|cur| new > cur);
                         if update {
                             *v = Some(new);
-                            *driver.entry(s).or_insert(None) = Some(id);
+                            *end_driver.entry(s).or_insert(None) = Some(id);
                         }
                     }
                 }
@@ -156,12 +170,28 @@ fn build_critical_path(
     driver: &HashMap<WorkBlockId, Option<WorkBlockId>>,
     total_duration: f32,
 ) -> Vec<WorkBlockId> {
-    // Find the terminal block on the critical path (latest end; lowest id breaks ties).
-    let terminal = blocks
+    // All blocks that end at total_duration are potential terminals.
+    let at_end: std::collections::HashSet<WorkBlockId> = blocks
         .values()
         .filter(|b| (b.end_day - total_duration).abs() < f32::EPSILON)
-        .min_by_key(|b| b.work_block_id.0)
-        .map(|b| b.work_block_id);
+        .map(|b| b.work_block_id)
+        .collect();
+
+    // A block that is itself a driver of another at-end block is a predecessor
+    // in the chain, not the true terminal.  Exclude it and pick the successor.
+    let is_predecessor: std::collections::HashSet<WorkBlockId> = at_end
+        .iter()
+        .filter_map(|id| driver.get(id).and_then(|d| *d))
+        .filter(|d| at_end.contains(d))
+        .collect();
+
+    // The true terminal is the at-end block that is not a driven predecessor;
+    // lowest id breaks ties for determinism.
+    let terminal = at_end
+        .iter()
+        .filter(|id| !is_predecessor.contains(id))
+        .min_by_key(|&&id| id.0)
+        .copied();
 
     let Some(mut cur) = terminal else { return vec![] };
 
@@ -589,6 +619,35 @@ mod tests {
         assert!(s.critical_path.contains(&b));
         assert!(s.critical_path.contains(&c));
         assert!(!s.critical_path.contains(&a));
+    }
+
+    #[test]
+    fn critical_path_ff_dominates_fs_mixed_edge_types() {
+        // B(10) --FF--> C(5)  and  A(3) --FS--> C(5)
+        //
+        // B is created before A → lower WorkBlockId → processed first in topo order.
+        //
+        // The FF from B pushes C.end ≥ 10, so C.start = 10 - 5 = 5.
+        // The FS from A pushes C.start ≥ 3.
+        // Dominant bound: es_from_end (5) > es_from_start (3) → B is the driver.
+        //
+        // With the old single-driver map, A (processed after B) would overwrite
+        // driver[C] with itself, giving a wrong critical path of [A, C].
+        // The fix (separate start_driver / end_driver + reconciliation) gives [B, C].
+        let (mut m, _) = base();
+        let b = m.create_work_block("B", est(10.0)); // created first → lower ID
+        let a = m.create_work_block("A", est(3.0));
+        let c = m.create_work_block("C", est(5.0));
+        m.create_dependency(b, c, DependencyType::FinishToFinish);
+        m.create_dependency(a, c, DependencyType::FinishToStart);
+        let s = run(&m, vec![a, b, c]);
+        // Scheduling correctness (unchanged by this fix)
+        assert_eq!(s.blocks[&c].start_day, 5.0, "FF from B dominates: C starts at 5");
+        assert_eq!(s.blocks[&c].end_day,   10.0);
+        // Driver attribution (the actual bug being fixed)
+        assert!(s.critical_path.contains(&b), "B must be on critical path (FF driver)");
+        assert!(s.critical_path.contains(&c), "C must be on critical path");
+        assert!(!s.critical_path.contains(&a), "A is not the driver and must not appear");
     }
 
     // ── resource leveling tests ──────────────────────────────────────────────
