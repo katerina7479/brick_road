@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use bevy::prelude::*;
 use bevy_egui::{egui, EguiContexts};
@@ -667,34 +667,47 @@ pub fn sync_conflict_overlays(
 
 // ── Estimate uncertainty overlays ────────────────────────────────────────────
 
-/// Marker for estimate uncertainty overlay sprites.
-#[derive(Component)]
-pub struct UncertaintyOverlay;
+/// Identifies which kind of uncertainty visual an entity represents and which
+/// work block it belongs to. Used as the reconciliation key so the system can
+/// update existing sprites in place rather than despawn-all/respawn-all.
+#[derive(Component, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum UncertaintyOverlay {
+    /// Translucent warm-glow tail extending past the block's right edge to the
+    /// pessimistic estimate end. Opacity scales with `(1 − confidence)`.
+    PessimisticTail(WorkBlockId),
+    /// Narrow white vertical bar inside the block at the optimistic estimate end.
+    OptimisticMarker(WorkBlockId),
+}
 
-/// Spawns two visual cues per visible block that encode estimate uncertainty:
+/// Reconciles uncertainty overlay sprites with the current visible-block state.
 ///
-/// - **Pessimistic tail**: a translucent warm-glow sprite extending rightward
-///   from the block's right edge to `(start_day + pessimistic) * PPD`.
-///   Opacity scales with `(1 − confidence)` so high-confidence blocks have
-///   barely-visible tails.
-///
-/// - **Optimistic marker**: a narrow white vertical bar inside the block at
-///   `(start_day + optimistic) * PPD`, only drawn when the optimistic end
-///   falls meaningfully inside the block (i.e. `optimistic < duration_days`).
-///
-/// Re-spawns whenever the model or view scope changes.
+/// Updates existing overlay transforms/sizes/colors in place. Spawns overlays
+/// for newly visible blocks and despawns overlays for blocks that are no longer
+/// visible or whose geometry no longer warrants a tail or marker.
 pub fn sync_uncertainty_overlays(
     mut commands: Commands,
     model: Res<model::Model>,
     visible_blocks: Res<schedule::VisibleBlocks>,
-    existing: Query<Entity, With<UncertaintyOverlay>>,
+    mut overlay_q: Query<(Entity, &UncertaintyOverlay, &mut Transform, &mut Sprite)>,
 ) {
     if !model.is_changed() && !visible_blocks.is_changed() {
         return;
     }
-    for entity in &existing {
-        commands.entity(entity).despawn();
+
+    // Build an index of existing overlay entities by key.
+    let existing: HashMap<UncertaintyOverlay, Entity> = overlay_q
+        .iter()
+        .map(|(e, k, _, _)| (*k, e))
+        .collect();
+
+    // Compute the desired set of overlays.
+    struct Overlay {
+        key: UncertaintyOverlay,
+        pos: Vec3,
+        size: Vec2,
+        color: Color,
     }
+    let mut desired: Vec<Overlay> = Vec::new();
 
     for (row, &id) in visible_blocks.ids.iter().enumerate() {
         let Some(wb) = model.work_blocks.get(&id) else { continue };
@@ -702,36 +715,56 @@ pub fn sync_uncertainty_overlays(
         let confidence = wb.estimate.confidence.clamp(0.0, 1.0);
         let tail_alpha = (1.0 - confidence) * 0.55;
 
-        // Pessimistic tail — extends past the right edge of the main block.
-        let x_block_right = (wb.start_day + wb.duration_days) * PIXELS_PER_DAY;
-        let x_pes_right = (wb.start_day + wb.estimate.pessimistic) * PIXELS_PER_DAY;
-        let tail_w = (x_pes_right - x_block_right).max(0.0);
-
+        // Pessimistic tail — extends past the right edge to the pessimistic end.
+        let x_right = (wb.start_day + wb.duration_days) * PIXELS_PER_DAY;
+        let x_pes  = (wb.start_day + wb.estimate.pessimistic) * PIXELS_PER_DAY;
+        let tail_w = (x_pes - x_right).max(0.0);
         if tail_w > 0.5 && tail_alpha > 0.01 {
-            commands.spawn((
-                UncertaintyOverlay,
-                Sprite {
-                    color: Color::from(LinearRgba::new(1.8, 1.3, 0.5, tail_alpha)),
-                    custom_size: Some(Vec2::new(tail_w, BLOCK_HEIGHT * 0.65)),
-                    ..default()
-                },
-                Transform::from_xyz(x_block_right + tail_w * 0.5, y, -0.1),
-            ));
+            desired.push(Overlay {
+                key:   UncertaintyOverlay::PessimisticTail(id),
+                pos:   Vec3::new(x_right + tail_w * 0.5, y, -0.1),
+                size:  Vec2::new(tail_w, BLOCK_HEIGHT * 0.65),
+                color: Color::from(LinearRgba::new(1.8, 1.3, 0.5, tail_alpha)),
+            });
         }
 
-        // Optimistic marker — narrow bar inside the block at the optimistic end.
-        let x_block_left = wb.start_day * PIXELS_PER_DAY;
+        // Optimistic marker — narrow bar at the optimistic estimate end.
+        let x_left    = wb.start_day * PIXELS_PER_DAY;
         let x_opt_end = (wb.start_day + wb.estimate.optimistic) * PIXELS_PER_DAY;
-        if x_opt_end > x_block_left + 1.0 && x_opt_end < x_block_right - 1.0 {
+        if x_opt_end > x_left + 1.0 && x_opt_end < x_right - 1.0 {
+            desired.push(Overlay {
+                key:   UncertaintyOverlay::OptimisticMarker(id),
+                pos:   Vec3::new(x_opt_end, y, 0.3),
+                size:  Vec2::new(2.0, BLOCK_HEIGHT * 0.9),
+                color: Color::from(LinearRgba::new(1.4, 1.4, 1.4, 0.55)),
+            });
+        }
+    }
+
+    // Update existing overlays in place; spawn new ones.
+    let mut live: HashSet<Entity> = HashSet::with_capacity(desired.len());
+    for ov in &desired {
+        if let Some(&entity) = existing.get(&ov.key) {
+            if let Ok((_, _, mut t, mut s)) = overlay_q.get_mut(entity) {
+                t.translation  = ov.pos;
+                s.custom_size  = Some(ov.size);
+                s.color        = ov.color;
+            }
+            live.insert(entity);
+        } else {
             commands.spawn((
-                UncertaintyOverlay,
-                Sprite {
-                    color: Color::from(LinearRgba::new(1.4, 1.4, 1.4, 0.55)),
-                    custom_size: Some(Vec2::new(2.0, BLOCK_HEIGHT * 0.9)),
-                    ..default()
-                },
-                Transform::from_xyz(x_opt_end, y, 0.3),
+                ov.key,
+                Sprite { color: ov.color, custom_size: Some(ov.size), ..default() },
+                Transform::from_translation(ov.pos),
             ));
+        }
+    }
+
+    // Despawn stale overlays (removed blocks, or tail/marker no longer warranted).
+    for (key, entity) in &existing {
+        if !live.contains(entity) {
+            let _ = key; // key unused here but makes the pattern clear
+            commands.entity(*entity).despawn();
         }
     }
 }
