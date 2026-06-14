@@ -100,7 +100,8 @@ pub fn save_model(conn: &Connection, model: &Model) -> Result<()> {
          DELETE FROM variant_block_positions;
          DELETE FROM availability_segments;
          DELETE FROM calendar_non_working_dates;
-         DELETE FROM t_shirt_sizes;",
+         DELETE FROM t_shirt_sizes;
+         DELETE FROM quarter_colors;",
     )?;
 
     // ── Phase 2: upsert all current entity rows ───────────────────────────────
@@ -247,6 +248,14 @@ pub fn save_model(conn: &Connection, model: &Model) -> Result<()> {
             model.calendar.working_days_per_week as i64,
         ),
     )?;
+
+    for (q, color) in model.calendar.quarter_colors.iter().enumerate() {
+        tx.execute(
+            "INSERT OR REPLACE INTO quarter_colors (quarter, color_r, color_g, color_b, color_a)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            (q as i64, color[0] as f64, color[1] as f64, color[2] as f64, color[3] as f64),
+        )?;
+    }
 
     tx.execute(
         "INSERT INTO confidence_factors (id, opt_50, pes_50, opt_75, pes_75)
@@ -797,6 +806,29 @@ pub fn load_model(conn: &Connection) -> Result<Model> {
             }
             Err(rusqlite::Error::QueryReturnedNoRows) => {}
             Err(e) => return Err(e),
+        }
+    }
+
+    // quarter_colors
+    {
+        let mut stmt = conn.prepare(
+            "SELECT quarter, color_r, color_g, color_b, color_a FROM quarter_colors ORDER BY quarter",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, f64>(1)?,
+                row.get::<_, f64>(2)?,
+                row.get::<_, f64>(3)?,
+                row.get::<_, f64>(4)?,
+            ))
+        })?;
+        for row in rows {
+            let (q, r, g, b, a) = row?;
+            if q >= 0 && q < 4 {
+                model.calendar.quarter_colors[q as usize] =
+                    [r as f32, g as f32, b as f32, a as f32];
+            }
         }
     }
 
@@ -1466,6 +1498,28 @@ mod tests {
         let m = load_model(&conn).unwrap();
         assert_eq!(m.confidence_factors, ConfidenceFactors::default());
     }
+
+    #[test]
+    fn quarter_colors_round_trip() {
+        let conn = open_in_memory();
+        let mut m = Model::default();
+        m.calendar.quarter_colors = [
+            [0.10, 0.20, 0.30, 0.05],
+            [0.40, 0.50, 0.60, 0.08],
+            [0.70, 0.80, 0.90, 0.06],
+            [0.11, 0.22, 0.33, 0.04],
+        ];
+        save_model(&conn, &m).unwrap();
+        let loaded = load_model(&conn).unwrap();
+        for q in 0..4 {
+            for ch in 0..4 {
+                assert!(
+                    (loaded.calendar.quarter_colors[q][ch] - m.calendar.quarter_colors[q][ch]).abs() < 1e-5,
+                    "Q{q} channel {ch} mismatch"
+                );
+            }
+        }
+    }
 }
 
 const CREATE_TABLES_SQL: &str = "
@@ -1606,5 +1660,13 @@ CREATE TABLE IF NOT EXISTS confidence_factors (
     pes_50 REAL    NOT NULL DEFAULT 2.0,
     opt_75 REAL    NOT NULL DEFAULT 0.7,
     pes_75 REAL    NOT NULL DEFAULT 1.4
+);
+
+CREATE TABLE IF NOT EXISTS quarter_colors (
+    quarter INTEGER PRIMARY KEY,
+    color_r REAL    NOT NULL,
+    color_g REAL    NOT NULL,
+    color_b REAL    NOT NULL,
+    color_a REAL    NOT NULL
 );
 ";

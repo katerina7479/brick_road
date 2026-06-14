@@ -3,7 +3,7 @@ use bevy::{
     render::view::Hdr,
 };
 use bevy_egui::{egui, EguiContexts, EguiPlugin, EguiPrimaryContextPass};
-use chrono::NaiveDate;
+use chrono::{Datelike, NaiveDate};
 
 pub mod analysis;
 pub mod blocks;
@@ -60,6 +60,7 @@ fn main() {
         )
         .add_systems(PostStartup, blocks::reconcile_block_sprites)
         .add_systems(PostStartup, sync_weekend_bands.after(blocks::reconcile_block_sprites))
+        .add_systems(PostStartup, sync_period_bands.after(blocks::reconcile_block_sprites))
         .add_systems(
             PostStartup,
             labels::spawn_labels.after(blocks::reconcile_block_sprites),
@@ -68,10 +69,15 @@ fn main() {
             PostStartup,
             labels::spawn_day_labels.after(labels::spawn_labels),
         )
+        .add_systems(
+            PostStartup,
+            labels::spawn_period_labels.after(labels::spawn_day_labels),
+        )
         .add_systems(Update, (camera_nav_keys, update_camera_target, smooth_camera).chain())
         .add_systems(Update, draw_grid)
         .add_systems(Update, schedule::update_today_marker)
         .add_systems(Update, sync_weekend_bands)
+        .add_systems(Update, sync_period_bands)
         .add_systems(Update, update_analysis)
         .add_systems(
             Update,
@@ -166,6 +172,11 @@ fn main() {
             Update,
             labels::spawn_day_labels
                 .after(update_camera_target)
+                .after(smooth_camera),
+        )
+        .add_systems(
+            Update,
+            labels::spawn_period_labels
                 .after(smooth_camera),
         )
         .add_systems(
@@ -323,6 +334,100 @@ fn sync_weekend_bands(
                 ..default()
             },
             Transform::from_xyz(x, 0.0, -0.5),
+        ));
+    }
+}
+
+/// Marker for quarter and month period-band sprites rendered behind the timeline.
+#[derive(Component)]
+struct PeriodBand;
+
+/// Returns (x_center, width, rgba_color) for each month band in the plan span.
+fn period_band_spans(config: &model::CalendarConfig, span_days: i32) -> Vec<(f32, f32, [f32; 4])> {
+    let mut result = Vec::new();
+    let span_px = span_days as f32 * PIXELS_PER_DAY;
+
+    let start_year = config.start_date.year();
+    let start_month = config.start_date.month();
+
+    let mut year = start_year;
+    let mut month = start_month;
+
+    loop {
+        let x_start = match calendar::first_working_day_of_month(year, month, config) {
+            Some(d) => (calendar::date_to_day(d, config) as f32 * PIXELS_PER_DAY).max(0.0),
+            None => {
+                let (ny, nm) = next_year_month(year, month);
+                year = ny;
+                month = nm;
+                if x_start_of_month(year, month, config) >= span_px {
+                    break;
+                }
+                continue;
+            }
+        };
+
+        if x_start >= span_px {
+            break;
+        }
+
+        let (ny, nm) = next_year_month(year, month);
+        let x_end = match calendar::first_working_day_of_month(ny, nm, config) {
+            Some(d) => (calendar::date_to_day(d, config) as f32 * PIXELS_PER_DAY).min(span_px),
+            None => span_px,
+        };
+
+        let width = x_end - x_start;
+        if width > 0.0 {
+            let quarter = ((month - 1) / 3) as usize;
+            let month_in_quarter = (month - 1) % 3;
+            let mut color = config.quarter_colors[quarter];
+            if month_in_quarter % 2 == 1 {
+                color[3] *= 0.8;
+            }
+            result.push((x_start + width * 0.5, width, color));
+        }
+
+        year = ny;
+        month = nm;
+    }
+
+    result
+}
+
+fn next_year_month(year: i32, month: u32) -> (i32, u32) {
+    if month == 12 { (year + 1, 1) } else { (year, month + 1) }
+}
+
+fn x_start_of_month(year: i32, month: u32, config: &model::CalendarConfig) -> f32 {
+    match calendar::first_working_day_of_month(year, month, config) {
+        Some(d) => (calendar::date_to_day(d, config) as f32 * PIXELS_PER_DAY).max(0.0),
+        None => f32::MAX,
+    }
+}
+
+fn sync_period_bands(
+    model: Res<model::Model>,
+    schedule: Res<schedule::Schedule>,
+    mut commands: Commands,
+    band_q: Query<Entity, With<PeriodBand>>,
+) {
+    if !model.is_changed() && !schedule.is_changed() {
+        return;
+    }
+    for e in &band_q {
+        commands.entity(e).despawn();
+    }
+    let span = schedule.total_duration_days.ceil() as i32 + 30;
+    for (cx, w, color) in period_band_spans(&model.calendar, span) {
+        commands.spawn((
+            PeriodBand,
+            Sprite {
+                color: Color::srgba(color[0], color[1], color[2], color[3]),
+                custom_size: Some(Vec2::new(w, 20_000.0)),
+                ..default()
+            },
+            Transform::from_xyz(cx, 0.0, -1.0),
         ));
     }
 }
@@ -1886,5 +1991,45 @@ mod tests {
             vec![calendar::day_to_date(200.0, &model.calendar)];
         let positions = weekend_band_positions(5, &model);
         assert_eq!(positions.iter().filter(|(_, h)| *h).count(), 0);
+    }
+
+    #[test]
+    fn period_bands_start_jan_produces_bands() {
+        let mut cfg = model::CalendarConfig::default();
+        cfg.start_date = NaiveDate::from_ymd_opt(2025, 1, 1).unwrap();
+        // 130 working days covers Jan–Jun 2025.
+        let bands = period_band_spans(&cfg, 130);
+        assert!(!bands.is_empty(), "should produce at least one month band");
+        // All widths positive.
+        for (_, w, _) in &bands {
+            assert!(*w > 0.0, "band width should be positive");
+        }
+    }
+
+    #[test]
+    fn period_bands_quarter_colors_match_config() {
+        let mut cfg = model::CalendarConfig::default();
+        cfg.start_date = NaiveDate::from_ymd_opt(2025, 1, 1).unwrap();
+        cfg.quarter_colors[0] = [1.0, 0.0, 0.0, 0.1];
+        let bands = period_band_spans(&cfg, 25);
+        // All bands in Jan (Q1, first month) should have R=1.0.
+        for (_, _, color) in &bands {
+            assert!((color[0] - 1.0).abs() < 1e-5, "Q1 R channel should be 1.0");
+        }
+    }
+
+    #[test]
+    fn period_bands_alternating_alpha() {
+        let mut cfg = model::CalendarConfig::default();
+        cfg.start_date = NaiveDate::from_ymd_opt(2025, 1, 1).unwrap();
+        // Span enough to cover Jan and Feb (both Q1: month_in_quarter 0 and 1).
+        let bands = period_band_spans(&cfg, 45);
+        // Jan is month_in_quarter=0 (even): full alpha.
+        // Feb is month_in_quarter=1 (odd): 0.8× alpha.
+        let base_alpha = cfg.quarter_colors[0][3];
+        let jan = &bands[0];
+        let feb = &bands[1];
+        assert!((jan.2[3] - base_alpha).abs() < 1e-5, "Jan should have full alpha");
+        assert!((feb.2[3] - base_alpha * 0.8).abs() < 1e-5, "Feb should have 0.8× alpha");
     }
 }

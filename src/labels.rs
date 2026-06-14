@@ -6,7 +6,7 @@ use chrono::Datelike;
 use crate::{
     analysis::ScheduleAnalysis,
     blocks::BlockSprite,
-    calendar::day_to_date,
+    calendar::{date_to_day, day_to_date, first_working_day_of_month},
     constants::{PIXELS_PER_DAY, ROW_HEIGHT},
     model::{Model, WorkBlockId},
     schedule::Schedule,
@@ -171,6 +171,90 @@ pub fn spawn_day_labels(
             Transform::from_xyz(x, DAY_LABEL_Y, 1.0),
         ));
     }
+}
+
+/// Marker for quarter/period label `Text2d` entities.
+#[derive(Component)]
+pub struct PeriodLabel;
+
+const PERIOD_LABEL_Y: f32 = 80.0;
+
+/// Spawns (or re-spawns) quarter labels ("Q1 '25", "Q2 '25") above the day labels.
+/// Fires when model or schedule changes.
+pub fn spawn_period_labels(
+    mut commands: Commands,
+    schedule: Res<Schedule>,
+    model: Res<Model>,
+    label_q: Query<Entity, With<PeriodLabel>>,
+) {
+    if !model.is_changed() && !schedule.is_changed() {
+        return;
+    }
+    for e in &label_q {
+        commands.entity(e).despawn();
+    }
+
+    let span_days = schedule.total_duration_days.ceil() as i32 + 30;
+    let span_px = span_days as f32 * PIXELS_PER_DAY;
+    let config = &model.calendar;
+
+    let start_year = config.start_date.year();
+    let start_month = config.start_date.month();
+
+    let mut year = start_year;
+    let mut month = start_month;
+
+    loop {
+        let x_start = match first_working_day_of_month(year, month, config) {
+            Some(d) => (date_to_day(d, config) as f32 * PIXELS_PER_DAY).max(0.0),
+            None => {
+                let (ny, nm) = next_ym(year, month);
+                year = ny;
+                month = nm;
+                if year > start_year + 50 {
+                    break;
+                }
+                continue;
+            }
+        };
+
+        if x_start >= span_px {
+            break;
+        }
+
+        let quarter = (month - 1) / 3 + 1;
+
+        // Find the end of the quarter: x_start of the first month in the next quarter.
+        let q_end_month = quarter * 3 + 1;
+        let (q_end_year, q_end_mon) = if q_end_month > 12 {
+            (year + 1, 1)
+        } else {
+            (year, q_end_month)
+        };
+        let x_end = match first_working_day_of_month(q_end_year, q_end_mon, config) {
+            Some(d) => (date_to_day(d, config) as f32 * PIXELS_PER_DAY).min(span_px),
+            None => span_px,
+        };
+
+        let cx = (x_start + x_end) * 0.5;
+        let label = format!("Q{} '{:02}", quarter, year % 100);
+
+        commands.spawn((
+            PeriodLabel,
+            Text2d::new(label),
+            TextFont { font_size: 11.0, ..default() },
+            TextColor(Color::srgba(0.65, 0.65, 0.85, 0.70)),
+            Transform::from_xyz(cx, PERIOD_LABEL_Y, 1.0),
+        ));
+
+        // Advance to the start of the next quarter.
+        month = q_end_mon;
+        year = q_end_year;
+    }
+}
+
+fn next_ym(year: i32, month: u32) -> (i32, u32) {
+    if month == 12 { (year + 1, 1) } else { (year, month + 1) }
 }
 
 /// Pixels of extra left-indent per nesting level for hierarchy brackets.
@@ -396,6 +480,7 @@ mod tests {
             start_date: chrono::NaiveDate::from_ymd_opt(2025, 6, 16).unwrap(), // Monday
             working_days_per_week: 5,
             non_working_dates: vec![],
+            ..Default::default()
         }
     }
 
