@@ -235,6 +235,7 @@ pub fn sync_block_labels(
 /// Clicking the currently selected block deselects it; single-clicking empty
 /// space deselects; double-clicking empty space (within 350 ms) creates a block.
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 pub fn handle_block_selection(
     mut egui_ctx: EguiContexts,
     windows: Query<&Window>,
@@ -247,7 +248,12 @@ pub fn handle_block_selection(
     conn: NonSend<rusqlite::Connection>,
     time: Res<Time>,
     mut last_empty_click: Local<f32>,
+    dep_drag: Res<DepDragState>,
 ) {
+    // Yield when a dep-handle drag is in progress.
+    if dep_drag.from.is_some() {
+        return;
+    }
     // Yield to the inline editor while a rename is in progress.
     if name_edit.editing.is_some() {
         return;
@@ -350,6 +356,11 @@ pub struct ResizeDragState {
 /// Pixels from the right edge of a block that count as the resize handle.
 const EDGE_GRAB_PX: f32 = 8.0;
 
+/// World-space radius of the left/right dep-creation handles on block edges.
+const HANDLE_RADIUS: f32 = 8.0;
+/// Hit-test radius for dep handles — slightly larger than visual to aid clicking.
+const HANDLE_HIT_PX: f32 = 10.0;
+
 /// Drag the right edge of a block to resize its `duration_days`.
 ///
 /// - Press: if the cursor is within `EDGE_GRAB_PX` of the right edge and inside
@@ -367,7 +378,12 @@ pub fn handle_block_resize(
     mut model: ResMut<model::Model>,
     conn: NonSend<rusqlite::Connection>,
     block_query: Query<(&BlockSprite, &Transform, &Sprite)>,
+    dep_drag: Res<DepDragState>,
 ) {
+    if dep_drag.from.is_some() {
+        resize.dragging = None;
+        return;
+    }
     if let Ok(ctx) = egui_ctx.ctx_mut() {
         if ctx.is_pointer_over_area() {
             resize.dragging = None;
@@ -447,7 +463,12 @@ pub fn handle_block_drag(
     conn: NonSend<rusqlite::Connection>,
     block_query: Query<(&BlockSprite, &Transform, &Sprite)>,
     resize: Res<ResizeDragState>,
+    dep_drag: Res<DepDragState>,
 ) {
+    if dep_drag.from.is_some() {
+        drag.dragging = None;
+        return;
+    }
     // Guard: egui owns the pointer when the cursor is over any egui area.
     if let Ok(ctx) = egui_ctx.ctx_mut() {
         if ctx.is_pointer_over_area() {
@@ -674,6 +695,9 @@ pub fn sync_uncertainty_overlays(
 pub struct DepDragState {
     /// Source block the user started dragging from, `None` when idle.
     pub from: Option<WorkBlockId>,
+    /// `true` → dragged from the right-edge handle (this block is predecessor).
+    /// `false` → dragged from the left-edge handle (this block is successor).
+    pub from_right: bool,
 }
 
 /// Screen-space geometry for one work block, computed once per frame.
@@ -754,7 +778,11 @@ pub fn draw_dependency_edges(
             let Ok(world_pos) = cam.viewport_to_world_2d(cam_tr, cursor) else {
                 return;
             };
-            let src = Vec2::new(fg.xr, fg.y);
+            let src = if drag.from_right {
+                Vec2::new(fg.xr, fg.y)
+            } else {
+                Vec2::new(fg.xl, fg.y)
+            };
             gizmos.line_2d(src, world_pos, Color::WHITE);
             draw_arrowhead(&mut gizmos, src, world_pos, Color::WHITE);
         }
@@ -780,6 +808,71 @@ fn dep_type_from_modifiers(keys: &ButtonInput<KeyCode>) -> DependencyType {
         DependencyType::StartToFinish
     } else {
         DependencyType::FinishToStart
+    }
+}
+
+/// Draws left-edge (incoming) and right-edge (outgoing) handle circles on any
+/// block the pointer is hovering over. Highlights whichever handle is closest.
+/// Also keeps the source handle highlighted while a dep drag is in progress.
+pub fn draw_block_handles(
+    mut gizmos: Gizmos,
+    model: Res<model::Model>,
+    scope: Res<ViewScope>,
+    drag: Res<DepDragState>,
+    windows: Query<&Window>,
+    camera: Query<(&Camera, &GlobalTransform)>,
+) {
+    let Ok(window) = windows.single() else { return };
+    let Ok((cam, cam_tr)) = camera.single() else { return };
+    let Some(cursor) = window.cursor_position() else { return };
+    let Ok(world_pos) = cam.viewport_to_world_2d(cam_tr, cursor) else { return };
+
+    let ordered = schedule::visible_blocks(&model, &scope);
+
+    let cyan = Color::srgba(0.3, 0.9, 1.0, 0.9);   // left handle (incoming)
+    let amber = Color::srgba(1.0, 0.75, 0.2, 0.9);  // right handle (outgoing)
+    let white = Color::WHITE;
+
+    for (row, wb) in ordered.iter().enumerate() {
+        if wb.duration_days <= 0.0 {
+            continue;
+        }
+        let y = -(row as f32) * ROW_HEIGHT;
+        let xl = wb.start_day * PIXELS_PER_DAY;
+        let xr = (wb.start_day + wb.duration_days) * PIXELS_PER_DAY;
+
+        let is_source = drag.from == Some(wb.id);
+
+        // Show handles when hovering over this block or it is the drag source.
+        let half_h = BLOCK_HEIGHT * 0.5;
+        let in_block = world_pos.x >= xl
+            && world_pos.x <= xr
+            && (world_pos.y - y).abs() <= half_h;
+
+        if !in_block && !is_source {
+            continue;
+        }
+
+        let left_pos = Vec2::new(xl, y);
+        let right_pos = Vec2::new(xr, y);
+        let near_left = (world_pos - left_pos).length() < HANDLE_HIT_PX;
+        let near_right = (world_pos - right_pos).length() < HANDLE_HIT_PX;
+
+        // Left handle: cyan unless highlighted.
+        let (lc, lr) = if near_left || (is_source && !drag.from_right) {
+            (white, HANDLE_RADIUS * 1.4)
+        } else {
+            (cyan, HANDLE_RADIUS)
+        };
+        gizmos.circle_2d(left_pos, lr, lc);
+
+        // Right handle: amber unless highlighted.
+        let (rc, rr) = if near_right || (is_source && drag.from_right) {
+            (white, HANDLE_RADIUS * 1.4)
+        } else {
+            (amber, HANDLE_RADIUS)
+        };
+        gizmos.circle_2d(right_pos, rr, rc);
     }
 }
 
@@ -823,8 +916,64 @@ pub fn handle_dep_drag(
         None
     };
 
+    // Left-click on a handle starts a dep drag (takes priority over block actions).
+    if mouse.just_pressed(MouseButton::Left) {
+        for (bs, tr, sp) in &block_query {
+            let Some(size) = sp.custom_size else { continue };
+            let center = tr.translation.truncate();
+            let half = size * 0.5;
+            let left_pos = Vec2::new(center.x - half.x, center.y);
+            let right_pos = Vec2::new(center.x + half.x, center.y);
+
+            if (world_pos - right_pos).length() < HANDLE_HIT_PX {
+                drag.from = Some(bs.work_block_id);
+                drag.from_right = true;
+                return;
+            }
+            if (world_pos - left_pos).length() < HANDLE_HIT_PX {
+                drag.from = Some(bs.work_block_id);
+                drag.from_right = false;
+                return;
+            }
+        }
+        // No handle hit — clear any stale dep drag state so guards don't block
+        // block selection on this frame.
+        if !mouse.pressed(MouseButton::Left) {
+            drag.from = None;
+        }
+    }
+
+    // Left-click release: finish a handle-initiated dep drag.
+    if mouse.just_released(MouseButton::Left) {
+        if let Some(from_id) = drag.from.take() {
+            if let Some(to_id) = block_at(world_pos) {
+                if to_id != from_id {
+                    let dep_type = dep_type_from_modifiers(&keyboard);
+                    let (pred, succ) = if drag.from_right {
+                        (from_id, to_id) // right handle → from is predecessor
+                    } else {
+                        (to_id, from_id) // left handle → from is successor
+                    };
+                    let already = model.dependencies.values().any(|d| {
+                        d.predecessor == pred
+                            && d.successor == succ
+                            && d.dependency_type == dep_type
+                    });
+                    if !already {
+                        model.create_dependency(pred, succ, dep_type);
+                        if let Err(e) = crate::db::save_model(&conn, &model) {
+                            error!("save_model failed: {e}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Right-click drag: existing shortcut, always treats source as predecessor.
     if mouse.just_pressed(MouseButton::Right) {
         drag.from = block_at(world_pos);
+        drag.from_right = true;
     }
 
     if mouse.just_released(MouseButton::Right) {

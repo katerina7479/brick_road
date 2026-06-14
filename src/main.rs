@@ -90,7 +90,14 @@ fn main() {
             Update,
             blocks::sync_uncertainty_overlays.after(blocks::spawn_block_sprites),
         )
-        .add_systems(Update, blocks::handle_dep_drag)
+        .add_systems(
+            Update,
+            blocks::handle_dep_drag
+                .before(blocks::handle_block_selection)
+                .before(blocks::handle_block_drag)
+                .before(blocks::handle_block_resize),
+        )
+        .add_systems(Update, blocks::draw_block_handles)
         .add_systems(
             Update,
             blocks::draw_dependency_edges.after(update_analysis),
