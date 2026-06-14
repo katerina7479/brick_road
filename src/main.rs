@@ -264,6 +264,7 @@ fn logo_ui(
     mut contexts: EguiContexts,
     mut target: ResMut<CameraTarget>,
     model: Res<model::Model>,
+    scope: Res<schedule::ViewScope>,
     windows: Query<&Window>,
 ) {
     let Ok(ctx) = contexts.ctx_mut() else { return };
@@ -278,7 +279,7 @@ fn logo_ui(
                 .fill(egui::Color32::from_rgba_unmultiplied(22, 14, 4, 215))
                 .stroke(egui::Stroke::new(1.5, egui::Color32::from_rgb(180, 105, 25)));
             if ui.add(btn).on_hover_text("Fit to view [F]").clicked() {
-                if let Some(new_target) = camera::fit_to_blocks(&model, &windows) {
+                if let Some(new_target) = camera::fit_to_blocks(&model, &scope, &windows) {
                     *target = new_target;
                 }
             }
@@ -382,7 +383,7 @@ fn side_panel_ui(
             let Some(wb) = model.work_blocks.get(&sel_id) else {
                 return;
             };
-            let name = wb.name.clone();
+            let mut name = wb.name.clone();
             let mut duration_days = wb.duration_days;
             let mut most_likely = wb.estimate.most_likely;
             let mut optimistic = wb.estimate.optimistic;
@@ -392,7 +393,15 @@ fn side_panel_ui(
 
             let (start_day, end_day) = (wb.start_day, wb.start_day + wb.duration_days);
 
-            ui.strong(&name);
+            let name_changed = ui.text_edit_singleline(&mut name).changed();
+            if name_changed && !name.trim().is_empty() {
+                if let Some(wb) = model.work_blocks.get_mut(&sel_id) {
+                    wb.name = name.trim().to_string();
+                }
+                if let Err(e) = db::save_model(&conn, &model) {
+                    error!("save_model failed: {e}");
+                }
+            }
             ui.separator();
             ui.label(format!("Start:  day {:.1}", start_day));
             ui.label(format!("End:    day {:.1}", end_day));
