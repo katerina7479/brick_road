@@ -12,6 +12,8 @@ use camera::{smooth_camera, update_camera_target, CameraTarget};
 
 const PIXELS_PER_DAY: f32 = 100.0;
 
+pub mod model;
+
 fn main() {
     App::new()
         .add_plugins(DefaultPlugins.set(WindowPlugin {
