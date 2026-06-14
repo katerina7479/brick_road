@@ -584,8 +584,8 @@ pub fn resource_leveled_pass(
     let mut dep_min_end: HashMap<WorkBlockId, Option<f32>> =
         graph.nodes.iter().map(|&id| (id, None)).collect();
 
-    // Committed resource windows: resource_id → [(start, end, demand)].
-    let mut committed: HashMap<ResourceBlockId, Vec<(f32, f32, f32)>> = HashMap::new();
+    // Committed resource windows: resource_id → sorted intervals.
+    let mut committed: HashMap<ResourceBlockId, SortedIntervals> = HashMap::new();
 
     // Block → [(resource_id, allocation_factor)] from plan.allocations.
     let mut block_demands: HashMap<WorkBlockId, Vec<(ResourceBlockId, f32)>> = HashMap::new();
@@ -633,7 +633,7 @@ pub fn resource_leveled_pass(
             committed
                 .entry(rb_id)
                 .or_default()
-                .push((actual_start, actual_end, factor));
+                .push(actual_start, actual_end, factor);
         }
 
         // Propagate dependency constraints to successors using actual placed times.
@@ -697,7 +697,7 @@ fn earliest_feasible_start(
     min_start: f32,
     duration: f32,
     demands: &[(ResourceBlockId, f32)],
-    committed: &HashMap<ResourceBlockId, Vec<(f32, f32, f32)>>,
+    committed: &HashMap<ResourceBlockId, SortedIntervals>,
     resource_blocks: &HashMap<ResourceBlockId, &ResourceBlock>,
 ) -> f32 {
     if demands.is_empty() || duration <= 0.0 {
@@ -706,16 +706,18 @@ fn earliest_feasible_start(
 
     let mut candidates: Vec<f32> = vec![min_start];
     for &(rb_id, _) in demands {
-        if let Some(ivs) = committed.get(&rb_id) {
-            for &(_, end, _) in ivs {
+        if let Some(si) = committed.get(&rb_id) {
+            for &(_, end, _) in &si.inner {
                 if end > min_start {
                     candidates.push(end);
                 }
             }
         }
         if let Some(rb) = resource_blocks.get(&rb_id) {
-            for seg in &rb.availability.segments {
-                // Availability can improve at the start of a new segment.
+            // Segments are sorted by start; only those starting or ending after
+            // min_start can introduce a new feasibility boundary.
+            let lo = rb.availability.segments.partition_point(|seg| seg.end <= min_start);
+            for seg in &rb.availability.segments[lo..] {
                 if seg.start > min_start {
                     candidates.push(seg.start);
                 }
@@ -746,39 +748,35 @@ fn earliest_feasible_start(
 /// Divides the window into sub-intervals at every point where either the
 /// availability factor or the committed demand changes, then checks whether
 /// `existing_demand + new_demand ≤ availability` at each sub-interval.
-/// This avoids the conservative over-rejection that occurs when peak demand
-/// and minimum availability don't coincide at the same time point.
+/// Binary search limits breakpoint collection to intervals and segments that
+/// overlap the scheduling window, and `SortedIntervals::demand_at` uses binary
+/// search to skip intervals starting after the query point.
 fn feasible_at(
     t: f32,
     duration: f32,
     demands: &[(ResourceBlockId, f32)],
-    committed: &HashMap<ResourceBlockId, Vec<(f32, f32, f32)>>,
+    committed: &HashMap<ResourceBlockId, SortedIntervals>,
     resource_blocks: &HashMap<ResourceBlockId, &ResourceBlock>,
 ) -> bool {
     let window_end = t + duration;
     for &(rb_id, demand) in demands {
-        // Collect every time point where availability or committed demand changes
-        // within the window. Using these as sub-interval boundaries ensures both
-        // functions are piecewise-constant within each sub-interval.
         let mut pts: Vec<f32> = vec![t, window_end];
-        if let Some(ivs) = committed.get(&rb_id) {
-            for &(is, ie, _) in ivs {
-                if is > t && is < window_end {
-                    pts.push(is);
-                }
-                if ie > t && ie < window_end {
-                    pts.push(ie);
-                }
+
+        let si = committed.get(&rb_id);
+        if let Some(si) = si {
+            // Binary search: only intervals starting before window_end can overlap the window.
+            for &(is, ie, _) in si.with_start_before(window_end) {
+                if is > t && is < window_end { pts.push(is); }
+                if ie > t && ie < window_end { pts.push(ie); }
             }
         }
         if let Some(rb) = resource_blocks.get(&rb_id) {
-            for seg in &rb.availability.segments {
-                if seg.start > t && seg.start < window_end {
-                    pts.push(seg.start);
-                }
-                if seg.end > t && seg.end < window_end {
-                    pts.push(seg.end);
-                }
+            // Binary search: only segments whose end is after t can overlap the window.
+            let lo = rb.availability.segments.partition_point(|seg| seg.end <= t);
+            for seg in &rb.availability.segments[lo..] {
+                if seg.start >= window_end { break; }
+                if seg.start > t { pts.push(seg.start); }
+                if seg.end > t && seg.end < window_end { pts.push(seg.end); }
             }
         }
         pts.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
@@ -790,10 +788,7 @@ fn feasible_at(
                 .get(&rb_id)
                 .map(|rb| avail_at(rb, mid))
                 .unwrap_or(1.0);
-            let used = demand_at(
-                committed.get(&rb_id).map(|v| v.as_slice()).unwrap_or(&[]),
-                mid,
-            );
+            let used = si.map_or(0.0, |si| si.demand_at(mid));
             if used + demand > avail + 1e-6 {
                 return false;
             }
@@ -803,23 +798,63 @@ fn feasible_at(
 }
 
 /// Availability factor for resource `rb` at instant `t`.
-/// Gaps in the availability timeline are treated as factor 1.0.
+///
+/// Segments are sorted by start; binary search finds the containing segment
+/// in O(log n) rather than the O(n) linear scan of the original implementation.
+/// Gaps in the availability timeline default to factor 1.0.
 fn avail_at(rb: &ResourceBlock, t: f32) -> f32 {
-    for seg in &rb.availability.segments {
-        if seg.start <= t && t < seg.end {
+    let segs = &rb.availability.segments;
+    // Find the last segment with start ≤ t.
+    let idx = segs.partition_point(|seg| seg.start <= t);
+    if idx > 0 {
+        let seg = &segs[idx - 1];
+        if t < seg.end {
             return seg.factor;
         }
     }
     1.0
 }
 
-/// Total committed demand at instant `t`.
-fn demand_at(intervals: &[(f32, f32, f32)], t: f32) -> f32 {
-    intervals
-        .iter()
-        .filter(|&&(is, ie, _)| is <= t && t < ie)
-        .map(|&(_, _, d)| d)
-        .sum()
+// ── SortedIntervals ───────────────────────────────────────────────────────────
+
+/// Committed demand intervals for a single resource, kept in ascending
+/// start-time order so binary search can bound queries to relevant intervals.
+#[derive(Default)]
+struct SortedIntervals {
+    /// `(start, end, demand)` tuples sorted by `start`.
+    inner: Vec<(f32, f32, f32)>,
+}
+
+impl SortedIntervals {
+    /// Insert `(start, end, demand)`, preserving start-time order.
+    /// Intervals arrive roughly in ascending order (topological scheduling),
+    /// so the insertion point is usually at or near the tail — O(1) amortised.
+    fn push(&mut self, start: f32, end: f32, demand: f32) {
+        let idx = self.inner.partition_point(|&(s, _, _)| s <= start);
+        self.inner.insert(idx, (start, end, demand));
+    }
+
+    /// Sum of demand from all intervals active at instant `t`.
+    ///
+    /// Binary search skips intervals starting after `t` in O(log n); the
+    /// remaining scan covers only intervals that started on or before `t`,
+    /// filtering to those still active (`end > t`).
+    fn demand_at(&self, t: f32) -> f32 {
+        let hi = self.inner.partition_point(|&(s, _, _)| s <= t);
+        self.inner[..hi]
+            .iter()
+            .filter(|&&(_, e, _)| e > t)
+            .map(|&(_, _, d)| d)
+            .sum()
+    }
+
+    /// Slice of intervals whose `start < window_end`.
+    /// All intervals starting at or after `window_end` cannot overlap the window
+    /// `[t, window_end)` and are excluded via binary search in O(log n).
+    fn with_start_before(&self, window_end: f32) -> &[(f32, f32, f32)] {
+        let hi = self.inner.partition_point(|&(s, _, _)| s < window_end);
+        &self.inner[..hi]
+    }
 }
 
 #[cfg(test)]
