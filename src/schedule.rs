@@ -69,6 +69,126 @@ pub fn sorted_blocks(model: &Model) -> Vec<&WorkBlock> {
     blocks
 }
 
+/// Propagate dependency constraints to all blocks reachable (transitively)
+/// as successors of `root` after `root`'s `start_day` or `duration_days`
+/// has changed.
+///
+/// Successors are visited in topological order so each block is updated after
+/// all of its own predecessors. For each successor, `start_day` is set to the
+/// maximum bound imposed by ALL of its predecessors (not only those reachable
+/// from `root`), clamped to ≥ 0.0. Constraint formulas (P = predecessor,
+/// S = successor, lag in days):
+///   FS:  S.start = P.start + P.dur + lag
+///   SS:  S.start = P.start + lag
+///   FF:  S.start = P.start + P.dur + lag − S.dur
+///   SF:  S.start = P.start + lag − S.dur
+pub fn cascade_dependencies(model: &mut Model, root: WorkBlockId) {
+    use std::collections::{HashMap, HashSet, VecDeque};
+
+    let mut outgoing: HashMap<WorkBlockId, Vec<(WorkBlockId, DependencyType, f32)>> =
+        HashMap::new();
+    let mut incoming: HashMap<WorkBlockId, Vec<(WorkBlockId, DependencyType, f32)>> =
+        HashMap::new();
+    for dep in model.dependencies.values() {
+        outgoing
+            .entry(dep.predecessor)
+            .or_default()
+            .push((dep.successor, dep.dependency_type, dep.lag));
+        incoming
+            .entry(dep.successor)
+            .or_default()
+            .push((dep.predecessor, dep.dependency_type, dep.lag));
+    }
+
+    // BFS to collect all transitively reachable successors of root.
+    let mut reachable: HashSet<WorkBlockId> = HashSet::new();
+    let mut bfs: VecDeque<WorkBlockId> = VecDeque::new();
+    if let Some(succs) = outgoing.get(&root) {
+        for &(s, _, _) in succs {
+            if reachable.insert(s) {
+                bfs.push_back(s);
+            }
+        }
+    }
+    while let Some(id) = bfs.pop_front() {
+        if let Some(succs) = outgoing.get(&id) {
+            for &(s, _, _) in succs {
+                if reachable.insert(s) {
+                    bfs.push_back(s);
+                }
+            }
+        }
+    }
+    if reachable.is_empty() {
+        return;
+    }
+
+    // Topological sort of the reachable subgraph via Kahn's algorithm.
+    // In-degrees count only edges between reachable nodes (root excluded).
+    let mut in_deg: HashMap<WorkBlockId, usize> =
+        reachable.iter().map(|&id| (id, 0)).collect();
+    for &id in &reachable {
+        if let Some(succs) = outgoing.get(&id) {
+            for &(s, _, _) in succs {
+                if reachable.contains(&s) {
+                    *in_deg.get_mut(&s).unwrap() += 1;
+                }
+            }
+        }
+    }
+    let mut queue: VecDeque<WorkBlockId> = in_deg
+        .iter()
+        .filter(|(_, &d)| d == 0)
+        .map(|(&id, _)| id)
+        .collect();
+    let mut order: Vec<WorkBlockId> = Vec::new();
+    while let Some(id) = queue.pop_front() {
+        order.push(id);
+        if let Some(succs) = outgoing.get(&id) {
+            for &(s, _, _) in succs {
+                if let Some(d) = in_deg.get_mut(&s) {
+                    *d -= 1;
+                    if *d == 0 {
+                        queue.push_back(s);
+                    }
+                }
+            }
+        }
+    }
+
+    // Apply constraints in topological order.  Clone pred list to avoid
+    // holding an immutable borrow while we mutably update work_blocks below.
+    for id in order {
+        let succ_dur = model
+            .work_blocks
+            .get(&id)
+            .map(|wb| wb.duration_days)
+            .unwrap_or(0.0);
+
+        let preds: Vec<(WorkBlockId, DependencyType, f32)> =
+            incoming.get(&id).cloned().unwrap_or_default();
+
+        let new_start = preds
+            .iter()
+            .filter_map(|&(pred_id, dep_type, lag)| {
+                model.work_blocks.get(&pred_id).map(|pred| match dep_type {
+                    DependencyType::FinishToStart => pred.start_day + pred.duration_days + lag,
+                    DependencyType::StartToStart => pred.start_day + lag,
+                    DependencyType::FinishToFinish => {
+                        pred.start_day + pred.duration_days + lag - succ_dur
+                    }
+                    DependencyType::StartToFinish => pred.start_day + lag - succ_dur,
+                })
+            })
+            .fold(0.0f32, f32::max)
+            .max(0.0);
+
+        if let Some(wb) = model.work_blocks.get_mut(&id) {
+            wb.start_day = new_start;
+        }
+    }
+}
+
 /// Compute unconstrained earliest start/end for every active block (Demand
 /// Planning mode, PRD §6.1). Uses most-likely estimates; no resource
 /// constraints are applied.
@@ -1286,5 +1406,97 @@ mod tests {
         let ids: Vec<WorkBlockId> = result.iter().map(|wb| wb.id).collect();
         assert!(ids.contains(&placed_id), "placed block should appear");
         assert!(!ids.contains(&unplaced_id), "unplaced block should be filtered out");
+    }
+
+    // ── cascade_dependencies tests ──────────────────────────────────────────
+
+    fn placed(m: &mut Model, name: &str, start: f32, dur: f32) -> WorkBlockId {
+        let id = m.create_work_block(name, est(dur));
+        let wb = m.work_blocks.get_mut(&id).unwrap();
+        wb.start_day = start;
+        wb.duration_days = dur;
+        id
+    }
+
+    #[test]
+    fn cascade_fs_pushes_successor() {
+        let mut m = Model::default();
+        let a = placed(&mut m, "A", 0.0, 5.0);
+        let b = placed(&mut m, "B", 5.0, 3.0); // initially satisfies FS
+        m.create_dependency(a, b, DependencyType::FinishToStart);
+
+        // Extend A's duration — B must be pushed.
+        m.work_blocks.get_mut(&a).unwrap().duration_days = 8.0;
+        cascade_dependencies(&mut m, a);
+
+        assert_eq!(m.work_blocks[&b].start_day, 8.0);
+    }
+
+    #[test]
+    fn cascade_ss_pushes_successor() {
+        let mut m = Model::default();
+        let a = placed(&mut m, "A", 2.0, 4.0);
+        let b = placed(&mut m, "B", 2.0, 3.0);
+        m.create_dependency(a, b, DependencyType::StartToStart);
+
+        m.work_blocks.get_mut(&a).unwrap().start_day = 5.0;
+        cascade_dependencies(&mut m, a);
+
+        assert_eq!(m.work_blocks[&b].start_day, 5.0);
+    }
+
+    #[test]
+    fn cascade_ff_adjusts_successor_start() {
+        let mut m = Model::default();
+        let a = placed(&mut m, "A", 0.0, 5.0); // ends at 5
+        let b = placed(&mut m, "B", 1.0, 4.0); // ends at 5 — satisfies FF
+        m.create_dependency(a, b, DependencyType::FinishToFinish);
+
+        // Extend A so it ends at 8 — B (dur=4) must start at 4 to end at 8.
+        m.work_blocks.get_mut(&a).unwrap().duration_days = 8.0;
+        cascade_dependencies(&mut m, a);
+
+        assert_eq!(m.work_blocks[&b].start_day, 4.0);
+    }
+
+    #[test]
+    fn cascade_sf_adjusts_successor_start() {
+        // SF: succ.end >= pred.start + lag  =>  succ.start = pred.start + lag - succ.dur
+        let mut m = Model::default();
+        let a = placed(&mut m, "A", 4.0, 2.0);
+        let b = placed(&mut m, "B", 0.0, 5.0); // end=5 >= pred.start=4 — satisfies SF
+        m.create_dependency(a, b, DependencyType::StartToFinish);
+
+        m.work_blocks.get_mut(&a).unwrap().start_day = 7.0;
+        cascade_dependencies(&mut m, a);
+
+        // succ.start = 7.0 + 0.0 - 5.0 = 2.0
+        assert_eq!(m.work_blocks[&b].start_day, 2.0);
+    }
+
+    #[test]
+    fn cascade_transitive_chain() {
+        // A → B → C: moving A should cascade through B to C.
+        let mut m = Model::default();
+        let a = placed(&mut m, "A", 0.0, 5.0);
+        let b = placed(&mut m, "B", 5.0, 3.0);
+        let c = placed(&mut m, "C", 8.0, 2.0);
+        m.create_dependency(a, b, DependencyType::FinishToStart);
+        m.create_dependency(b, c, DependencyType::FinishToStart);
+
+        m.work_blocks.get_mut(&a).unwrap().duration_days = 10.0;
+        cascade_dependencies(&mut m, a);
+
+        assert_eq!(m.work_blocks[&b].start_day, 10.0);
+        assert_eq!(m.work_blocks[&c].start_day, 13.0);
+    }
+
+    #[test]
+    fn cascade_no_successors_is_noop() {
+        let mut m = Model::default();
+        let a = placed(&mut m, "A", 0.0, 5.0);
+        // No dependencies.
+        cascade_dependencies(&mut m, a);
+        assert_eq!(m.work_blocks[&a].start_day, 0.0);
     }
 }

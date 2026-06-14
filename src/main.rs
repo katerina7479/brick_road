@@ -253,6 +253,7 @@ fn side_panel_ui(
                 if let Some(wb) = model.work_blocks.get_mut(&sel_id) {
                     wb.duration_days = duration_days;
                 }
+                schedule::cascade_dependencies(&mut model, sel_id);
                 if let Err(e) = db::save_model(&conn, &model) {
                     error!("save_model failed: {e}");
                 }
