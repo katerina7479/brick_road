@@ -846,6 +846,21 @@ fn avail_at(segs: &[AvailabilitySegment], t: f32) -> f32 {
 
 /// Committed demand intervals for a single resource, kept in ascending
 /// start-time order so binary search can bound queries to relevant intervals.
+///
+/// ## Complexity
+///
+/// | Operation        | Cost           | Notes                                   |
+/// |------------------|----------------|-----------------------------------------|
+/// | `push`           | O(n) worst     | O(1) amortised when scheduling in topo  |
+/// |                  |                | order (insertions near the tail).        |
+/// | `demand_at`      | O(log n + k)   | Binary search to the cutoff, then scan  |
+/// |                  |                | only intervals started at or before `t`. |
+/// | `with_start_before` | O(log n)   | Pure binary search; no per-element work.|
+///
+/// Replacing the previous unsorted `Vec` with this structure reduces the
+/// dominant cost in `feasible_at` from O(n) per query to O(log n + k), where
+/// k is the number of overlapping committed intervals at the query point —
+/// typically small for well-separated blocks.
 #[derive(Default)]
 struct SortedIntervals {
     /// `(start, end, demand)` tuples sorted by `start`.
@@ -854,8 +869,12 @@ struct SortedIntervals {
 
 impl SortedIntervals {
     /// Insert `(start, end, demand)`, preserving start-time order.
-    /// Intervals arrive roughly in ascending order (topological scheduling),
-    /// so the insertion point is usually at or near the tail — O(1) amortised.
+    ///
+    /// Binary search locates the insertion point in O(log n); the subsequent
+    /// `Vec::insert` shifts trailing elements in O(n) worst case. In practice
+    /// the resource-leveled scheduler places blocks in topological order, so
+    /// start times are non-decreasing and the insertion point is always at the
+    /// tail — making each push O(1) amortised for typical workloads.
     fn push(&mut self, start: f32, end: f32, demand: f32) {
         let idx = self.inner.partition_point(|&(s, _, _)| s <= start);
         self.inner.insert(idx, (start, end, demand));
@@ -1747,6 +1766,69 @@ mod tests {
         assert!(si.with_start_before(3.0).is_empty());
         // Both start at 3.0 < 4.0 → both included.
         assert_eq!(si.with_start_before(4.0).len(), 2);
+    }
+
+    #[test]
+    fn sorted_intervals_tail_push_keeps_order() {
+        // Simulates the common scheduling case: intervals arrive in ascending
+        // start order (topological pass). Verifies push is correct in this path.
+        let mut si = SortedIntervals::default();
+        for i in 0..50u32 {
+            si.push(i as f32, (i + 1) as f32, 1.0);
+        }
+        assert_eq!(si.inner.len(), 50);
+        for (i, &(s, e, _)) in si.inner.iter().enumerate() {
+            assert_eq!(s, i as f32);
+            assert_eq!(e, (i + 1) as f32);
+        }
+    }
+
+    #[test]
+    fn resource_leveled_pass_many_serial_blocks() {
+        // 100 blocks chained FS through a single full-capacity resource.
+        // Verifies correctness of SortedIntervals under a large committed set:
+        // each block must start exactly when the previous one ends.
+        use crate::graph::build_graph;
+        use crate::model::{AvailabilitySegment, AvailabilityTimeline, ResourceType};
+        let (mut m, pid) = base();
+        let wid = m.plans[&pid].world_id;
+        let rb = m.create_resource_block("R", ResourceType::Person);
+        m.worlds.get_mut(&wid).unwrap().resource_ids.push(rb);
+        m.resource_blocks.get_mut(&rb).unwrap().availability =
+            AvailabilityTimeline {
+                segments: vec![AvailabilitySegment { start: 0.0, end: 10_000.0, factor: 1.0 }],
+            };
+
+        const N: u32 = 100;
+        let mut blocks: Vec<WorkBlockId> = Vec::new();
+        for i in 0..N {
+            let id = m.create_work_block(&format!("B{i}"), est(1.0));
+            if let Some(&prev) = blocks.last() {
+                m.create_dependency(prev, id, DependencyType::FinishToStart);
+            }
+            blocks.push(id);
+        }
+        for &id in &blocks {
+            m.plans.get_mut(&pid).unwrap().root_blocks.push(id);
+            m.plans.get_mut(&pid).unwrap().allocations.push(
+                crate::model::ResourceAllocation {
+                    resource_id: rb,
+                    work_block_id: id,
+                    allocation_factor: 1.0,
+                },
+            );
+        }
+
+        let plan = m.plans[&pid].clone();
+        let graph = build_graph(&m, &plan);
+        let sched = resource_leveled_pass(&m, &plan, &graph).expect("no cycle");
+
+        assert_eq!(sched.blocks.len(), N as usize);
+        for (i, &id) in blocks.iter().enumerate() {
+            let b = &sched.blocks[&id];
+            assert_eq!(b.start_day, i as f32, "block {i} start");
+            assert_eq!(b.end_day, (i + 1) as f32, "block {i} end");
+        }
     }
 
     #[test]
