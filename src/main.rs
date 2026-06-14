@@ -668,6 +668,50 @@ fn side_panel_ui(
             }
 
             ui.separator();
+            ui.collapsing("Size Mapping", |ui| {
+                let mut mapping_changed = false;
+                let mut to_remove: Option<usize> = None;
+                for (i, size) in model.t_shirt_sizes.iter_mut().enumerate() {
+                    let row = ui.horizontal(|ui| {
+                        let label_changed = ui
+                            .add(egui::TextEdit::singleline(&mut size.label).desired_width(36.0))
+                            .lost_focus();
+                        let days_changed = ui
+                            .add(
+                                egui::DragValue::new(&mut size.days)
+                                    .speed(0.5)
+                                    .range(0.5f32..=120.0)
+                                    .suffix(" d"),
+                            )
+                            .changed();
+                        let removed = ui.small_button("×").clicked();
+                        if removed {
+                            to_remove = Some(i);
+                        }
+                        label_changed || days_changed || removed
+                    });
+                    if row.inner {
+                        mapping_changed = true;
+                    }
+                }
+                if let Some(idx) = to_remove {
+                    model.t_shirt_sizes.remove(idx);
+                }
+                if ui.small_button("+ Add").clicked() {
+                    model.t_shirt_sizes.push(model::TShirtSize {
+                        label: "?".to_string(),
+                        days: 1.0,
+                    });
+                    mapping_changed = true;
+                }
+                if mapping_changed {
+                    if let Err(e) = db::save_model(&conn, &model) {
+                        error!("save_model failed: {e}");
+                    }
+                }
+            });
+
+            ui.separator();
 
             let Some(sel_id) = selected.0 else {
                 ui.label("Click a block to inspect.");
@@ -690,10 +734,16 @@ fn side_panel_ui(
             let color = wb.color;
             let priority = wb.priority;
             let block_variant_ids = wb.variants.clone();
+            let current_t_shirt_size = wb.t_shirt_size.clone();
 
             let (start_day, end_day) = (wb.start_day, wb.start_day + wb.duration_days);
 
-            // Clone variant names and current selection before any mutable model borrow.
+            // Clone t-shirt sizes and variant names before any mutable model borrow.
+            let t_shirt_sizes: Vec<(String, f32)> = model
+                .t_shirt_sizes
+                .iter()
+                .map(|s| (s.label.clone(), s.days))
+                .collect();
             let variant_names: Vec<(model::VariantId, String)> = block_variant_ids
                 .iter()
                 .filter_map(|&vid| model.variants.get(&vid).map(|v| (vid, v.name.clone())))
@@ -803,8 +853,45 @@ fn side_panel_ui(
             }
 
             ui.separator();
+            ui.label("Size");
+            let mut size_chosen: Option<(String, f32)> = None;
+            ui.horizontal_wrapped(|ui| {
+                for (label, days) in &t_shirt_sizes {
+                    let active = current_t_shirt_size.as_deref() == Some(label.as_str());
+                    let btn = egui::Button::new(label.as_str()).min_size(egui::Vec2::new(32.0, 22.0));
+                    let btn = if active {
+                        btn.stroke(egui::Stroke::new(2.0, egui::Color32::WHITE))
+                    } else {
+                        btn
+                    };
+                    if ui.add(btn).on_hover_text(format!("{} days", days)).clicked() {
+                        size_chosen = Some((label.clone(), *days));
+                    }
+                }
+            });
+
+            if let Some((label, days)) = size_chosen {
+                duration_days = days;
+                let (opt_f, pes_f) = confidence_to_factors(confidence);
+                if let Some(wb) = model.work_blocks.get_mut(&sel_id) {
+                    wb.t_shirt_size = Some(label);
+                    wb.duration_days = days;
+                    wb.estimate.most_likely = days;
+                    wb.estimate.optimistic = days * opt_f;
+                    wb.estimate.pessimistic = days * pes_f;
+                }
+                schedule::cascade_dependencies(&mut model, sel_id);
+                if let Err(e) = db::record_estimate_snapshot(&conn, sel_id.0, duration_days, confidence) {
+                    error!("record_estimate_snapshot failed: {e}");
+                }
+                if let Err(e) = db::save_model(&conn, &model) {
+                    error!("save_model failed: {e}");
+                }
+            }
+
+            // Custom numeric override — clears the t-shirt size label.
             let dur_changed = ui.horizontal(|ui| {
-                ui.label("Duration:");
+                ui.label("Custom:");
                 ui.add(
                     egui::DragValue::new(&mut duration_days)
                         .speed(0.5)
@@ -816,6 +903,7 @@ fn side_panel_ui(
             if dur_changed {
                 let (opt_f, pes_f) = confidence_to_factors(confidence);
                 if let Some(wb) = model.work_blocks.get_mut(&sel_id) {
+                    wb.t_shirt_size = None;
                     wb.duration_days = duration_days;
                     wb.estimate.most_likely = duration_days;
                     wb.estimate.optimistic = duration_days * opt_f;

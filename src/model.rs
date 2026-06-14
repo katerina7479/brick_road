@@ -54,6 +54,16 @@ pub struct WorkBlock {
     /// User-set priority: 0=Low, 1=Normal (default), 2=High, 3=Critical.
     /// Conveyed visually as border weight on the block bar.
     pub priority: u8,
+    /// Selected t-shirt size label (e.g. "M"), if any. The resolved day count
+    /// is always stored in `duration_days`; this tracks which size was chosen.
+    pub t_shirt_size: Option<String>,
+}
+
+/// A named t-shirt size that maps a label (e.g. "M") to a day count.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TShirtSize {
+    pub label: String,
+    pub days: f32,
 }
 
 /// Calendar settings for the plan: anchors "day 0" to a real date and defines
@@ -195,6 +205,8 @@ pub struct Model {
     pub worlds: HashMap<WorldId, World>,
     pub plans: HashMap<PlanId, Plan>,
     pub calendar: CalendarConfig,
+    /// Ordered list of t-shirt sizes for estimation. Loaded from DB at startup.
+    pub t_shirt_sizes: Vec<TShirtSize>,
 }
 
 impl Model {
@@ -222,6 +234,7 @@ impl Model {
                 color: None,
                 description: String::new(),
                 priority: 1,
+                t_shirt_size: None,
             },
         );
         id
