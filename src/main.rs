@@ -113,6 +113,7 @@ fn side_panel_ui(
     selected: Res<blocks::SelectedBlock>,
     mut model: ResMut<model::Model>,
     mut schedule: ResMut<schedule::Schedule>,
+    conn: NonSend<rusqlite::Connection>,
 ) {
     let Ok(ctx) = contexts.ctx_mut() else { return };
     egui::SidePanel::left("side_panel").min_width(220.0).show(ctx, |ui| {
@@ -181,6 +182,9 @@ fn side_panel_ui(
                 if let Ok(new_sched) = schedule::forward_pass(&model, &plan, &dep_graph) {
                     *schedule = new_sched;
                 }
+            }
+            if let Err(e) = db::save_model(&conn, &model) {
+                error!("save_model failed: {e}");
             }
         }
     });
