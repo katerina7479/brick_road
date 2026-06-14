@@ -5,20 +5,20 @@ use chrono::NaiveDate;
 
 use crate::graph::{CycleError, DependencyGraph};
 use crate::model::{
-    AvailabilitySegment, CalendarConfig, DependencyType, Model, Plan, PlanId, ResourceBlockId,
+    AvailabilitySegment, CalendarConfig, Day, DependencyType, Model, Plan, PlanId, ResourceBlockId,
     WorkBlock, WorkBlockId,
 };
 
 /// Converts a working-day position to a calendar date using the plan's calendar.
 /// Day 0 = `config.start_date`; positive values advance through working days only.
-pub fn working_day_to_date(day: f32, config: &CalendarConfig) -> NaiveDate {
+pub fn working_day_to_date(day: Day, config: &CalendarConfig) -> NaiveDate {
     crate::calendar::day_to_date(day, config)
 }
 
 /// Returns the number of calendar days spanned by `effort_days` of work
 /// starting at `start_day` (in working-day units).  Accounts for weekends
 /// and non-working dates in the plan's calendar.
-pub fn calendar_span(start_day: f32, effort_days: f32, config: &CalendarConfig) -> i64 {
+pub fn calendar_span(start_day: Day, effort_days: Day, config: &CalendarConfig) -> i64 {
     let start_date = working_day_to_date(start_day, config);
     crate::calendar::effort_to_calendar_days(effort_days, start_date, config)
 }
@@ -26,18 +26,18 @@ pub fn calendar_span(start_day: f32, effort_days: f32, config: &CalendarConfig) 
 /// Snaps a computed start day to the start of the next whole working day.
 /// Fractional positions (mid-day) are ceiled so blocks begin at day boundaries.
 /// Whole-number positions are returned unchanged.
-fn snap_to_day_start(t: f32) -> f32 {
-    t.ceil()
+fn snap_to_day_start(t: Day) -> Day {
+    t
 }
 
 /// The computed time placement of one work block.
 #[derive(Debug, Clone)]
 pub struct ScheduledBlock {
     pub work_block_id: WorkBlockId,
-    pub start_day: f32,
-    pub end_day: f32,
+    pub start_day: Day,
+    pub end_day: Day,
     /// Convenience: end_day - start_day.
-    pub duration_days: f32,
+    pub duration_days: Day,
 }
 
 /// The full output of a scheduler run over a Plan.
@@ -47,7 +47,7 @@ pub struct Schedule {
     /// Placement for every block that was scheduled.
     pub blocks: HashMap<WorkBlockId, ScheduledBlock>,
     /// Day on which the last block finishes.
-    pub total_duration_days: f32,
+    pub total_duration_days: Day,
     /// Ordered sequence of block IDs on the critical path (longest path).
     pub critical_path: Vec<WorkBlockId>,
 }
@@ -57,7 +57,7 @@ impl Schedule {
         Self {
             plan_id,
             blocks: HashMap::new(),
-            total_duration_days: 0.0,
+            total_duration_days: 0,
             critical_path: vec![],
         }
     }
@@ -70,7 +70,7 @@ pub struct CriticalPathAnalysis {
     pub critical_path: Vec<WorkBlockId>,
     /// Total float (slack) for every active block: `latest_finish − earliest_finish`.
     /// Non-negative in a valid schedule; zero marks a critical block.
-    pub float: HashMap<WorkBlockId, f32>,
+    pub float: HashMap<WorkBlockId, Day>,
 }
 
 /// Returns placed work blocks (duration_days > 0) sorted by ascending
@@ -81,12 +81,11 @@ pub fn sorted_blocks(model: &Model) -> Vec<&WorkBlock> {
     let mut blocks: Vec<&WorkBlock> = model
         .work_blocks
         .values()
-        .filter(|wb| wb.duration_days > 0.0)
+        .filter(|wb| wb.duration_days > 0)
         .collect();
     blocks.sort_by(|a, b| {
         a.start_day
-            .partial_cmp(&b.start_day)
-            .unwrap_or(std::cmp::Ordering::Equal)
+            .cmp(&b.start_day)
             .then(a.id.0.cmp(&b.id.0))
     });
     blocks
@@ -132,12 +131,11 @@ pub fn visible_blocks<'a>(model: &'a Model, scope: &ViewScope) -> Vec<&'a WorkBl
                 let mut children: Vec<&WorkBlock> = model
                     .work_blocks
                     .values()
-                    .filter(|wb| child_ids.contains(&wb.id) && wb.duration_days > 0.0)
+                    .filter(|wb| child_ids.contains(&wb.id) && wb.duration_days > 0)
                     .collect();
                 children.sort_by(|a, b| {
                     a.start_day
-                        .partial_cmp(&b.start_day)
-                        .unwrap_or(std::cmp::Ordering::Equal)
+                        .cmp(&b.start_day)
                         .then(a.id.0.cmp(&b.id.0))
                 });
                 return children;
@@ -193,9 +191,9 @@ pub fn update_visible_blocks(
 pub fn cascade_dependencies(model: &mut Model, root: WorkBlockId) {
     use std::collections::{HashMap, HashSet, VecDeque};
 
-    let mut outgoing: HashMap<WorkBlockId, Vec<(WorkBlockId, DependencyType, f32)>> =
+    let mut outgoing: HashMap<WorkBlockId, Vec<(WorkBlockId, DependencyType, Day)>> =
         HashMap::new();
-    let mut incoming: HashMap<WorkBlockId, Vec<(WorkBlockId, DependencyType, f32)>> =
+    let mut incoming: HashMap<WorkBlockId, Vec<(WorkBlockId, DependencyType, Day)>> =
         HashMap::new();
     for dep in model.dependencies.values() {
         outgoing
@@ -271,9 +269,9 @@ pub fn cascade_dependencies(model: &mut Model, root: WorkBlockId) {
             .work_blocks
             .get(&id)
             .map(|wb| wb.duration_days)
-            .unwrap_or(0.0);
+            .unwrap_or(0);
 
-        let preds: Vec<(WorkBlockId, DependencyType, f32)> =
+        let preds: Vec<(WorkBlockId, DependencyType, Day)> =
             incoming.get(&id).cloned().unwrap_or_default();
 
         let raw_start = preds
@@ -288,8 +286,8 @@ pub fn cascade_dependencies(model: &mut Model, root: WorkBlockId) {
                     DependencyType::StartToFinish => pred.start_day + lag - succ_dur,
                 })
             })
-            .fold(0.0f32, f32::max)
-            .max(0.0);
+            .fold(0, |a, b| a.max(b))
+            .max(0);
         // Snap to the start of the next whole working day so constraint-derived
         // starts never land mid-day on a non-working boundary.
         let new_start = snap_to_day_start(raw_start);
@@ -319,10 +317,10 @@ pub fn forward_pass(
     let order = crate::graph::topological_sort(graph)?;
 
     // Lower bound on start day from FS/SS edges.
-    let mut min_start: HashMap<WorkBlockId, f32> =
-        graph.nodes.iter().map(|&id| (id, 0.0_f32)).collect();
+    let mut min_start: HashMap<WorkBlockId, Day> =
+        graph.nodes.iter().map(|&id| (id, 0)).collect();
     // Lower bound on end day from FF/SF edges.
-    let mut min_end: HashMap<WorkBlockId, Option<f32>> =
+    let mut min_end: HashMap<WorkBlockId, Option<Day>> =
         graph.nodes.iter().map(|&id| (id, None)).collect();
 
     let mut sched = Schedule::new(plan.id);
@@ -332,19 +330,16 @@ pub fn forward_pass(
             .work_blocks
             .get(&id)
             .map(|wb| wb.estimate.most_likely)
-            .unwrap_or(0.0);
+            .unwrap_or(0);
 
-        let es_from_start = *min_start.get(&id).unwrap_or(&0.0);
+        let es_from_start = *min_start.get(&id).unwrap_or(&0);
         let es_from_end = min_end
             .get(&id)
             .and_then(|v| *v)
             .map(|me| me - dur)
-            .unwrap_or(0.0_f32);
+            .unwrap_or(0);
 
-        // Snap to start of next whole working day: constraint-derived starts
-        // must not land mid-day (e.g. if a predecessor has a fractional duration).
-        let earliest_start =
-            snap_to_day_start(f32::max(0.0, f32::max(es_from_start, es_from_end)));
+        let earliest_start = snap_to_day_start(0.max(es_from_start.max(es_from_end)));
         let earliest_end = earliest_start + dur;
 
         // Propagate constraints to successors.
@@ -354,14 +349,14 @@ pub fn forward_pass(
                 match edge.dependency_type {
                     DependencyType::FinishToStart => {
                         let new = earliest_end + edge.lag;
-                        let v = min_start.entry(s).or_insert(0.0);
+                        let v = min_start.entry(s).or_insert(0);
                         if new > *v {
                             *v = new;
                         }
                     }
                     DependencyType::StartToStart => {
                         let new = earliest_start + edge.lag;
-                        let v = min_start.entry(s).or_insert(0.0);
+                        let v = min_start.entry(s).or_insert(0);
                         if new > *v {
                             *v = new;
                         }
@@ -399,7 +394,7 @@ pub fn forward_pass(
         .blocks
         .values()
         .map(|b| b.end_day)
-        .fold(0.0_f32, f32::max);
+        .fold(0, |a, b| a.max(b));
 
     sched.critical_path = backward_pass(&order, graph, &sched).critical_path;
 
@@ -422,7 +417,7 @@ pub fn backward_pass(
     schedule: &Schedule,
 ) -> CriticalPathAnalysis {
     // Build reverse edge map: successor → [(predecessor, dependency_type, lag)].
-    let mut reverse: HashMap<WorkBlockId, Vec<(WorkBlockId, DependencyType, f32)>> =
+    let mut reverse: HashMap<WorkBlockId, Vec<(WorkBlockId, DependencyType, Day)>> =
         graph.nodes.iter().map(|&id| (id, Vec::new())).collect();
     for (&pred, edges) in &graph.edges {
         for edge in edges {
@@ -436,7 +431,7 @@ pub fn backward_pass(
     let total = schedule.total_duration_days;
 
     // Initialise LF to project end for every block (unconstrained).
-    let mut latest_finish: HashMap<WorkBlockId, f32> =
+    let mut latest_finish: HashMap<WorkBlockId, Day> =
         graph.nodes.iter().map(|&id| (id, total)).collect();
 
     // Process in reverse topological order (successors before predecessors).
@@ -446,7 +441,7 @@ pub fn backward_pass(
             .blocks
             .get(&s_id)
             .map(|b| b.duration_days)
-            .unwrap_or(0.0);
+            .unwrap_or(0);
         let ls_s = lf_s - dur_s;
 
         if let Some(preds) = reverse.get(&s_id) {
@@ -455,7 +450,7 @@ pub fn backward_pass(
                     .blocks
                     .get(&pred_id)
                     .map(|b| b.duration_days)
-                    .unwrap_or(0.0);
+                    .unwrap_or(0);
                 let bound = match dep_type {
                     DependencyType::FinishToStart => ls_s - lag,
                     DependencyType::StartToStart => ls_s - lag + dur_p,
@@ -471,12 +466,11 @@ pub fn backward_pass(
     }
 
     // Float = LF − EF for each block.
-    const CRITICAL_EPS: f32 = 1e-4;
-    let float: HashMap<WorkBlockId, f32> = graph
+    let float: HashMap<WorkBlockId, Day> = graph
         .nodes
         .iter()
         .map(|&id| {
-            let ef = schedule.blocks.get(&id).map(|b| b.end_day).unwrap_or(0.0);
+            let ef = schedule.blocks.get(&id).map(|b| b.end_day).unwrap_or(0);
             let lf = *latest_finish.get(&id).unwrap_or(&total);
             (id, lf - ef)
         })
@@ -485,7 +479,7 @@ pub fn backward_pass(
     // Critical path: zero-float blocks in topological order.
     let critical_path = order
         .iter()
-        .filter(|&&id| float.get(&id).is_some_and(|&f| f.abs() < CRITICAL_EPS))
+        .filter(|&&id| float.get(&id).is_some_and(|&f| f == 0))
         .copied()
         .collect();
 
@@ -515,10 +509,10 @@ pub fn analyze_user_placement(
         .iter()
         .filter_map(|id| model.work_blocks.get(id))
         .map(|wb| wb.start_day + wb.duration_days)
-        .fold(0.0_f32, f32::max);
+        .fold(0, |a, b| a.max(b));
 
     // Build reverse edge map: successor → [(predecessor, dep_type, lag)].
-    let mut reverse: HashMap<WorkBlockId, Vec<(WorkBlockId, DependencyType, f32)>> =
+    let mut reverse: HashMap<WorkBlockId, Vec<(WorkBlockId, DependencyType, Day)>> =
         graph.nodes.iter().map(|&id| (id, Vec::new())).collect();
     for (&pred, edges) in &graph.edges {
         for edge in edges {
@@ -530,7 +524,7 @@ pub fn analyze_user_placement(
     }
 
     // Initialise LF to project end for every block.
-    let mut latest_finish: HashMap<WorkBlockId, f32> =
+    let mut latest_finish: HashMap<WorkBlockId, Day> =
         graph.nodes.iter().map(|&id| (id, total)).collect();
 
     // Process in reverse topological order (successors before predecessors).
@@ -540,7 +534,7 @@ pub fn analyze_user_placement(
             .work_blocks
             .get(&s_id)
             .map(|wb| wb.duration_days)
-            .unwrap_or(0.0);
+            .unwrap_or(0);
         let ls_s = lf_s - dur_s;
 
         if let Some(preds) = reverse.get(&s_id) {
@@ -549,7 +543,7 @@ pub fn analyze_user_placement(
                     .work_blocks
                     .get(&pred_id)
                     .map(|wb| wb.duration_days)
-                    .unwrap_or(0.0);
+                    .unwrap_or(0);
                 let bound = match dep_type {
                     DependencyType::FinishToStart => ls_s - lag,
                     DependencyType::StartToStart => ls_s - lag + dur_p,
@@ -565,8 +559,7 @@ pub fn analyze_user_placement(
     }
 
     // Float = LF − EF for each block (EF from user placement).
-    const CRITICAL_EPS: f32 = 1e-4;
-    let float: HashMap<WorkBlockId, f32> = graph
+    let float: HashMap<WorkBlockId, Day> = graph
         .nodes
         .iter()
         .map(|&id| {
@@ -574,7 +567,7 @@ pub fn analyze_user_placement(
                 .work_blocks
                 .get(&id)
                 .map(|wb| wb.start_day + wb.duration_days)
-                .unwrap_or(0.0);
+                .unwrap_or(0);
             let lf = *latest_finish.get(&id).unwrap_or(&total);
             (id, lf - ef)
         })
@@ -583,7 +576,7 @@ pub fn analyze_user_placement(
     // Critical path: zero-float blocks in topological order.
     let critical_path = order
         .iter()
-        .filter(|&&id| float.get(&id).is_some_and(|&f| f.abs() < CRITICAL_EPS))
+        .filter(|&&id| float.get(&id).is_some_and(|&f| f == 0))
         .copied()
         .collect();
 
@@ -615,9 +608,9 @@ pub fn resource_leveled_pass(
     let order = crate::graph::topological_sort(graph)?;
 
     // Dependency constraints — updated as blocks are placed (with actual times).
-    let mut dep_min_start: HashMap<WorkBlockId, f32> =
-        graph.nodes.iter().map(|&id| (id, 0.0_f32)).collect();
-    let mut dep_min_end: HashMap<WorkBlockId, Option<f32>> =
+    let mut dep_min_start: HashMap<WorkBlockId, Day> =
+        graph.nodes.iter().map(|&id| (id, 0)).collect();
+    let mut dep_min_end: HashMap<WorkBlockId, Option<Day>> =
         graph.nodes.iter().map(|&id| (id, None)).collect();
 
     // Committed resource windows: resource_id → sorted intervals.
@@ -641,9 +634,7 @@ pub fn resource_leveled_pass(
         .iter()
         .map(|(_, rb)| {
             let mut segs = rb.availability.segments.clone();
-            segs.sort_unstable_by(|a, b| {
-                a.start.partial_cmp(&b.start).unwrap_or(std::cmp::Ordering::Equal)
-            });
+            segs.sort_unstable_by_key(|seg| seg.start);
             (rb.id, segs)
         })
         .collect();
@@ -655,17 +646,17 @@ pub fn resource_leveled_pass(
             .work_blocks
             .get(&id)
             .map(|wb| wb.estimate.most_likely)
-            .unwrap_or(0.0);
+            .unwrap_or(0);
 
         // Step 1: dependency-constrained minimum start (snapped to day boundary).
         let dep_start = {
-            let from_start = *dep_min_start.get(&id).unwrap_or(&0.0);
+            let from_start = *dep_min_start.get(&id).unwrap_or(&0);
             let from_end = dep_min_end
                 .get(&id)
                 .and_then(|v| *v)
                 .map(|me| me - dur)
-                .unwrap_or(0.0);
-            snap_to_day_start(f32::max(0.0, f32::max(from_start, from_end)))
+                .unwrap_or(0);
+            snap_to_day_start(0.max(from_start.max(from_end)))
         };
 
         // Step 2: find earliest resource-feasible start.
@@ -688,22 +679,22 @@ pub fn resource_leveled_pass(
                 let s = edge.successor;
                 match edge.dependency_type {
                     DependencyType::FinishToStart => {
-                        let v = dep_min_start.entry(s).or_insert(0.0);
-                        *v = f32::max(*v, actual_end + edge.lag);
+                        let v = dep_min_start.entry(s).or_insert(0);
+                        *v = (*v).max(actual_end + edge.lag);
                     }
                     DependencyType::StartToStart => {
-                        let v = dep_min_start.entry(s).or_insert(0.0);
-                        *v = f32::max(*v, actual_start + edge.lag);
+                        let v = dep_min_start.entry(s).or_insert(0);
+                        *v = (*v).max(actual_start + edge.lag);
                     }
                     DependencyType::FinishToFinish => {
                         let new = actual_end + edge.lag;
                         let v = dep_min_end.entry(s).or_insert(None);
-                        *v = Some(v.map_or(new, |cur| f32::max(cur, new)));
+                        *v = Some(v.map_or(new, |cur: Day| cur.max(new)));
                     }
                     DependencyType::StartToFinish => {
                         let new = actual_start + edge.lag;
                         let v = dep_min_end.entry(s).or_insert(None);
-                        *v = Some(v.map_or(new, |cur| f32::max(cur, new)));
+                        *v = Some(v.map_or(new, |cur: Day| cur.max(new)));
                     }
                 }
             }
@@ -724,7 +715,7 @@ pub fn resource_leveled_pass(
         .blocks
         .values()
         .map(|b| b.end_day)
-        .fold(0.0_f32, f32::max);
+        .fold(0, |a, b| a.max(b));
 
     // Critical path in a resource-constrained schedule involves resource float,
     // which requires a more involved analysis; left empty here.
@@ -740,17 +731,17 @@ pub fn resource_leveled_pass(
 /// boundaries of availability segments — the only points where the feasibility
 /// of a window can change.
 fn earliest_feasible_start(
-    min_start: f32,
-    duration: f32,
+    min_start: Day,
+    duration: Day,
     demands: &[(ResourceBlockId, f32)],
     committed: &HashMap<ResourceBlockId, SortedIntervals>,
     resource_blocks: &HashMap<ResourceBlockId, Vec<AvailabilitySegment>>,
-) -> f32 {
-    if demands.is_empty() || duration <= 0.0 {
+) -> Day {
+    if demands.is_empty() || duration <= 0 {
         return min_start;
     }
 
-    let mut candidates: Vec<f32> = vec![min_start];
+    let mut candidates: Vec<Day> = vec![min_start];
     for &(rb_id, _) in demands {
         if let Some(si) = committed.get(&rb_id) {
             // Committed intervals are sorted by start. Those with start > min_start
@@ -780,8 +771,8 @@ fn earliest_feasible_start(
         }
     }
 
-    candidates.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    candidates.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
+    candidates.sort();
+    candidates.dedup();
 
     for t in candidates {
         if t < min_start {
@@ -804,15 +795,15 @@ fn earliest_feasible_start(
 /// overlap the scheduling window, and `SortedIntervals::demand_at` uses binary
 /// search to skip intervals starting after the query point.
 fn feasible_at(
-    t: f32,
-    duration: f32,
+    t: Day,
+    duration: Day,
     demands: &[(ResourceBlockId, f32)],
     committed: &HashMap<ResourceBlockId, SortedIntervals>,
     resource_blocks: &HashMap<ResourceBlockId, Vec<AvailabilitySegment>>,
 ) -> bool {
     let window_end = t + duration;
     for &(rb_id, demand) in demands {
-        let mut pts: Vec<f32> = vec![t, window_end];
+        let mut pts: Vec<Day> = vec![t, window_end];
 
         let si = committed.get(&rb_id);
         if let Some(si) = si {
@@ -831,11 +822,11 @@ fn feasible_at(
                 if seg.end > t && seg.end < window_end { pts.push(seg.end); }
             }
         }
-        pts.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        pts.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
+        pts.sort();
+        pts.dedup();
 
         for w in pts.windows(2) {
-            let mid = (w[0] + w[1]) * 0.5;
+            let mid = (w[0] + w[1]) / 2;
             let avail = resource_blocks
                 .get(&rb_id)
                 .map(|segs| avail_at(segs, mid))
@@ -854,7 +845,7 @@ fn feasible_at(
 /// `segs` must be sorted ascending by `start` (enforced by the sort in
 /// `resource_leveled_pass`). Binary search finds the containing segment in
 /// O(log n). Gaps in the timeline default to factor 1.0.
-fn avail_at(segs: &[AvailabilitySegment], t: f32) -> f32 {
+fn avail_at(segs: &[AvailabilitySegment], t: Day) -> f32 {
     debug_assert!(
         segs.windows(2).all(|w| w[0].start <= w[1].start),
         "avail_at: segments must be sorted by start"
@@ -892,7 +883,7 @@ fn avail_at(segs: &[AvailabilitySegment], t: f32) -> f32 {
 #[derive(Default)]
 struct SortedIntervals {
     /// `(start, end, demand)` tuples sorted by `start`.
-    inner: Vec<(f32, f32, f32)>,
+    inner: Vec<(Day, Day, f32)>,
 }
 
 impl SortedIntervals {
@@ -903,7 +894,7 @@ impl SortedIntervals {
     /// the resource-leveled scheduler places blocks in topological order, so
     /// start times are non-decreasing and the insertion point is always at the
     /// tail — making each push O(1) amortised for typical workloads.
-    fn push(&mut self, start: f32, end: f32, demand: f32) {
+    fn push(&mut self, start: Day, end: Day, demand: f32) {
         let idx = self.inner.partition_point(|&(s, _, _)| s <= start);
         self.inner.insert(idx, (start, end, demand));
     }
@@ -913,7 +904,7 @@ impl SortedIntervals {
     /// Binary search skips intervals starting after `t` in O(log n); the
     /// remaining scan covers only intervals that started on or before `t`,
     /// filtering to those still active (`end > t`).
-    fn demand_at(&self, t: f32) -> f32 {
+    fn demand_at(&self, t: Day) -> f32 {
         let hi = self.inner.partition_point(|&(s, _, _)| s <= t);
         self.inner[..hi]
             .iter()
@@ -925,7 +916,7 @@ impl SortedIntervals {
     /// Slice of intervals whose `start < window_end`.
     /// All intervals starting at or after `window_end` cannot overlap the window
     /// `[t, window_end)` and are excluded via binary search in O(log n).
-    fn with_start_before(&self, window_end: f32) -> &[(f32, f32, f32)] {
+    fn with_start_before(&self, window_end: Day) -> &[(Day, Day, f32)] {
         let hi = self.inner.partition_point(|&(s, _, _)| s < window_end);
         &self.inner[..hi]
     }
@@ -937,7 +928,7 @@ mod tests {
     use crate::graph::build_graph;
     use crate::model::{Estimate, Model};
 
-    fn est(days: f32) -> Estimate {
+    fn est(days: Day) -> Estimate {
         Estimate {
             most_likely: days,
             optimistic: days,
@@ -1448,7 +1439,7 @@ mod tests {
 
     // --- analyze_user_placement tests ---
 
-    fn place(model: &mut Model, id: WorkBlockId, start: f32, dur: f32) {
+    fn place(model: &mut Model, id: WorkBlockId, start: Day, dur: Day) {
         let wb = model.work_blocks.get_mut(&id).unwrap();
         wb.start_day = start;
         wb.duration_days = dur;
@@ -1597,7 +1588,7 @@ mod tests {
 
     // ── cascade_dependencies tests ──────────────────────────────────────────
 
-    fn placed(m: &mut Model, name: &str, start: f32, dur: f32) -> WorkBlockId {
+    fn placed(m: &mut Model, name: &str, start: Day, dur: Day) -> WorkBlockId {
         let id = m.create_work_block(name, est(dur));
         let wb = m.work_blocks.get_mut(&id).unwrap();
         wb.start_day = start;
