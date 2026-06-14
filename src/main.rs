@@ -14,7 +14,7 @@ pub mod labels;
 pub mod model;
 pub mod schedule;
 
-use camera::{smooth_camera, update_camera_target, CameraTarget};
+use camera::{camera_nav_keys, smooth_camera, update_camera_target, CameraTarget};
 use constants::PIXELS_PER_DAY;
 
 fn main() {
@@ -49,7 +49,7 @@ fn main() {
             PostStartup,
             labels::spawn_day_labels.after(labels::spawn_labels),
         )
-        .add_systems(Update, (update_camera_target, smooth_camera).chain())
+        .add_systems(Update, (camera_nav_keys, update_camera_target, smooth_camera).chain())
         .add_systems(Update, draw_grid)
         .add_systems(Update, update_analysis)
         .add_systems(Update, blocks::handle_name_edit)
@@ -81,6 +81,10 @@ fn main() {
             Update,
             blocks::sync_conflict_overlays.after(update_analysis),
         )
+        .add_systems(
+            Update,
+            blocks::sync_uncertainty_overlays.after(blocks::spawn_block_sprites),
+        )
         .add_systems(Update, blocks::handle_dep_drag)
         .add_systems(
             Update,
@@ -102,6 +106,7 @@ fn main() {
         .add_systems(Update, labels::draw_violation_indicators)
         .add_systems(Update, labels::scale_labels_to_zoom)
         .add_systems(EguiPrimaryContextPass, side_panel_ui)
+        .add_systems(EguiPrimaryContextPass, camera_nav_ui)
         .add_systems(EguiPrimaryContextPass, blocks::draw_name_edit_overlay)
         .run();
 }
@@ -207,6 +212,33 @@ fn update_analysis(
         critical_path,
         float,
     };
+}
+
+/// Renders Re-center and Fit-to-view buttons in a small floating area
+/// anchored to the top-right of the window. Keyboard shortcuts (Home / F)
+/// are handled by `camera_nav_keys` in `camera.rs`.
+fn camera_nav_ui(
+    mut contexts: EguiContexts,
+    mut target: ResMut<CameraTarget>,
+    model: Res<model::Model>,
+    windows: Query<&Window>,
+) {
+    let Ok(ctx) = contexts.ctx_mut() else { return };
+    egui::Area::new(egui::Id::new("camera_nav"))
+        .anchor(egui::Align2::RIGHT_TOP, egui::Vec2::new(-8.0, 8.0))
+        .show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                if ui.small_button("Re-center [Home]").clicked() {
+                    target.pos = Vec2::ZERO;
+                    target.zoom = 1.0;
+                }
+                if ui.small_button("Fit to view [F]").clicked() {
+                    if let Some(new_target) = camera::fit_to_blocks(&model, &windows) {
+                        *target = new_target;
+                    }
+                }
+            });
+        });
 }
 
 fn side_panel_ui(

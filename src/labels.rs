@@ -4,17 +4,14 @@ use bevy::prelude::*;
 
 use crate::{
     analysis::ScheduleAnalysis,
+    blocks::BlockSprite,
     constants::{PIXELS_PER_DAY, ROW_HEIGHT},
     model::{Model, WorkBlockId},
-    schedule::{self, Schedule, ViewScope},
+    schedule::Schedule,
 };
 
 /// Y position of day-number labels above the block rows.
 const DAY_LABEL_Y: f32 = 55.0;
-/// X position of the right edge of row name labels.
-const ROW_LABEL_X: f32 = -80.0;
-/// Visual indentation per nesting level for row labels.
-const INDENT_PX: f32 = 12.0;
 
 /// Maps orthographic zoom scale to the day-label stride.
 /// Returns the number of days between consecutive day labels.
@@ -34,53 +31,10 @@ fn day_step_for_zoom(scale: f32) -> i32 {
 #[derive(Component)]
 pub struct DayLabel;
 
-/// Marker for row-name `Text2d` entities.
-#[derive(Component)]
-pub struct RowLabel {
-    pub work_block_id: WorkBlockId,
-    pub row: usize,
-}
-
-/// Spawns (or re-spawns) row-name labels to the left of each block row.
-/// Day-number labels are managed separately by `spawn_day_labels`.
-pub fn spawn_labels(
-    mut commands: Commands,
-    model: Res<Model>,
-    scope: Res<ViewScope>,
-    row_q: Query<Entity, With<RowLabel>>,
-) {
-    if !model.is_changed() && !scope.is_changed() {
-        return;
-    }
-    for e in &row_q {
-        commands.entity(e).despawn();
-    }
-
-    // Row name labels — same sort order as block sprites for matching rows.
-    let ordered = schedule::visible_blocks(&model, &scope);
-
-    for (row, wb) in ordered.iter().enumerate() {
-        let name = wb.name.clone();
-
-        let depth = nesting_depth(&model, wb.id);
-        let x = ROW_LABEL_X + depth as f32 * INDENT_PX;
-        let y = -(row as f32) * ROW_HEIGHT;
-
-        commands.spawn((
-            RowLabel {
-                work_block_id: wb.id,
-                row,
-            },
-            Text2d::new(name),
-            TextFont {
-                font_size: 11.0,
-                ..default()
-            },
-            TextColor(Color::srgba(0.85, 0.85, 0.95, 0.9)),
-            Transform::from_xyz(x, y, 1.0),
-        ));
-    }
-}
+/// Stub — row labels removed by br-57 (names inside blocks), day labels
+/// handled by `spawn_day_labels`. Kept as a no-op because main.rs
+/// registrations reference it; safe to remove in a cleanup pass.
+pub fn spawn_labels() {}
 
 /// Spawns (or re-spawns) day-number labels along the top of the timeline.
 ///
@@ -144,14 +98,14 @@ pub fn draw_nesting_indicators(
     schedule: Res<Schedule>,
     model: Res<Model>,
     mut gizmos: Gizmos,
-    row_q: Query<(&RowLabel, &Transform)>,
+    block_q: Query<(&BlockSprite, &Transform)>,
 ) {
     let bracket_color = Color::srgba(0.5, 0.5, 0.75, 0.45);
 
-    // Build a lookup from WorkBlockId → row Y from the live RowLabel positions.
-    let row_y: HashMap<WorkBlockId, f32> = row_q
+    // Build a lookup from WorkBlockId → row Y from live BlockSprite positions.
+    let row_y: HashMap<WorkBlockId, f32> = block_q
         .iter()
-        .map(|(rl, t)| (rl.work_block_id, t.translation.y))
+        .map(|(bs, t)| (bs.work_block_id, t.translation.y))
         .collect();
 
     for variant in model.variants.values() {
@@ -200,13 +154,9 @@ pub fn draw_nesting_indicators(
     }
 }
 
-/// Keeps all `DayLabel` and `RowLabel` `Text2d` entities at a constant
-/// screen-space size by counter-scaling their `Transform` by the current
-/// orthographic zoom each frame.
-#[allow(clippy::type_complexity)]
 pub fn scale_labels_to_zoom(
     cam_q: Query<&Projection, With<Camera2d>>,
-    mut label_q: Query<&mut Transform, Or<(With<DayLabel>, With<RowLabel>)>>,
+    mut label_q: Query<&mut Transform, With<DayLabel>>,
 ) {
     let Ok(proj) = cam_q.single() else { return };
     let Projection::Orthographic(ortho) = proj else { return };
@@ -216,25 +166,15 @@ pub fn scale_labels_to_zoom(
     }
 }
 
-/// Returns how many variant layers deep this block is nested (0 = root-level).
-fn nesting_depth(model: &Model, id: WorkBlockId) -> usize {
-    for variant in model.variants.values() {
-        if variant.children.contains(&id) {
-            return 1 + nesting_depth(model, variant.parent);
-        }
-    }
-    0
-}
 
 /// Draws a red connecting line between each pair of blocks that violates a
 /// dependency constraint. The line runs from the predecessor's right edge to
-/// the successor's left edge, using the row Y positions from live `RowLabel`
-/// entities. Blocks with no placed row are skipped.
+/// the successor's left edge, using live BlockSprite Y positions.
 pub fn draw_violation_indicators(
     model: Res<Model>,
     analysis: Res<ScheduleAnalysis>,
     mut gizmos: Gizmos,
-    row_q: Query<(&RowLabel, &Transform)>,
+    block_q: Query<(&BlockSprite, &Transform)>,
 ) {
     if analysis.violations.is_empty() {
         return;
@@ -242,9 +182,9 @@ pub fn draw_violation_indicators(
 
     let violation_color = Color::from(LinearRgba::new(3.0, 0.1, 0.1, 1.0));
 
-    let row_y: HashMap<WorkBlockId, f32> = row_q
+    let row_y: HashMap<WorkBlockId, f32> = block_q
         .iter()
-        .map(|(rl, t)| (rl.work_block_id, t.translation.y))
+        .map(|(bs, t)| (bs.work_block_id, t.translation.y))
         .collect();
 
     for v in &analysis.violations {
