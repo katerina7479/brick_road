@@ -701,6 +701,58 @@ pub fn sync_uncertainty_overlays(
     }
 }
 
+// ── Priority borders ─────────────────────────────────────────────────────────
+
+/// Draws priority-scaled border rings around block sprites.
+///
+/// - Low (0): no border
+/// - Normal (1): 1 thin white ring at 40% opacity
+/// - High (2): 2 bright white rings
+/// - Critical (3): 3 rings in an HDR gold color for bloom effect
+///
+/// Each ring is 1 screen pixel wide; `scale` world units = 1 screen pixel
+/// (at scale=1, 1 world unit = 1 screen pixel).
+pub fn draw_block_borders(
+    mut gizmos: Gizmos,
+    model: Res<model::Model>,
+    cam_q: Query<&Projection, With<Camera2d>>,
+    block_q: Query<(&BlockSprite, &Transform, &Sprite)>,
+) {
+    let scale = cam_q
+        .single()
+        .ok()
+        .and_then(|p| if let Projection::Orthographic(o) = p { Some(o.scale) } else { None })
+        .unwrap_or(1.0);
+
+    for (bs, transform, sprite) in &block_q {
+        let Some(wb) = model.work_blocks.get(&bs.work_block_id) else { continue };
+
+        let (rings, color) = match wb.priority {
+            0 => continue,
+            1 => (1usize, Color::srgba(1.0, 1.0, 1.0, 0.40)),
+            2 => (2usize, Color::srgba(1.0, 1.0, 1.0, 0.80)),
+            _ => (3usize, Color::from(LinearRgba::new(3.0, 2.2, 0.4, 1.0))),
+        };
+
+        let Some(size) = sprite.custom_size else { continue };
+        let center = transform.translation.truncate();
+
+        for i in 0..rings {
+            let expand = (i as f32 + 1.0) * scale;
+            let hw = size.x * 0.5 + expand;
+            let hh = size.y * 0.5 + expand;
+            let tl = center + Vec2::new(-hw, hh);
+            let tr = center + Vec2::new(hw, hh);
+            let br = center + Vec2::new(hw, -hh);
+            let bl = center + Vec2::new(-hw, -hh);
+            gizmos.line_2d(tl, tr, color);
+            gizmos.line_2d(tr, br, color);
+            gizmos.line_2d(br, bl, color);
+            gizmos.line_2d(bl, tl, color);
+        }
+    }
+}
+
 // ── Dependency edges ──────────────────────────────────────────────────────────
 
 /// Persistent state for the right-click drag-to-create-dependency gesture.
