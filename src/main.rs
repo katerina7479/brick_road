@@ -4,6 +4,7 @@ use bevy::{
     prelude::*,
     render::view::Hdr,
 };
+use bevy_egui::{egui, EguiContexts, EguiPlugin, EguiPrimaryContextPass};
 
 const PIXELS_PER_DAY: f32 = 100.0;
 
@@ -17,9 +18,11 @@ fn main() {
             }),
             ..default()
         }))
+        .add_plugins(EguiPlugin::default())
         .insert_resource(ClearColor(Color::srgb(0.02, 0.02, 0.05)))
         .add_systems(Startup, setup_camera)
         .add_systems(Update, draw_grid)
+        .add_systems(EguiPrimaryContextPass, side_panel_ui)
         .run();
 }
 
@@ -44,4 +47,12 @@ fn draw_grid(mut gizmos: Gizmos) {
 
     // Horizontal baseline at y=0
     gizmos.line_2d(Vec2::new(-5000.0, 0.0), Vec2::new(5000.0, 0.0), baseline_color);
+}
+
+fn side_panel_ui(mut contexts: EguiContexts) {
+    let Ok(ctx) = contexts.ctx_mut() else { return };
+    egui::SidePanel::left("side_panel").show(ctx, |ui| {
+        ui.heading("brick_road");
+        ui.label("(panel placeholder)");
+    });
 }
