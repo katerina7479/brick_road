@@ -167,6 +167,7 @@ fn side_panel_ui(
     mut model: ResMut<model::Model>,
     mut schedule: ResMut<schedule::Schedule>,
     conn: NonSend<rusqlite::Connection>,
+    mut cycle_error: Local<Option<String>>,
 ) {
     let Ok(ctx) = contexts.ctx_mut() else { return };
     egui::SidePanel::left("side_panel")
@@ -179,19 +180,30 @@ fn side_panel_ui(
                 let plan_id = schedule.plan_id;
                 if let Some(plan) = model.plans.get(&plan_id).cloned() {
                     let dep_graph = graph::build_graph(&model, &plan);
-                    if let Ok(new_sched) = schedule::forward_pass(&model, &plan, &dep_graph) {
-                        for sb in new_sched.blocks.values() {
-                            if let Some(wb) = model.work_blocks.get_mut(&sb.work_block_id) {
-                                wb.start_day = sb.start_day;
-                                wb.duration_days = sb.duration_days;
+                    match schedule::forward_pass(&model, &plan, &dep_graph) {
+                        Ok(new_sched) => {
+                            *cycle_error = None;
+                            for sb in new_sched.blocks.values() {
+                                if let Some(wb) = model.work_blocks.get_mut(&sb.work_block_id) {
+                                    wb.start_day = sb.start_day;
+                                    wb.duration_days = sb.duration_days;
+                                }
                             }
+                            *schedule = new_sched;
                         }
-                        *schedule = new_sched;
+                        Err(_) => {
+                            *cycle_error =
+                                Some("Cycle detected — fix dependencies first".to_string());
+                        }
                     }
                 }
                 if let Err(e) = db::save_model(&conn, &model) {
                     error!("save_model failed: {e}");
                 }
+            }
+
+            if let Some(msg) = &*cycle_error {
+                ui.colored_label(egui::Color32::from_rgb(220, 60, 60), msg);
             }
 
             ui.separator();
