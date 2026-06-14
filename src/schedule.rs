@@ -38,6 +38,20 @@ impl Schedule {
     }
 }
 
+/// Returns every scheduled block sorted by ascending `start_day`, with
+/// `work_block_id` as a stable tie-breaker. This is the canonical row
+/// ordering shared by block sprites and row labels.
+pub fn sorted_blocks(schedule: &Schedule) -> Vec<&ScheduledBlock> {
+    let mut blocks: Vec<&ScheduledBlock> = schedule.blocks.values().collect();
+    blocks.sort_by(|a, b| {
+        a.start_day
+            .partial_cmp(&b.start_day)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(a.work_block_id.0.cmp(&b.work_block_id.0))
+    });
+    blocks
+}
+
 /// Compute unconstrained earliest start/end for every active block (Demand
 /// Planning mode, PRD §6.1). Uses most-likely estimates; no resource
 /// constraints are applied.

@@ -5,7 +5,7 @@ use bevy::prelude::*;
 use crate::{
     constants::{PIXELS_PER_DAY, ROW_HEIGHT},
     model::{Model, WorkBlockId},
-    schedule::Schedule,
+    schedule::{self, Schedule},
 };
 
 /// Y position of day-number labels above the block rows.
@@ -59,13 +59,7 @@ pub fn spawn_labels(
     }
 
     // Row name labels — same sort order as block sprites for matching rows.
-    let mut ordered: Vec<_> = schedule.blocks.values().collect();
-    ordered.sort_by(|a, b| {
-        a.start_day
-            .partial_cmp(&b.start_day)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then(a.work_block_id.0.cmp(&b.work_block_id.0))
-    });
+    let ordered = schedule::sorted_blocks(&schedule);
 
     for (row, block) in ordered.iter().enumerate() {
         let name = model
