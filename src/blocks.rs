@@ -1,7 +1,11 @@
 use bevy::prelude::*;
 use bevy_egui::EguiContexts;
 
-use crate::{constants::{PIXELS_PER_DAY, ROW_HEIGHT}, model::WorkBlockId, schedule::{self, Schedule}};
+use crate::{
+    constants::{PIXELS_PER_DAY, ROW_HEIGHT},
+    model::WorkBlockId,
+    schedule::{self, Schedule},
+};
 
 const BLOCK_HEIGHT: f32 = 28.0;
 
@@ -61,7 +65,10 @@ pub fn spawn_block_sprites(
         };
 
         commands.spawn((
-            BlockSprite { work_block_id: block.work_block_id, row },
+            BlockSprite {
+                work_block_id: block.work_block_id,
+                row,
+            },
             Sprite {
                 color,
                 custom_size: Some(Vec2::new(width, BLOCK_HEIGHT)),
@@ -139,8 +146,12 @@ pub fn handle_block_selection(
     }
 
     let Ok(window) = windows.single() else { return };
-    let Ok((camera, camera_transform)) = camera.single() else { return };
-    let Some(cursor_pos) = window.cursor_position() else { return };
+    let Ok((camera, camera_transform)) = camera.single() else {
+        return;
+    };
+    let Some(cursor_pos) = window.cursor_position() else {
+        return;
+    };
     let Ok(world_pos) = camera.viewport_to_world_2d(camera_transform, cursor_pos) else {
         return;
     };
@@ -148,7 +159,9 @@ pub fn handle_block_selection(
     // Hit-test each block sprite against its axis-aligned bounding rect.
     let mut clicked: Option<WorkBlockId> = None;
     for (block_sprite, transform, sprite) in &block_query {
-        let Some(size) = sprite.custom_size else { continue };
+        let Some(size) = sprite.custom_size else {
+            continue;
+        };
         let center = transform.translation.truncate();
         let half = size * 0.5;
         if world_pos.x >= center.x - half.x

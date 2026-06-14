@@ -3,7 +3,9 @@ use std::collections::HashMap;
 use bevy::prelude::Resource;
 
 use crate::graph::{CycleError, DependencyGraph};
-use crate::model::{DependencyType, Model, Plan, PlanId, ResourceBlock, ResourceBlockId, WorkBlockId};
+use crate::model::{
+    DependencyType, Model, Plan, PlanId, ResourceBlock, ResourceBlockId, WorkBlockId,
+};
 
 /// The computed time placement of one work block.
 #[derive(Debug, Clone)]
@@ -143,12 +145,15 @@ pub fn forward_pass(
             }
         }
 
-        sched.blocks.insert(id, ScheduledBlock {
-            work_block_id: id,
-            start_day: earliest_start,
-            end_day: earliest_end,
-            duration_days: dur,
-        });
+        sched.blocks.insert(
+            id,
+            ScheduledBlock {
+                work_block_id: id,
+                start_day: earliest_start,
+                end_day: earliest_end,
+                duration_days: dur,
+            },
+        );
     }
 
     sched.total_duration_days = sched
@@ -177,7 +182,6 @@ pub fn backward_pass(
     graph: &DependencyGraph,
     schedule: &Schedule,
 ) -> CriticalPathAnalysis {
-
     // Build reverse edge map: successor → [(predecessor, dependency_type, lag)].
     let mut reverse: HashMap<WorkBlockId, Vec<(WorkBlockId, DependencyType, f32)>> =
         graph.nodes.iter().map(|&id| (id, Vec::new())).collect();
@@ -199,18 +203,25 @@ pub fn backward_pass(
     // Process in reverse topological order (successors before predecessors).
     for &s_id in order.iter().rev() {
         let lf_s = *latest_finish.get(&s_id).unwrap_or(&total);
-        let dur_s = schedule.blocks.get(&s_id).map(|b| b.duration_days).unwrap_or(0.0);
+        let dur_s = schedule
+            .blocks
+            .get(&s_id)
+            .map(|b| b.duration_days)
+            .unwrap_or(0.0);
         let ls_s = lf_s - dur_s;
 
         if let Some(preds) = reverse.get(&s_id) {
             for &(pred_id, dep_type, lag) in preds {
-                let dur_p =
-                    schedule.blocks.get(&pred_id).map(|b| b.duration_days).unwrap_or(0.0);
+                let dur_p = schedule
+                    .blocks
+                    .get(&pred_id)
+                    .map(|b| b.duration_days)
+                    .unwrap_or(0.0);
                 let bound = match dep_type {
-                    DependencyType::FinishToStart  => ls_s - lag,
-                    DependencyType::StartToStart   => ls_s - lag + dur_p,
+                    DependencyType::FinishToStart => ls_s - lag,
+                    DependencyType::StartToStart => ls_s - lag + dur_p,
                     DependencyType::FinishToFinish => lf_s - lag,
-                    DependencyType::StartToFinish  => lf_s - lag + dur_p,
+                    DependencyType::StartToFinish => lf_s - lag + dur_p,
                 };
                 let v = latest_finish.entry(pred_id).or_insert(total);
                 if bound < *v {
@@ -239,7 +250,10 @@ pub fn backward_pass(
         .copied()
         .collect();
 
-    CriticalPathAnalysis { critical_path, float }
+    CriticalPathAnalysis {
+        critical_path,
+        float,
+    }
 }
 
 /// Schedule every active block while respecting both dependency constraints
@@ -281,8 +295,11 @@ pub fn resource_leveled_pass(
             .push((alloc.resource_id, alloc.allocation_factor));
     }
 
-    let resource_blocks: HashMap<ResourceBlockId, &ResourceBlock> =
-        model.resource_blocks.iter().map(|(&id, rb)| (id, rb)).collect();
+    let resource_blocks: HashMap<ResourceBlockId, &ResourceBlock> = model
+        .resource_blocks
+        .iter()
+        .map(|(&id, rb)| (id, rb))
+        .collect();
 
     let mut sched = Schedule::new(plan.id);
 
@@ -345,12 +362,15 @@ pub fn resource_leveled_pass(
             }
         }
 
-        sched.blocks.insert(id, ScheduledBlock {
-            work_block_id: id,
-            start_day: actual_start,
-            end_day: actual_end,
-            duration_days: dur,
-        });
+        sched.blocks.insert(
+            id,
+            ScheduledBlock {
+                work_block_id: id,
+                start_day: actual_start,
+                end_day: actual_end,
+                duration_days: dur,
+            },
+        );
     }
 
     sched.total_duration_days = sched
@@ -442,14 +462,22 @@ fn feasible_at(
         let mut pts: Vec<f32> = vec![t, window_end];
         if let Some(ivs) = committed.get(&rb_id) {
             for &(is, ie, _) in ivs {
-                if is > t && is < window_end { pts.push(is); }
-                if ie > t && ie < window_end { pts.push(ie); }
+                if is > t && is < window_end {
+                    pts.push(is);
+                }
+                if ie > t && ie < window_end {
+                    pts.push(ie);
+                }
             }
         }
         if let Some(rb) = resource_blocks.get(&rb_id) {
             for seg in &rb.availability.segments {
-                if seg.start > t && seg.start < window_end { pts.push(seg.start); }
-                if seg.end > t && seg.end < window_end { pts.push(seg.end); }
+                if seg.start > t && seg.start < window_end {
+                    pts.push(seg.start);
+                }
+                if seg.end > t && seg.end < window_end {
+                    pts.push(seg.end);
+                }
             }
         }
         pts.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
@@ -500,7 +528,12 @@ mod tests {
     use crate::model::{Estimate, Model};
 
     fn est(days: f32) -> Estimate {
-        Estimate { most_likely: days, optimistic: days, pessimistic: days, confidence: 1.0 }
+        Estimate {
+            most_likely: days,
+            optimistic: days,
+            pessimistic: days,
+            confidence: 1.0,
+        }
     }
 
     /// Build a schedule from the model using the given root blocks.
@@ -540,10 +573,10 @@ mod tests {
         m.create_dependency(a, b, DependencyType::FinishToStart);
         let s = run(&m, vec![a, b]);
         assert_eq!(s.blocks[&a].start_day, 0.0);
-        assert_eq!(s.blocks[&a].end_day,   3.0);
+        assert_eq!(s.blocks[&a].end_day, 3.0);
         assert_eq!(s.blocks[&b].start_day, 3.0);
-        assert_eq!(s.blocks[&b].end_day,   5.0);
-        assert_eq!(s.total_duration_days,  5.0);
+        assert_eq!(s.blocks[&b].end_day, 5.0);
+        assert_eq!(s.total_duration_days, 5.0);
     }
 
     #[test]
@@ -556,7 +589,7 @@ mod tests {
         m.dependencies.get_mut(&dep).unwrap().lag = 2.0;
         let s = run(&m, vec![a, b]);
         assert_eq!(s.blocks[&b].start_day, 5.0);
-        assert_eq!(s.blocks[&b].end_day,   7.0);
+        assert_eq!(s.blocks[&b].end_day, 7.0);
     }
 
     #[test]
@@ -580,7 +613,7 @@ mod tests {
         m.create_dependency(a, b, DependencyType::StartToStart);
         let s = run(&m, vec![a, b]);
         assert_eq!(s.blocks[&b].start_day, 0.0);
-        assert_eq!(s.blocks[&b].end_day,   2.0);
+        assert_eq!(s.blocks[&b].end_day, 2.0);
     }
 
     #[test]
@@ -604,7 +637,7 @@ mod tests {
         m.create_dependency(a, b, DependencyType::FinishToFinish);
         let s = run(&m, vec![a, b]);
         assert_eq!(s.blocks[&b].start_day, 1.0);
-        assert_eq!(s.blocks[&b].end_day,   3.0);
+        assert_eq!(s.blocks[&b].end_day, 3.0);
     }
 
     #[test]
@@ -617,7 +650,7 @@ mod tests {
         m.dependencies.get_mut(&dep).unwrap().lag = 4.0;
         let s = run(&m, vec![a, b]);
         assert_eq!(s.blocks[&b].start_day, 2.0);
-        assert_eq!(s.blocks[&b].end_day,   4.0);
+        assert_eq!(s.blocks[&b].end_day, 4.0);
     }
 
     #[test]
@@ -631,7 +664,7 @@ mod tests {
         m.create_dependency(b, c, DependencyType::FinishToStart);
         let s = run(&m, vec![a, b, c]);
         assert_eq!(s.blocks[&c].start_day, 5.0);
-        assert_eq!(s.total_duration_days,  6.0);
+        assert_eq!(s.total_duration_days, 6.0);
     }
 
     #[test]
@@ -753,9 +786,18 @@ mod tests {
         m.create_dependency(b, c, DependencyType::FinishToFinish);
         m.create_dependency(a, c, DependencyType::FinishToStart);
         let (_, ana) = analyze(&m, vec![a, b, c]);
-        assert!(ana.float.get(&b).unwrap().abs() < 1e-4, "B float should be 0");
-        assert!(ana.float.get(&c).unwrap().abs() < 1e-4, "C float should be 0");
-        assert!((*ana.float.get(&a).unwrap() - 2.0).abs() < 1e-4, "A float should be 2");
+        assert!(
+            ana.float.get(&b).unwrap().abs() < 1e-4,
+            "B float should be 0"
+        );
+        assert!(
+            ana.float.get(&c).unwrap().abs() < 1e-4,
+            "C float should be 0"
+        );
+        assert!(
+            (*ana.float.get(&a).unwrap() - 2.0).abs() < 1e-4,
+            "A float should be 2"
+        );
         assert!(ana.critical_path.contains(&b), "B on critical path");
         assert!(ana.critical_path.contains(&c), "C on critical path");
         assert!(!ana.critical_path.contains(&a), "A not on critical path");
@@ -780,7 +822,11 @@ mod tests {
 
     use crate::model::{AvailabilitySegment, ResourceAllocation, ResourceType};
 
-    fn run_leveled(model: &Model, plan_id: crate::model::PlanId, roots: Vec<WorkBlockId>) -> Schedule {
+    fn run_leveled(
+        model: &Model,
+        plan_id: crate::model::PlanId,
+        roots: Vec<WorkBlockId>,
+    ) -> Schedule {
         let mut plan = model.plans[&plan_id].clone();
         plan.root_blocks = roots;
         let graph = build_graph(model, &plan);
@@ -870,8 +916,16 @@ mod tests {
         let r = m.create_resource_block("R", ResourceType::Person);
         {
             let rb = m.resource_blocks.get_mut(&r).unwrap();
-            rb.availability.segments.push(AvailabilitySegment { start: 0.0, end: 5.0, factor: 0.0 });
-            rb.availability.segments.push(AvailabilitySegment { start: 5.0, end: 100.0, factor: 1.0 });
+            rb.availability.segments.push(AvailabilitySegment {
+                start: 0.0,
+                end: 5.0,
+                factor: 0.0,
+            });
+            rb.availability.segments.push(AvailabilitySegment {
+                start: 5.0,
+                end: 100.0,
+                factor: 1.0,
+            });
         }
         let a = m.create_work_block("A", est(2.0));
         {
@@ -880,7 +934,7 @@ mod tests {
         }
         let s = run_leveled(&m, pid, vec![a]);
         assert_eq!(s.blocks[&a].start_day, 5.0);
-        assert_eq!(s.blocks[&a].end_day,   7.0);
+        assert_eq!(s.blocks[&a].end_day, 7.0);
     }
 
     #[test]
@@ -929,8 +983,16 @@ mod tests {
         let r = m.create_resource_block("R", ResourceType::Person);
         {
             let rb = m.resource_blocks.get_mut(&r).unwrap();
-            rb.availability.segments.push(AvailabilitySegment { start: 0.0, end: 5.0, factor: 0.3 });
-            rb.availability.segments.push(AvailabilitySegment { start: 5.0, end: 100.0, factor: 1.0 });
+            rb.availability.segments.push(AvailabilitySegment {
+                start: 0.0,
+                end: 5.0,
+                factor: 0.3,
+            });
+            rb.availability.segments.push(AvailabilitySegment {
+                start: 5.0,
+                end: 100.0,
+                factor: 1.0,
+            });
         }
         let a = m.create_work_block("A", est(3.0)); // no resource; creates dep constraint for B
         let c = m.create_work_block("C", est(3.0)); // uses R at 0.8 → scheduled [5,8)

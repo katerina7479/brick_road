@@ -35,9 +35,12 @@ pub struct CycleError {
 
 impl std::fmt::Display for CycleError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "dependency cycle among {} block(s): {:?}",
-               self.nodes.len(),
-               self.nodes.iter().map(|id| id.0).collect::<Vec<_>>())
+        write!(
+            f,
+            "dependency cycle among {} block(s): {:?}",
+            self.nodes.len(),
+            self.nodes.iter().map(|id| id.0).collect::<Vec<_>>()
+        )
     }
 }
 
@@ -68,7 +71,11 @@ pub fn build_graph(model: &Model, plan: &Plan) -> DependencyGraph {
         }
     }
 
-    DependencyGraph { nodes, edges, in_degree }
+    DependencyGraph {
+        nodes,
+        edges,
+        in_degree,
+    }
 }
 
 /// Topological sort of `graph` using Kahn's algorithm.
@@ -98,7 +105,9 @@ pub fn topological_sort(graph: &DependencyGraph) -> Result<Vec<WorkBlockId>, Cyc
         if let Some(edges) = graph.edges.get(&node) {
             let mut new_zeros: Vec<WorkBlockId> = Vec::new();
             for edge in edges {
-                let deg = in_degree.get_mut(&edge.successor).expect("successor in graph");
+                let deg = in_degree
+                    .get_mut(&edge.successor)
+                    .expect("successor in graph");
                 *deg -= 1;
                 if *deg == 0 {
                     new_zeros.push(edge.successor);
@@ -158,7 +167,12 @@ mod tests {
     use crate::model::{Estimate, Model, Plan};
 
     fn est() -> Estimate {
-        Estimate { most_likely: 1.0, optimistic: 1.0, pessimistic: 1.0, confidence: 1.0 }
+        Estimate {
+            most_likely: 1.0,
+            optimistic: 1.0,
+            pessimistic: 1.0,
+            confidence: 1.0,
+        }
     }
 
     fn empty_plan(model: &mut Model) -> Plan {
@@ -270,8 +284,18 @@ mod tests {
         let child_b = model.create_work_block("child_b", est());
         let var_a = model.create_variant("fast", parent);
         let var_b = model.create_variant("slow", parent);
-        model.variants.get_mut(&var_a).unwrap().children.push(child_a);
-        model.variants.get_mut(&var_b).unwrap().children.push(child_b);
+        model
+            .variants
+            .get_mut(&var_a)
+            .unwrap()
+            .children
+            .push(child_a);
+        model
+            .variants
+            .get_mut(&var_b)
+            .unwrap()
+            .children
+            .push(child_b);
         model.work_blocks.get_mut(&parent).unwrap().variants = vec![var_a, var_b];
 
         let plan = {
@@ -283,7 +307,7 @@ mod tests {
 
         let graph = build_graph(&model, &plan);
         assert!(graph.nodes.contains(&parent));
-        assert!(graph.nodes.contains(&child_a));  // selected variant's child included
+        assert!(graph.nodes.contains(&child_a)); // selected variant's child included
         assert!(!graph.nodes.contains(&child_b)); // unselected variant's child excluded
     }
 

@@ -26,8 +26,7 @@ pub fn update_camera_target(
     mouse_motion: Res<AccumulatedMouseMotion>,
     mouse_scroll: Res<AccumulatedMouseScroll>,
 ) {
-    if (mouse_buttons.pressed(MouseButton::Middle)
-        || mouse_buttons.pressed(MouseButton::Right))
+    if (mouse_buttons.pressed(MouseButton::Middle) || mouse_buttons.pressed(MouseButton::Right))
         && mouse_motion.delta != Vec2::ZERO
     {
         target.pos.x -= mouse_motion.delta.x * target.zoom;
