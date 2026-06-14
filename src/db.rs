@@ -4,7 +4,7 @@ use chrono::NaiveDate;
 use rusqlite::{Connection, Result};
 
 use crate::model::{
-    AvailabilitySegment, AvailabilityTimeline, ConfidenceFactors, Dependency, DependencyId,
+    AvailabilitySegment, AvailabilityTimeline, ConfidenceFactors, Day, Dependency, DependencyId,
     DependencyType, Estimate, Milestone, MilestoneId, Model, Plan, PlanId, ResourceAllocation,
     ResourceBlock, ResourceBlockId, ResourceType, TShirtSize, Variant, VariantId, WorkBlock,
     WorkBlockId, World, WorldId,
@@ -16,8 +16,8 @@ pub fn create_tables(conn: &Connection) -> Result<()> {
     // SQLite has no ADD COLUMN IF NOT EXISTS. Run each migration and ignore
     // the "duplicate column name" error that fires when it already exists.
     for sql in [
-        "ALTER TABLE work_blocks ADD COLUMN start_day REAL NOT NULL DEFAULT 0",
-        "ALTER TABLE work_blocks ADD COLUMN duration_days REAL NOT NULL DEFAULT 0",
+        "ALTER TABLE work_blocks ADD COLUMN start_day INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE work_blocks ADD COLUMN duration_days INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE work_blocks ADD COLUMN color_r REAL",
         "ALTER TABLE work_blocks ADD COLUMN color_g REAL",
         "ALTER TABLE work_blocks ADD COLUMN color_b REAL",
@@ -36,11 +36,11 @@ pub fn create_tables(conn: &Connection) -> Result<()> {
         conn.query_row("SELECT COUNT(*) FROM t_shirt_sizes", [], |r| r.get(0))?;
     if count == 0 {
         conn.execute_batch(
-            "INSERT INTO t_shirt_sizes (label, days, sort_order) VALUES ('XS',  1.0, 0);
-             INSERT INTO t_shirt_sizes (label, days, sort_order) VALUES ('S',   3.0, 1);
-             INSERT INTO t_shirt_sizes (label, days, sort_order) VALUES ('M',   5.0, 2);
-             INSERT INTO t_shirt_sizes (label, days, sort_order) VALUES ('L',  10.0, 3);
-             INSERT INTO t_shirt_sizes (label, days, sort_order) VALUES ('XL', 20.0, 4);",
+            "INSERT INTO t_shirt_sizes (label, days, sort_order) VALUES ('XS',  1, 0);
+             INSERT INTO t_shirt_sizes (label, days, sort_order) VALUES ('S',   3, 1);
+             INSERT INTO t_shirt_sizes (label, days, sort_order) VALUES ('M',   5, 2);
+             INSERT INTO t_shirt_sizes (label, days, sort_order) VALUES ('L',  10, 3);
+             INSERT INTO t_shirt_sizes (label, days, sort_order) VALUES ('XL', 20, 4);",
         )?;
     }
     Ok(())
@@ -52,7 +52,7 @@ pub fn create_tables(conn: &Connection) -> Result<()> {
 pub fn record_estimate_snapshot(
     conn: &Connection,
     work_block_id: u64,
-    duration_days: f32,
+    duration_days: Day,
     confidence: f32,
 ) -> Result<()> {
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -64,7 +64,7 @@ pub fn record_estimate_snapshot(
         "INSERT INTO estimate_snapshots
              (work_block_id, duration_days, confidence, recorded_at)
          VALUES (?1, ?2, ?3, ?4)",
-        (work_block_id as i64, duration_days as f64, confidence as f64, ts),
+        (work_block_id as i64, duration_days as i64, confidence as f64, ts),
     )?;
     Ok(())
 }
@@ -164,12 +164,12 @@ pub fn save_model(conn: &Connection, model: &Model) -> Result<()> {
             (
                 wb.id.0 as i64,
                 &wb.name,
-                wb.estimate.most_likely as f64,
-                wb.estimate.optimistic as f64,
-                wb.estimate.pessimistic as f64,
+                wb.estimate.most_likely as i64,
+                wb.estimate.optimistic as i64,
+                wb.estimate.pessimistic as i64,
                 wb.estimate.confidence as f64,
-                wb.start_day as f64,
-                wb.duration_days as f64,
+                wb.start_day as i64,
+                wb.duration_days as i64,
                 wb.color.map(|c| c[0] as f64),
                 wb.color.map(|c| c[1] as f64),
                 wb.color.map(|c| c[2] as f64),
@@ -215,7 +215,7 @@ pub fn save_model(conn: &Connection, model: &Model) -> Result<()> {
                 dep.predecessor.0 as i64,
                 dep.successor.0 as i64,
                 dependency_type_str(dep.dependency_type),
-                dep.lag as f64,
+                dep.lag as i64,
             ),
         )?;
     }
@@ -224,7 +224,7 @@ pub fn save_model(conn: &Connection, model: &Model) -> Result<()> {
         tx.execute(
             "INSERT INTO milestones (id, name, date_day) VALUES (?1, ?2, ?3)
              ON CONFLICT(id) DO UPDATE SET name = excluded.name, date_day = excluded.date_day",
-            (ms.id.0 as i64, &ms.name, ms.date as f64),
+            (ms.id.0 as i64, &ms.name, ms.date as i64),
         )?;
     }
 
@@ -284,7 +284,7 @@ pub fn save_model(conn: &Connection, model: &Model) -> Result<()> {
                 "INSERT INTO availability_segments
                      (resource_block_id, start_day, end_day, factor, sort_order)
                  VALUES (?1, ?2, ?3, ?4, ?5)",
-                (rb.id.0 as i64, seg.start as f64, seg.end as f64, seg.factor as f64, order as i64),
+                (rb.id.0 as i64, seg.start as i64, seg.end as i64, seg.factor as f64, order as i64),
             )?;
         }
     }
@@ -340,7 +340,7 @@ pub fn save_model(conn: &Connection, model: &Model) -> Result<()> {
     for (order, size) in model.t_shirt_sizes.iter().enumerate() {
         tx.execute(
             "INSERT INTO t_shirt_sizes (label, days, sort_order) VALUES (?1, ?2, ?3)",
-            (&size.label, size.days as f64, order as i64),
+            (&size.label, size.days as i64, order as i64),
         )?;
     }
 
@@ -450,8 +450,8 @@ pub fn load_model(conn: &Connection) -> Result<Model> {
         let rows = stmt.query_map([], |row| {
             Ok((
                 row.get::<_, i64>(0)?,
-                row.get::<_, f64>(1)?,
-                row.get::<_, f64>(2)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
                 row.get::<_, f64>(3)?,
             ))
         })?;
@@ -462,8 +462,8 @@ pub fn load_model(conn: &Connection) -> Result<Model> {
                 .get_mut(&ResourceBlockId(rb_id as u64))
             {
                 rb.availability.segments.push(AvailabilitySegment {
-                    start: start as f32,
-                    end: end as f32,
+                    start: start as i32,
+                    end: end as i32,
                     factor: factor as f32,
                 });
             }
@@ -483,12 +483,12 @@ pub fn load_model(conn: &Connection) -> Result<Model> {
             Ok((
                 row.get::<_, i64>(0)?,
                 row.get::<_, String>(1)?,
-                row.get::<_, f64>(2)?,
-                row.get::<_, f64>(3)?,
-                row.get::<_, f64>(4)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, i64>(4)?,
                 row.get::<_, f64>(5)?,
-                row.get::<_, f64>(6)?,
-                row.get::<_, f64>(7)?,
+                row.get::<_, i64>(6)?,
+                row.get::<_, i64>(7)?,
                 row.get::<_, Option<f64>>(8)?,
                 row.get::<_, Option<f64>>(9)?,
                 row.get::<_, Option<f64>>(10)?,
@@ -510,14 +510,14 @@ pub fn load_model(conn: &Connection) -> Result<Model> {
                     id: WorkBlockId(id as u64),
                     name,
                     estimate: Estimate {
-                        most_likely: ml as f32,
-                        optimistic: opt as f32,
-                        pessimistic: pes as f32,
+                        most_likely: ml as i32,
+                        optimistic: opt as i32,
+                        pessimistic: pes as i32,
                         confidence: conf as f32,
                     },
                     variants: vec![],
-                    start_day: start_day as f32,
-                    duration_days: duration_days as f32,
+                    start_day: start_day as i32,
+                    duration_days: duration_days as i32,
                     color,
                     description,
                     priority: priority.clamp(0, 3) as u8,
@@ -589,7 +589,7 @@ pub fn load_model(conn: &Connection) -> Result<Model> {
                 row.get::<_, i64>(1)?,
                 row.get::<_, i64>(2)?,
                 row.get::<_, String>(3)?,
-                row.get::<_, f64>(4)?,
+                row.get::<_, i64>(4)?,
             ))
         })?;
         for row in rows {
@@ -603,7 +603,7 @@ pub fn load_model(conn: &Connection) -> Result<Model> {
                     predecessor: WorkBlockId(pred as u64),
                     successor: WorkBlockId(succ as u64),
                     dependency_type,
-                    lag: lag as f32,
+                    lag: lag as i32,
                 },
             );
         }
@@ -616,7 +616,7 @@ pub fn load_model(conn: &Connection) -> Result<Model> {
             Ok((
                 row.get::<_, i64>(0)?,
                 row.get::<_, String>(1)?,
-                row.get::<_, f64>(2)?,
+                row.get::<_, i64>(2)?,
             ))
         })?;
         for row in rows {
@@ -627,7 +627,7 @@ pub fn load_model(conn: &Connection) -> Result<Model> {
                 Milestone {
                     id: MilestoneId(id as u64),
                     name,
-                    date: date as f32,
+                    date: date as i32,
                 },
             );
         }
@@ -785,13 +785,13 @@ pub fn load_model(conn: &Connection) -> Result<Model> {
         let mut stmt =
             conn.prepare("SELECT label, days FROM t_shirt_sizes ORDER BY sort_order")?;
         let rows = stmt.query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?))
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
         })?;
         for row in rows {
             let (label, days) = row?;
             model.t_shirt_sizes.push(TShirtSize {
                 label,
-                days: days as f32,
+                days: days as i32,
             });
         }
     }
@@ -1431,21 +1431,21 @@ CREATE TABLE IF NOT EXISTS resource_blocks (
 CREATE TABLE IF NOT EXISTS availability_segments (
     id                INTEGER PRIMARY KEY,
     resource_block_id INTEGER NOT NULL REFERENCES resource_blocks(id),
-    start_day         REAL    NOT NULL,
-    end_day           REAL    NOT NULL,
+    start_day         INTEGER NOT NULL,
+    end_day           INTEGER NOT NULL,
     factor            REAL    NOT NULL,
     sort_order        INTEGER NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS work_blocks (
     id                   INTEGER PRIMARY KEY,
-    name                 TEXT NOT NULL,
-    estimate_most_likely REAL NOT NULL,
-    estimate_optimistic  REAL NOT NULL,
-    estimate_pessimistic REAL NOT NULL,
-    estimate_confidence  REAL NOT NULL,
-    start_day            REAL NOT NULL DEFAULT 0,
-    duration_days        REAL NOT NULL DEFAULT 0,
+    name                 TEXT    NOT NULL,
+    estimate_most_likely INTEGER NOT NULL,
+    estimate_optimistic  INTEGER NOT NULL,
+    estimate_pessimistic INTEGER NOT NULL,
+    estimate_confidence  REAL    NOT NULL,
+    start_day            INTEGER NOT NULL DEFAULT 0,
+    duration_days        INTEGER NOT NULL DEFAULT 0,
     color_r              REAL,
     color_g              REAL,
     color_b              REAL
@@ -1471,13 +1471,13 @@ CREATE TABLE IF NOT EXISTS dependencies (
     predecessor_id  INTEGER NOT NULL REFERENCES work_blocks(id),
     successor_id    INTEGER NOT NULL REFERENCES work_blocks(id),
     dependency_type TEXT    NOT NULL,
-    lag_days        REAL    NOT NULL DEFAULT 0.0
+    lag_days        INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS milestones (
     id       INTEGER PRIMARY KEY,
     name     TEXT NOT NULL,
-    date_day REAL NOT NULL
+    date_day INTEGER NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS plans (
@@ -1518,7 +1518,7 @@ CREATE TABLE IF NOT EXISTS plan_milestone_targets (
 CREATE TABLE IF NOT EXISTS estimate_snapshots (
     id             INTEGER PRIMARY KEY,
     work_block_id  INTEGER NOT NULL REFERENCES work_blocks(id),
-    duration_days  REAL    NOT NULL,
+    duration_days  INTEGER NOT NULL,
     confidence     REAL    NOT NULL,
     recorded_at    INTEGER NOT NULL
 );
@@ -1535,7 +1535,7 @@ CREATE TABLE IF NOT EXISTS calendar_non_working_dates (
 
 CREATE TABLE IF NOT EXISTS t_shirt_sizes (
     label      TEXT    PRIMARY KEY,
-    days       REAL    NOT NULL,
+    days       INTEGER NOT NULL,
     sort_order INTEGER NOT NULL DEFAULT 0
 );
 
