@@ -6,7 +6,8 @@ use rusqlite::{Connection, Result};
 use crate::model::{
     AvailabilitySegment, AvailabilityTimeline, Dependency, DependencyId, DependencyType, Estimate,
     Milestone, MilestoneId, Model, Plan, PlanId, ResourceAllocation, ResourceBlock,
-    ResourceBlockId, ResourceType, Variant, VariantId, WorkBlock, WorkBlockId, World, WorldId,
+    ResourceBlockId, ResourceType, TShirtSize, Variant, VariantId, WorkBlock, WorkBlockId, World,
+    WorldId,
 };
 
 pub fn create_tables(conn: &Connection) -> Result<()> {
@@ -22,12 +23,25 @@ pub fn create_tables(conn: &Connection) -> Result<()> {
         "ALTER TABLE work_blocks ADD COLUMN color_b REAL",
         "ALTER TABLE work_blocks ADD COLUMN description TEXT NOT NULL DEFAULT ''",
         "ALTER TABLE work_blocks ADD COLUMN priority INTEGER NOT NULL DEFAULT 1",
+        "ALTER TABLE work_blocks ADD COLUMN t_shirt_size TEXT",
     ] {
         match conn.execute_batch(sql) {
             Ok(()) => {}
             Err(e) if e.to_string().contains("duplicate column name") => {}
             Err(e) => return Err(e),
         }
+    }
+    // Seed default t-shirt sizes on first use (table created above).
+    let count: i64 =
+        conn.query_row("SELECT COUNT(*) FROM t_shirt_sizes", [], |r| r.get(0))?;
+    if count == 0 {
+        conn.execute_batch(
+            "INSERT INTO t_shirt_sizes (label, days, sort_order) VALUES ('XS',  1.0, 0);
+             INSERT INTO t_shirt_sizes (label, days, sort_order) VALUES ('S',   3.0, 1);
+             INSERT INTO t_shirt_sizes (label, days, sort_order) VALUES ('M',   5.0, 2);
+             INSERT INTO t_shirt_sizes (label, days, sort_order) VALUES ('L',  10.0, 3);
+             INSERT INTO t_shirt_sizes (label, days, sort_order) VALUES ('XL', 20.0, 4);",
+        )?;
     }
     Ok(())
 }
@@ -80,6 +94,7 @@ pub fn save_model(conn: &Connection, model: &Model) -> Result<()> {
         DELETE FROM worlds;
         DELETE FROM calendar_non_working_dates;
         DELETE FROM calendar_config;
+        DELETE FROM t_shirt_sizes;
     ",
     )?;
 
@@ -139,8 +154,9 @@ pub fn save_model(conn: &Connection, model: &Model) -> Result<()> {
             "INSERT INTO work_blocks
                  (id, name, estimate_most_likely, estimate_optimistic,
                   estimate_pessimistic, estimate_confidence,
-                  start_day, duration_days, color_r, color_g, color_b, description, priority)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                  start_day, duration_days, color_r, color_g, color_b, description, priority,
+                  t_shirt_size)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
             (
                 wb.id.0,
                 &wb.name,
@@ -155,6 +171,7 @@ pub fn save_model(conn: &Connection, model: &Model) -> Result<()> {
                 wb.color.map(|c| c[2] as f64),
                 &wb.description,
                 wb.priority as i64,
+                &wb.t_shirt_size,
             ),
         )?;
     }
@@ -259,6 +276,14 @@ pub fn save_model(conn: &Connection, model: &Model) -> Result<()> {
         tx.execute(
             "INSERT INTO calendar_non_working_dates (date) VALUES (?1)",
             (&date.format("%Y-%m-%d").to_string(),),
+        )?;
+    }
+
+    // t_shirt_sizes
+    for (order, size) in model.t_shirt_sizes.iter().enumerate() {
+        tx.execute(
+            "INSERT INTO t_shirt_sizes (label, days, sort_order) VALUES (?1, ?2, ?3)",
+            (&size.label, size.days as f64, order as i64),
         )?;
     }
 
@@ -369,7 +394,8 @@ pub fn load_model(conn: &Connection) -> Result<Model> {
         let mut stmt = conn.prepare(
             "SELECT id, name, estimate_most_likely, estimate_optimistic,
                     estimate_pessimistic, estimate_confidence,
-                    start_day, duration_days, color_r, color_g, color_b, description, priority
+                    start_day, duration_days, color_r, color_g, color_b, description, priority,
+                    t_shirt_size
              FROM work_blocks",
         )?;
         let rows = stmt.query_map([], |row| {
@@ -387,10 +413,11 @@ pub fn load_model(conn: &Connection) -> Result<Model> {
                 row.get::<_, Option<f64>>(10)?,
                 row.get::<_, String>(11)?,
                 row.get::<_, i64>(12)?,
+                row.get::<_, Option<String>>(13)?,
             ))
         })?;
         for row in rows {
-            let (id, name, ml, opt, pes, conf, start_day, duration_days, cr, cg, cb, description, priority) = row?;
+            let (id, name, ml, opt, pes, conf, start_day, duration_days, cr, cg, cb, description, priority, t_shirt_size) = row?;
             let color = match (cr, cg, cb) {
                 (Some(r), Some(g), Some(b)) => Some([r as f32, g as f32, b as f32]),
                 _ => None,
@@ -413,6 +440,7 @@ pub fn load_model(conn: &Connection) -> Result<Model> {
                     color,
                     description,
                     priority: priority.clamp(0, 3) as u8,
+                    t_shirt_size,
                 },
             );
         }
@@ -642,6 +670,22 @@ pub fn load_model(conn: &Connection) -> Result<Model> {
             if let Ok(date) = NaiveDate::parse_from_str(&date_str, "%Y-%m-%d") {
                 model.calendar.non_working_dates.push(date);
             }
+        }
+    }
+
+    // t_shirt_sizes
+    {
+        let mut stmt =
+            conn.prepare("SELECT label, days FROM t_shirt_sizes ORDER BY sort_order")?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?))
+        })?;
+        for row in rows {
+            let (label, days) = row?;
+            model.t_shirt_sizes.push(TShirtSize {
+                label,
+                days: days as f32,
+            });
         }
     }
 
@@ -1259,5 +1303,11 @@ CREATE TABLE IF NOT EXISTS calendar_config (
 
 CREATE TABLE IF NOT EXISTS calendar_non_working_dates (
     date TEXT PRIMARY KEY
+);
+
+CREATE TABLE IF NOT EXISTS t_shirt_sizes (
+    label      TEXT    PRIMARY KEY,
+    days       REAL    NOT NULL,
+    sort_order INTEGER NOT NULL DEFAULT 0
 );
 ";
