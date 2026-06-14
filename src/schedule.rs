@@ -256,6 +256,104 @@ pub fn backward_pass(
     }
 }
 
+/// Compute the critical path and total float using the user's manually-placed
+/// `start_day` / `duration_days` on each `WorkBlock` rather than the output
+/// of a forward pass. Float is measured relative to the user's own placement,
+/// so a block with zero float cannot be delayed without extending the project.
+///
+/// Reads durations and finish times directly from `model.work_blocks`; a
+/// `forward_pass` is not required. Returns `Err(CycleError)` on a dependency
+/// cycle.
+pub fn analyze_user_placement(
+    model: &Model,
+    graph: &DependencyGraph,
+) -> Result<CriticalPathAnalysis, CycleError> {
+    let order = crate::graph::topological_sort(graph)?;
+
+    // Project end = latest finish over all active blocks in user placement.
+    let total = graph
+        .nodes
+        .iter()
+        .filter_map(|id| model.work_blocks.get(id))
+        .map(|wb| wb.start_day + wb.duration_days)
+        .fold(0.0_f32, f32::max);
+
+    // Build reverse edge map: successor → [(predecessor, dep_type, lag)].
+    let mut reverse: HashMap<WorkBlockId, Vec<(WorkBlockId, DependencyType, f32)>> =
+        graph.nodes.iter().map(|&id| (id, Vec::new())).collect();
+    for (&pred, edges) in &graph.edges {
+        for edge in edges {
+            reverse
+                .entry(edge.successor)
+                .or_default()
+                .push((pred, edge.dependency_type, edge.lag));
+        }
+    }
+
+    // Initialise LF to project end for every block.
+    let mut latest_finish: HashMap<WorkBlockId, f32> =
+        graph.nodes.iter().map(|&id| (id, total)).collect();
+
+    // Process in reverse topological order (successors before predecessors).
+    for &s_id in order.iter().rev() {
+        let lf_s = *latest_finish.get(&s_id).unwrap_or(&total);
+        let dur_s = model
+            .work_blocks
+            .get(&s_id)
+            .map(|wb| wb.duration_days)
+            .unwrap_or(0.0);
+        let ls_s = lf_s - dur_s;
+
+        if let Some(preds) = reverse.get(&s_id) {
+            for &(pred_id, dep_type, lag) in preds {
+                let dur_p = model
+                    .work_blocks
+                    .get(&pred_id)
+                    .map(|wb| wb.duration_days)
+                    .unwrap_or(0.0);
+                let bound = match dep_type {
+                    DependencyType::FinishToStart => ls_s - lag,
+                    DependencyType::StartToStart => ls_s - lag + dur_p,
+                    DependencyType::FinishToFinish => lf_s - lag,
+                    DependencyType::StartToFinish => lf_s - lag + dur_p,
+                };
+                let v = latest_finish.entry(pred_id).or_insert(total);
+                if bound < *v {
+                    *v = bound;
+                }
+            }
+        }
+    }
+
+    // Float = LF − EF for each block (EF from user placement).
+    const CRITICAL_EPS: f32 = 1e-4;
+    let float: HashMap<WorkBlockId, f32> = graph
+        .nodes
+        .iter()
+        .map(|&id| {
+            let ef = model
+                .work_blocks
+                .get(&id)
+                .map(|wb| wb.start_day + wb.duration_days)
+                .unwrap_or(0.0);
+            let lf = *latest_finish.get(&id).unwrap_or(&total);
+            (id, lf - ef)
+        })
+        .collect();
+
+    // Critical path: zero-float blocks in topological order.
+    let critical_path = order
+        .iter()
+        .filter(|&&id| float.get(&id).is_some_and(|&f| f.abs() < CRITICAL_EPS))
+        .copied()
+        .collect();
+
+    Ok(CriticalPathAnalysis {
+        critical_path,
+        float,
+    })
+}
+
 /// Schedule every active block while respecting both dependency constraints
 /// and resource capacity limits (Execution Planning mode, PRD §6.2).
 ///
@@ -1034,5 +1132,87 @@ mod tests {
         starts.sort_by(|x, y| x.partial_cmp(y).unwrap());
         assert_eq!(starts, [0.0, 1.0, 2.0]);
         assert_eq!(s.total_duration_days, 3.0);
+    }
+
+    // --- analyze_user_placement tests ---
+
+    fn place(model: &mut Model, id: WorkBlockId, start: f32, dur: f32) {
+        let wb = model.work_blocks.get_mut(&id).unwrap();
+        wb.start_day = start;
+        wb.duration_days = dur;
+    }
+
+    fn analyze_placed(model: &Model, roots: Vec<WorkBlockId>) -> CriticalPathAnalysis {
+        let plan = model.plans.values().next().cloned().unwrap();
+        let mut p = plan;
+        p.root_blocks = roots;
+        let graph = build_graph(model, &p);
+        analyze_user_placement(model, &graph).expect("no cycle")
+    }
+
+    #[test]
+    fn user_placement_single_block_zero_float() {
+        let (mut m, _) = base();
+        let a = m.create_work_block("A", est(5.0));
+        place(&mut m, a, 0.0, 5.0);
+        let ana = analyze_placed(&m, vec![a]);
+        assert!((ana.float[&a]).abs() < 1e-4);
+        assert_eq!(ana.critical_path, vec![a]);
+    }
+
+    #[test]
+    fn user_placement_linear_chain_all_critical() {
+        // A(0→3) --FS--> B(3→5) --FS--> C(5→6): total = 6, all float = 0
+        let (mut m, _) = base();
+        let a = m.create_work_block("A", est(3.0));
+        let b = m.create_work_block("B", est(2.0));
+        let c = m.create_work_block("C", est(1.0));
+        m.create_dependency(a, b, DependencyType::FinishToStart);
+        m.create_dependency(b, c, DependencyType::FinishToStart);
+        place(&mut m, a, 0.0, 3.0);
+        place(&mut m, b, 3.0, 2.0);
+        place(&mut m, c, 5.0, 1.0);
+        let ana = analyze_placed(&m, vec![a, b, c]);
+        assert!(ana.float[&a].abs() < 1e-4);
+        assert!(ana.float[&b].abs() < 1e-4);
+        assert!(ana.float[&c].abs() < 1e-4);
+        assert_eq!(ana.critical_path, vec![a, b, c]);
+    }
+
+    #[test]
+    fn user_placement_parallel_branch_has_float() {
+        // A(0→5) --FS--> C(5→6)   total = 6
+        // B(0→3) --FS--> C(5→6)   B.float = LF_B(5) − EF_B(3) = 2
+        let (mut m, _) = base();
+        let a = m.create_work_block("A", est(5.0));
+        let b = m.create_work_block("B", est(3.0));
+        let c = m.create_work_block("C", est(1.0));
+        m.create_dependency(a, c, DependencyType::FinishToStart);
+        m.create_dependency(b, c, DependencyType::FinishToStart);
+        place(&mut m, a, 0.0, 5.0);
+        place(&mut m, b, 0.0, 3.0);
+        place(&mut m, c, 5.0, 1.0);
+        let ana = analyze_placed(&m, vec![a, b, c]);
+        assert!(ana.float[&a].abs() < 1e-4, "A should be critical");
+        assert!(ana.float[&c].abs() < 1e-4, "C should be critical");
+        assert!((ana.float[&b] - 2.0).abs() < 1e-4, "B float should be 2");
+        assert!(!ana.critical_path.contains(&b));
+        assert!(ana.critical_path.contains(&a));
+        assert!(ana.critical_path.contains(&c));
+    }
+
+    #[test]
+    fn user_placement_float_with_lag() {
+        // A(0→3) --FS+2--> B(5→7): LS_B=5, LF_A ≤ 5−2=3 → float_A = 3−3 = 0
+        let (mut m, _) = base();
+        let a = m.create_work_block("A", est(3.0));
+        let b = m.create_work_block("B", est(2.0));
+        let dep = m.create_dependency(a, b, DependencyType::FinishToStart);
+        m.dependencies.get_mut(&dep).unwrap().lag = 2.0;
+        place(&mut m, a, 0.0, 3.0);
+        place(&mut m, b, 5.0, 2.0);
+        let ana = analyze_placed(&m, vec![a, b]);
+        assert!(ana.float[&a].abs() < 1e-4);
+        assert!(ana.float[&b].abs() < 1e-4);
     }
 }
