@@ -300,7 +300,7 @@ fn confidence_to_factors(confidence: f32) -> (f32, f32) {
 
 fn side_panel_ui(
     mut contexts: EguiContexts,
-    selected: Res<blocks::SelectedBlock>,
+    mut selected: ResMut<blocks::SelectedBlock>,
     mut model: ResMut<model::Model>,
     mut schedule: ResMut<schedule::Schedule>,
     conn: NonSend<rusqlite::Connection>,
@@ -554,5 +554,91 @@ fn side_panel_ui(
                     error!("save_model failed: {e}");
                 }
             }
+
+            ui.separator();
+            ui.label("Dependencies");
+
+            // Snapshot before any mutation to avoid borrow conflict.
+            let predecessors: Vec<_> = model
+                .dependencies
+                .values()
+                .filter(|d| d.successor == sel_id)
+                .map(|d| (d.id, d.predecessor, d.dependency_type))
+                .collect();
+            let successors: Vec<_> = model
+                .dependencies
+                .values()
+                .filter(|d| d.predecessor == sel_id)
+                .map(|d| (d.id, d.successor, d.dependency_type))
+                .collect();
+
+            let mut dep_to_delete: Option<model::DependencyId> = None;
+            let mut jump_to: Option<model::WorkBlockId> = None;
+
+            if predecessors.is_empty() && successors.is_empty() {
+                ui.weak("None");
+            } else {
+                if !predecessors.is_empty() {
+                    ui.weak("Predecessors");
+                    for (dep_id, pred_id, dep_type) in &predecessors {
+                        let pred_name = model
+                            .work_blocks
+                            .get(pred_id)
+                            .map(|wb| wb.name.clone())
+                            .unwrap_or_else(|| "?".to_string());
+                        ui.horizontal(|ui| {
+                            if ui
+                                .link(format!("{} [{}]", pred_name, dep_type_abbrev(dep_type)))
+                                .clicked()
+                            {
+                                jump_to = Some(*pred_id);
+                            }
+                            if ui.small_button("×").on_hover_text("Remove dependency").clicked() {
+                                dep_to_delete = Some(*dep_id);
+                            }
+                        });
+                    }
+                }
+                if !successors.is_empty() {
+                    ui.weak("Successors");
+                    for (dep_id, succ_id, dep_type) in &successors {
+                        let succ_name = model
+                            .work_blocks
+                            .get(succ_id)
+                            .map(|wb| wb.name.clone())
+                            .unwrap_or_else(|| "?".to_string());
+                        ui.horizontal(|ui| {
+                            if ui
+                                .link(format!("{} [{}]", succ_name, dep_type_abbrev(dep_type)))
+                                .clicked()
+                            {
+                                jump_to = Some(*succ_id);
+                            }
+                            if ui.small_button("×").on_hover_text("Remove dependency").clicked() {
+                                dep_to_delete = Some(*dep_id);
+                            }
+                        });
+                    }
+                }
+            }
+
+            if let Some(dep_id) = dep_to_delete {
+                model.dependencies.remove(&dep_id);
+                if let Err(e) = db::save_model(&conn, &model) {
+                    error!("save_model failed: {e}");
+                }
+            }
+            if let Some(target_id) = jump_to {
+                selected.0 = Some(target_id);
+            }
         });
+}
+
+fn dep_type_abbrev(t: &model::DependencyType) -> &'static str {
+    match t {
+        model::DependencyType::FinishToStart  => "F→S",
+        model::DependencyType::StartToStart   => "S→S",
+        model::DependencyType::FinishToFinish => "F→F",
+        model::DependencyType::StartToFinish  => "S→F",
+    }
 }
