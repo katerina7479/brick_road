@@ -39,6 +39,7 @@ fn main() {
         .insert_resource(blocks::DeleteConfirmState::default())
         .insert_resource(blocks::CreateModeState::default())
         .insert_resource(schedule::ViewScope::default())
+        .insert_resource(schedule::TimelineViewMode::default())
         .insert_resource(schedule::VisibleBlocks::default())
         .insert_resource(analysis::ScheduleAnalysis::default())
         .add_systems(Startup, (setup_db, setup_camera))
@@ -101,19 +102,26 @@ fn main() {
             Update,
             blocks::sync_block_sprites
                 .after(blocks::handle_block_drag)
-                .after(blocks::spawn_block_sprites),
+                .after(blocks::spawn_block_sprites)
+                .run_if(task_view_active),
         )
         .add_systems(
             Update,
-            blocks::sync_conflict_overlays.after(update_analysis),
+            blocks::sync_conflict_overlays
+                .after(update_analysis)
+                .run_if(task_view_active),
         )
         .add_systems(
             Update,
-            blocks::draw_block_borders.after(blocks::sync_block_sprites),
+            blocks::draw_block_borders
+                .after(blocks::sync_block_sprites)
+                .run_if(task_view_active),
         )
         .add_systems(
             Update,
-            blocks::sync_uncertainty_overlays.after(blocks::spawn_block_sprites),
+            blocks::sync_uncertainty_overlays
+                .after(blocks::spawn_block_sprites)
+                .run_if(task_view_active),
         )
         .add_systems(
             Update,
@@ -122,10 +130,12 @@ fn main() {
                 .before(blocks::handle_block_drag)
                 .before(blocks::handle_block_resize),
         )
-        .add_systems(Update, blocks::draw_block_handles)
+        .add_systems(Update, blocks::draw_block_handles.run_if(task_view_active))
         .add_systems(
             Update,
-            blocks::draw_dependency_edges.after(update_analysis),
+            blocks::draw_dependency_edges
+                .after(update_analysis)
+                .run_if(task_view_active),
         )
         .add_systems(
             Update,
@@ -139,13 +149,16 @@ fn main() {
                 .after(update_camera_target)
                 .after(smooth_camera),
         )
-        .add_systems(Update, labels::draw_nesting_indicators)
-        .add_systems(Update, labels::draw_violation_indicators)
+        .add_systems(Update, labels::draw_nesting_indicators.run_if(task_view_active))
+        .add_systems(Update, labels::draw_violation_indicators.run_if(task_view_active))
         .add_systems(Update, labels::scale_labels_to_zoom)
         .add_systems(
             Update,
-            blocks::sync_block_labels.after(blocks::spawn_block_sprites),
+            blocks::sync_block_labels
+                .after(blocks::spawn_block_sprites)
+                .run_if(task_view_active),
         )
+        .add_systems(Update, draw_resource_timeline)
         .add_systems(EguiPrimaryContextPass, side_panel_ui)
         .add_systems(EguiPrimaryContextPass, camera_nav_ui)
         .add_systems(EguiPrimaryContextPass, logo_ui)
@@ -202,6 +215,85 @@ fn draw_grid(
     }
 
     gizmos.line_2d(Vec2::new(x_left, 0.0), Vec2::new(x_right, 0.0), baseline_color);
+}
+
+fn task_view_active(mode: Res<schedule::TimelineViewMode>) -> bool {
+    *mode == schedule::TimelineViewMode::Task
+}
+
+/// Draws one row per resource block when `TimelineViewMode::Resource` is active.
+/// Each row shows bars for every work block allocated to that resource, coloured
+/// red if the window overlaps a detected resource conflict.
+fn draw_resource_timeline(
+    mode: Res<schedule::TimelineViewMode>,
+    model: Res<model::Model>,
+    schedule: Res<schedule::Schedule>,
+    sa: Res<analysis::ScheduleAnalysis>,
+    mut gizmos: Gizmos,
+) {
+    if *mode != schedule::TimelineViewMode::Resource {
+        return;
+    }
+
+    let Some(plan) = model.plans.get(&schedule.plan_id) else { return };
+
+    let mut resources: Vec<_> = model.resource_blocks.values().collect();
+    resources.sort_by_key(|r| r.id.0);
+
+    // Pre-index conflict windows per resource.
+    let mut conflict_windows: std::collections::HashMap<model::ResourceBlockId, Vec<(f32, f32)>> =
+        std::collections::HashMap::new();
+    for c in &sa.resource_conflicts {
+        conflict_windows
+            .entry(c.resource_id)
+            .or_default()
+            .push((c.window_start, c.window_end));
+    }
+
+    let row_sep = Color::srgba(0.3, 0.3, 0.5, 0.2);
+    let alloc_ok = Color::srgba(0.2, 1.8, 0.6, 0.7);
+    let alloc_conflict = Color::srgba(2.5, 0.3, 0.3, 0.9);
+    let bar_h = constants::ROW_HEIGHT * 0.65;
+
+    for (row, resource) in resources.iter().enumerate() {
+        let y = -(row as f32) * constants::ROW_HEIGHT;
+
+        // Row separator.
+        gizmos.line_2d(
+            Vec2::new(-50_000.0, y - constants::ROW_HEIGHT * 0.5),
+            Vec2::new(50_000.0,  y - constants::ROW_HEIGHT * 0.5),
+            row_sep,
+        );
+
+        let conflicts = conflict_windows.get(&resource.id);
+
+        for alloc in &plan.allocations {
+            if alloc.resource_id != resource.id {
+                continue;
+            }
+            let Some(wb) = model.work_blocks.get(&alloc.work_block_id) else { continue };
+
+            let x0 = wb.start_day * PIXELS_PER_DAY;
+            let x1 = (wb.start_day + wb.duration_days) * PIXELS_PER_DAY;
+            let w  = (x1 - x0).max(4.0);
+            let cx = x0 + w * 0.5;
+
+            let is_conflicted = conflicts.is_some_and(|cws| {
+                cws.iter().any(|&(cs, ce)| {
+                    wb.start_day < ce && (wb.start_day + wb.duration_days) > cs
+                })
+            });
+
+            let color = if is_conflicted { alloc_conflict } else { alloc_ok };
+            // Draw bar as four border lines (rect outline).
+            let (x_lo, x_hi) = (cx - w * 0.5, cx + w * 0.5);
+            let (y_lo, y_hi) = (y - bar_h * 0.5, y + bar_h * 0.5);
+            gizmos.line_2d(Vec2::new(x_lo, y_lo), Vec2::new(x_hi, y_lo), color);
+            gizmos.line_2d(Vec2::new(x_hi, y_lo), Vec2::new(x_hi, y_hi), color);
+            gizmos.line_2d(Vec2::new(x_hi, y_hi), Vec2::new(x_lo, y_hi), color);
+            gizmos.line_2d(Vec2::new(x_lo, y_hi), Vec2::new(x_lo, y_lo), color);
+        }
+    }
 }
 
 fn setup_demo_schedule(mut model: ResMut<model::Model>, mut commands: Commands) {
@@ -289,6 +381,7 @@ fn camera_nav_ui(
     model: Res<model::Model>,
     scope: Res<schedule::ViewScope>,
     windows: Query<&Window>,
+    mut view_mode: ResMut<schedule::TimelineViewMode>,
 ) {
     let Ok(ctx) = contexts.ctx_mut() else { return };
     egui::Area::new(egui::Id::new("camera_nav"))
@@ -303,6 +396,16 @@ fn camera_nav_ui(
                     if let Some(new_target) = camera::fit_to_blocks(&model, &scope, &windows) {
                         *target = new_target;
                     }
+                }
+                ui.separator();
+                let (label, next) = match *view_mode {
+                    schedule::TimelineViewMode::Task =>
+                        ("Resource View", schedule::TimelineViewMode::Resource),
+                    schedule::TimelineViewMode::Resource =>
+                        ("Task View", schedule::TimelineViewMode::Task),
+                };
+                if ui.small_button(label).clicked() {
+                    *view_mode = next;
                 }
             });
         });
