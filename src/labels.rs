@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use bevy::prelude::*;
 
 use crate::{
+    analysis::ScheduleAnalysis,
     constants::{PIXELS_PER_DAY, ROW_HEIGHT},
     model::{Model, WorkBlockId},
     schedule::{self, Schedule},
@@ -157,4 +158,50 @@ fn nesting_depth(model: &Model, id: WorkBlockId) -> usize {
         }
     }
     0
+}
+
+/// Draws a red connecting line between each pair of blocks that violates a
+/// dependency constraint. The line runs from the predecessor's right edge to
+/// the successor's left edge, using the row Y positions from live `RowLabel`
+/// entities. Blocks with no placed row are skipped.
+pub fn draw_violation_indicators(
+    model: Res<Model>,
+    analysis: Res<ScheduleAnalysis>,
+    mut gizmos: Gizmos,
+    row_q: Query<(&RowLabel, &Transform)>,
+) {
+    if analysis.violations.is_empty() {
+        return;
+    }
+
+    let violation_color = Color::from(LinearRgba::new(3.0, 0.1, 0.1, 1.0));
+
+    let row_y: HashMap<WorkBlockId, f32> = row_q
+        .iter()
+        .map(|(rl, t)| (rl.work_block_id, t.translation.y))
+        .collect();
+
+    for v in &analysis.violations {
+        let Some(pred) = model.work_blocks.get(&v.predecessor) else {
+            continue;
+        };
+        let Some(succ) = model.work_blocks.get(&v.successor) else {
+            continue;
+        };
+        let Some(&pred_y) = row_y.get(&v.predecessor) else {
+            continue;
+        };
+        let Some(&succ_y) = row_y.get(&v.successor) else {
+            continue;
+        };
+
+        let pred_x = (pred.start_day + pred.duration_days) * PIXELS_PER_DAY;
+        let succ_x = succ.start_day * PIXELS_PER_DAY;
+
+        gizmos.line_2d(
+            Vec2::new(pred_x, pred_y),
+            Vec2::new(succ_x, succ_y),
+            violation_color,
+        );
+    }
 }
