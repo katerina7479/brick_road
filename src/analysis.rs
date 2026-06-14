@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use bevy::prelude::Resource;
 
 use crate::model::{
-    DependencyId, DependencyType, Model, Plan, ResourceBlock, ResourceBlockId, WorkBlockId,
+    Day, DependencyId, DependencyType, Model, Plan, ResourceBlock, ResourceBlockId, WorkBlockId,
 };
 
 /// A single dependency whose constraint is not satisfied by the current
@@ -14,17 +14,17 @@ pub struct DependencyViolation {
     pub predecessor: WorkBlockId,
     pub successor: WorkBlockId,
     pub dependency_type: DependencyType,
-    pub lag: f32,
+    pub lag: Day,
     /// Days by which the constraint is violated (always > 0 when present).
-    pub violation_days: f32,
+    pub violation_days: Day,
 }
 
 /// A time window in which total resource demand exceeds available capacity.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ResourceConflict {
     pub resource_id: ResourceBlockId,
-    pub window_start: f32,
-    pub window_end: f32,
+    pub window_start: Day,
+    pub window_end: Day,
     /// Sum of `allocation_factor` for all blocks active in this window.
     pub demand: f32,
     /// Available capacity at this time (from `AvailabilityTimeline`, or 1.0 if none).
@@ -43,7 +43,7 @@ pub struct ScheduleAnalysis {
     /// Zero-float blocks in topological order (from user placement backward pass).
     pub critical_path: Vec<WorkBlockId>,
     /// Total float per block (latest_finish − earliest_finish over user placement).
-    pub float: HashMap<WorkBlockId, f32>,
+    pub float: HashMap<WorkBlockId, Day>,
 }
 
 /// Check every dependency in `model` against the current user-placed
@@ -187,7 +187,7 @@ pub fn analyze_resources(model: &Model, plan: &Plan) -> Vec<ResourceConflict> {
 
 /// Availability factor for resource `rb` at instant `t`.
 /// Gaps in the availability timeline are treated as factor 1.0.
-fn avail_at(rb: &ResourceBlock, t: f32) -> f32 {
+fn avail_at(rb: &ResourceBlock, t: Day) -> f32 {
     for seg in &rb.availability.segments {
         if seg.start <= t && t < seg.end {
             return seg.factor;
@@ -204,11 +204,11 @@ mod tests {
         ResourceType,
     };
 
-    fn est(d: f32) -> Estimate {
+    fn est(d: Day) -> Estimate {
         Estimate { most_likely: d, optimistic: d, pessimistic: d, confidence: 1.0 }
     }
 
-    fn placed(model: &mut Model, name: &str, start: f32, dur: f32) -> WorkBlockId {
+    fn placed(model: &mut Model, name: &str, start: Day, dur: Day) -> WorkBlockId {
         let id = model.create_work_block(name, est(dur));
         let wb = model.work_blocks.get_mut(&id).unwrap();
         wb.start_day = start;

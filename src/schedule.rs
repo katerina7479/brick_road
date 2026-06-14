@@ -5,20 +5,20 @@ use chrono::NaiveDate;
 
 use crate::graph::{CycleError, DependencyGraph};
 use crate::model::{
-    AvailabilitySegment, CalendarConfig, DependencyType, Model, Plan, PlanId, ResourceBlockId,
+    AvailabilitySegment, CalendarConfig, Day, DependencyType, Model, Plan, PlanId, ResourceBlockId,
     WorkBlock, WorkBlockId,
 };
 
 /// Converts a working-day position to a calendar date using the plan's calendar.
 /// Day 0 = `config.start_date`; positive values advance through working days only.
-pub fn working_day_to_date(day: f32, config: &CalendarConfig) -> NaiveDate {
+pub fn working_day_to_date(day: Day, config: &CalendarConfig) -> NaiveDate {
     crate::calendar::day_to_date(day, config)
 }
 
 /// Returns the number of calendar days spanned by `effort_days` of work
 /// starting at `start_day` (in working-day units).  Accounts for weekends
 /// and non-working dates in the plan's calendar.
-pub fn calendar_span(start_day: f32, effort_days: f32, config: &CalendarConfig) -> i64 {
+pub fn calendar_span(start_day: Day, effort_days: Day, config: &CalendarConfig) -> i64 {
     let start_date = working_day_to_date(start_day, config);
     crate::calendar::effort_to_calendar_days(effort_days, start_date, config)
 }
@@ -26,7 +26,7 @@ pub fn calendar_span(start_day: f32, effort_days: f32, config: &CalendarConfig) 
 /// Snaps a computed start day to the start of the next whole working day.
 /// Fractional positions (mid-day) are ceiled so blocks begin at day boundaries.
 /// Whole-number positions are returned unchanged.
-fn snap_to_day_start(t: f32) -> f32 {
+fn snap_to_day_start(t: Day) -> Day {
     t.ceil()
 }
 
@@ -34,10 +34,10 @@ fn snap_to_day_start(t: f32) -> f32 {
 #[derive(Debug, Clone)]
 pub struct ScheduledBlock {
     pub work_block_id: WorkBlockId,
-    pub start_day: f32,
-    pub end_day: f32,
+    pub start_day: Day,
+    pub end_day: Day,
     /// Convenience: end_day - start_day.
-    pub duration_days: f32,
+    pub duration_days: Day,
 }
 
 /// The full output of a scheduler run over a Plan.
@@ -47,7 +47,7 @@ pub struct Schedule {
     /// Placement for every block that was scheduled.
     pub blocks: HashMap<WorkBlockId, ScheduledBlock>,
     /// Day on which the last block finishes.
-    pub total_duration_days: f32,
+    pub total_duration_days: Day,
     /// Ordered sequence of block IDs on the critical path (longest path).
     pub critical_path: Vec<WorkBlockId>,
 }
@@ -70,7 +70,7 @@ pub struct CriticalPathAnalysis {
     pub critical_path: Vec<WorkBlockId>,
     /// Total float (slack) for every active block: `latest_finish − earliest_finish`.
     /// Non-negative in a valid schedule; zero marks a critical block.
-    pub float: HashMap<WorkBlockId, f32>,
+    pub float: HashMap<WorkBlockId, Day>,
 }
 
 /// Returns placed work blocks (duration_days > 0) sorted by ascending
@@ -740,12 +740,12 @@ pub fn resource_leveled_pass(
 /// boundaries of availability segments — the only points where the feasibility
 /// of a window can change.
 fn earliest_feasible_start(
-    min_start: f32,
-    duration: f32,
+    min_start: Day,
+    duration: Day,
     demands: &[(ResourceBlockId, f32)],
     committed: &HashMap<ResourceBlockId, SortedIntervals>,
     resource_blocks: &HashMap<ResourceBlockId, Vec<AvailabilitySegment>>,
-) -> f32 {
+) -> Day {
     if demands.is_empty() || duration <= 0.0 {
         return min_start;
     }
@@ -804,8 +804,8 @@ fn earliest_feasible_start(
 /// overlap the scheduling window, and `SortedIntervals::demand_at` uses binary
 /// search to skip intervals starting after the query point.
 fn feasible_at(
-    t: f32,
-    duration: f32,
+    t: Day,
+    duration: Day,
     demands: &[(ResourceBlockId, f32)],
     committed: &HashMap<ResourceBlockId, SortedIntervals>,
     resource_blocks: &HashMap<ResourceBlockId, Vec<AvailabilitySegment>>,
@@ -854,7 +854,7 @@ fn feasible_at(
 /// `segs` must be sorted ascending by `start` (enforced by the sort in
 /// `resource_leveled_pass`). Binary search finds the containing segment in
 /// O(log n). Gaps in the timeline default to factor 1.0.
-fn avail_at(segs: &[AvailabilitySegment], t: f32) -> f32 {
+fn avail_at(segs: &[AvailabilitySegment], t: Day) -> f32 {
     debug_assert!(
         segs.windows(2).all(|w| w[0].start <= w[1].start),
         "avail_at: segments must be sorted by start"
@@ -903,7 +903,7 @@ impl SortedIntervals {
     /// the resource-leveled scheduler places blocks in topological order, so
     /// start times are non-decreasing and the insertion point is always at the
     /// tail — making each push O(1) amortised for typical workloads.
-    fn push(&mut self, start: f32, end: f32, demand: f32) {
+    fn push(&mut self, start: Day, end: Day, demand: f32) {
         let idx = self.inner.partition_point(|&(s, _, _)| s <= start);
         self.inner.insert(idx, (start, end, demand));
     }
@@ -913,7 +913,7 @@ impl SortedIntervals {
     /// Binary search skips intervals starting after `t` in O(log n); the
     /// remaining scan covers only intervals that started on or before `t`,
     /// filtering to those still active (`end > t`).
-    fn demand_at(&self, t: f32) -> f32 {
+    fn demand_at(&self, t: Day) -> f32 {
         let hi = self.inner.partition_point(|&(s, _, _)| s <= t);
         self.inner[..hi]
             .iter()
@@ -925,7 +925,7 @@ impl SortedIntervals {
     /// Slice of intervals whose `start < window_end`.
     /// All intervals starting at or after `window_end` cannot overlap the window
     /// `[t, window_end)` and are excluded via binary search in O(log n).
-    fn with_start_before(&self, window_end: f32) -> &[(f32, f32, f32)] {
+    fn with_start_before(&self, window_end: Day) -> &[(f32, f32, f32)] {
         let hi = self.inner.partition_point(|&(s, _, _)| s < window_end);
         &self.inner[..hi]
     }
@@ -937,7 +937,7 @@ mod tests {
     use crate::graph::build_graph;
     use crate::model::{Estimate, Model};
 
-    fn est(days: f32) -> Estimate {
+    fn est(days: Day) -> Estimate {
         Estimate {
             most_likely: days,
             optimistic: days,
@@ -1448,7 +1448,7 @@ mod tests {
 
     // --- analyze_user_placement tests ---
 
-    fn place(model: &mut Model, id: WorkBlockId, start: f32, dur: f32) {
+    fn place(model: &mut Model, id: WorkBlockId, start: Day, dur: Day) {
         let wb = model.work_blocks.get_mut(&id).unwrap();
         wb.start_day = start;
         wb.duration_days = dur;
@@ -1597,7 +1597,7 @@ mod tests {
 
     // ── cascade_dependencies tests ──────────────────────────────────────────
 
-    fn placed(m: &mut Model, name: &str, start: f32, dur: f32) -> WorkBlockId {
+    fn placed(m: &mut Model, name: &str, start: Day, dur: Day) -> WorkBlockId {
         let id = m.create_work_block(name, est(dur));
         let wb = m.work_blocks.get_mut(&id).unwrap();
         wb.start_day = start;

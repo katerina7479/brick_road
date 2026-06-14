@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 use chrono::{Datelike, Duration, NaiveDate};
 
-use crate::model::CalendarConfig;
+use crate::model::{CalendarConfig, Day};
 
 /// Returns true if `date` is a working day under `config`.
 ///
@@ -23,7 +23,7 @@ fn is_working_day(date: NaiveDate, working_days_per_week: u8, non_working: &Hash
 ///
 /// Non-working days (weekends beyond `working_days_per_week` and dates in
 /// `non_working_dates`) are skipped during the count.
-pub fn day_to_date(day: f32, config: &CalendarConfig) -> NaiveDate {
+pub fn day_to_date(day: Day, config: &CalendarConfig) -> NaiveDate {
     let working_days = day.floor() as i64;
     let non_working: HashSet<NaiveDate> = config.non_working_dates.iter().copied().collect();
 
@@ -83,7 +83,7 @@ pub fn date_to_day(date: NaiveDate, config: &CalendarConfig) -> i32 {
 ///
 /// Returns the number of calendar days from `start_date` to complete
 /// `effort_days` working days of work.
-pub fn effort_to_calendar_days(effort_days: f32, start_date: NaiveDate, config: &CalendarConfig) -> i64 {
+pub fn effort_to_calendar_days(effort_days: Day, start_date: NaiveDate, config: &CalendarConfig) -> i64 {
     let finish = day_to_date(effort_days, &CalendarConfig {
         start_date,
         ..config.clone()
