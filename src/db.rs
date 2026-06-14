@@ -11,6 +11,18 @@ use crate::model::{
 pub fn create_tables(conn: &Connection) -> Result<()> {
     conn.execute_batch("PRAGMA foreign_keys = ON;")?;
     conn.execute_batch(CREATE_TABLES_SQL)?;
+    // SQLite has no ADD COLUMN IF NOT EXISTS. Run each migration and ignore
+    // the "duplicate column name" error that fires when it already exists.
+    for sql in [
+        "ALTER TABLE work_blocks ADD COLUMN start_day REAL NOT NULL DEFAULT 0",
+        "ALTER TABLE work_blocks ADD COLUMN duration_days REAL NOT NULL DEFAULT 0",
+    ] {
+        match conn.execute_batch(sql) {
+            Ok(()) => {}
+            Err(e) if e.to_string().contains("duplicate column name") => {}
+            Err(e) => return Err(e),
+        }
+    }
     Ok(())
 }
 
