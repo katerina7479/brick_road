@@ -39,6 +39,12 @@ pub struct WorkBlock {
     pub estimate: Estimate,
     /// Alternative implementations of this block (mutually exclusive).
     pub variants: Vec<VariantId>,
+    /// User-defined placement: start offset in days from the plan origin.
+    /// 0.0 until the user manually positions the block.
+    pub start_day: f32,
+    /// User-defined placement: duration in days.
+    /// 0.0 until the user manually sizes the block.
+    pub duration_days: f32,
 }
 
 /// One alternative decomposition of a parent WorkBlock into an ordered sequence
@@ -179,6 +185,8 @@ impl Model {
                 name: name.into(),
                 estimate,
                 variants: vec![],
+                start_day: 0.0,
+                duration_days: 0.0,
             },
         );
         id

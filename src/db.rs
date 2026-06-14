@@ -95,8 +95,9 @@ pub fn save_model(conn: &Connection, model: &Model) -> Result<()> {
         tx.execute(
             "INSERT INTO work_blocks
                  (id, name, estimate_most_likely, estimate_optimistic,
-                  estimate_pessimistic, estimate_confidence)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                  estimate_pessimistic, estimate_confidence,
+                  start_day, duration_days)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             (
                 wb.id.0,
                 &wb.name,
@@ -104,6 +105,8 @@ pub fn save_model(conn: &Connection, model: &Model) -> Result<()> {
                 wb.estimate.optimistic as f64,
                 wb.estimate.pessimistic as f64,
                 wb.estimate.confidence as f64,
+                wb.start_day as f64,
+                wb.duration_days as f64,
             ),
         )?;
     }
@@ -302,7 +305,8 @@ pub fn load_model(conn: &Connection) -> Result<Model> {
     {
         let mut stmt = conn.prepare(
             "SELECT id, name, estimate_most_likely, estimate_optimistic,
-                    estimate_pessimistic, estimate_confidence
+                    estimate_pessimistic, estimate_confidence,
+                    start_day, duration_days
              FROM work_blocks",
         )?;
         let rows = stmt.query_map([], |row| {
@@ -313,10 +317,12 @@ pub fn load_model(conn: &Connection) -> Result<Model> {
                 row.get::<_, f64>(3)?,
                 row.get::<_, f64>(4)?,
                 row.get::<_, f64>(5)?,
+                row.get::<_, f64>(6)?,
+                row.get::<_, f64>(7)?,
             ))
         })?;
         for row in rows {
-            let (id, name, ml, opt, pes, conf) = row?;
+            let (id, name, ml, opt, pes, conf, start_day, duration_days) = row?;
             bump!(id);
             model.work_blocks.insert(
                 WorkBlockId(id as u64),
@@ -330,6 +336,8 @@ pub fn load_model(conn: &Connection) -> Result<Model> {
                         confidence: conf as f32,
                     },
                     variants: vec![],
+                    start_day: start_day as f32,
+                    duration_days: duration_days as f32,
                 },
             );
         }
@@ -973,7 +981,9 @@ CREATE TABLE IF NOT EXISTS work_blocks (
     estimate_most_likely REAL NOT NULL,
     estimate_optimistic  REAL NOT NULL,
     estimate_pessimistic REAL NOT NULL,
-    estimate_confidence  REAL NOT NULL
+    estimate_confidence  REAL NOT NULL,
+    start_day            REAL NOT NULL DEFAULT 0,
+    duration_days        REAL NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS variants (
