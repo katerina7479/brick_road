@@ -57,6 +57,7 @@ fn main() {
             schedule::update_visible_blocks.before(blocks::reconcile_block_sprites),
         )
         .add_systems(PostStartup, blocks::reconcile_block_sprites)
+        .add_systems(PostStartup, sync_weekend_bands.after(blocks::reconcile_block_sprites))
         .add_systems(
             PostStartup,
             labels::spawn_labels.after(blocks::reconcile_block_sprites),
@@ -67,6 +68,7 @@ fn main() {
         )
         .add_systems(Update, (camera_nav_keys, update_camera_target, smooth_camera).chain())
         .add_systems(Update, draw_grid)
+        .add_systems(Update, sync_weekend_bands)
         .add_systems(Update, update_analysis)
         .add_systems(
             Update,
@@ -240,6 +242,70 @@ fn draw_grid(
     }
 
     gizmos.line_2d(Vec2::new(x_left, 0.0), Vec2::new(x_right, 0.0), baseline_color);
+}
+
+/// Marker for weekend and holiday band sprites behind the timeline grid.
+#[derive(Component)]
+struct WeekendBand;
+
+/// Returns `(x_world_position, is_holiday)` for each non-working day band within
+/// the given span.
+///
+/// Week-boundary bands appear every `working_days_per_week` days (`is_holiday = false`).
+/// Calendar holiday bands are placed at the next working-day boundary after each
+/// date in `non_working_dates` (`is_holiday = true`).
+fn weekend_band_positions(span_days: i32, model: &model::Model) -> Vec<(f32, bool)> {
+    let mut positions = Vec::new();
+    let wdpw = model.calendar.working_days_per_week as i32;
+
+    let mut day = wdpw;
+    while day <= span_days + wdpw {
+        positions.push((day as f32 * PIXELS_PER_DAY, false));
+        day += wdpw;
+    }
+
+    for &holiday in &model.calendar.non_working_dates {
+        // date_to_day for a non-working day returns the last working-day count
+        // before it; +1 gives the next working day's index, which is the correct
+        // band position (immediately after the holiday gap).
+        let boundary = calendar::date_to_day(holiday, &model.calendar) + 1;
+        if boundary >= 0 && boundary <= span_days + 10 {
+            positions.push((boundary as f32 * PIXELS_PER_DAY, true));
+        }
+    }
+
+    positions
+}
+
+fn sync_weekend_bands(
+    model: Res<model::Model>,
+    schedule: Res<schedule::Schedule>,
+    mut commands: Commands,
+    band_q: Query<Entity, With<WeekendBand>>,
+) {
+    if !model.is_changed() && !schedule.is_changed() {
+        return;
+    }
+    for e in &band_q {
+        commands.entity(e).despawn();
+    }
+
+    let span = schedule.total_duration_days.ceil() as i32 + 10;
+    let weekend_color = Color::srgba(0.35, 0.30, 0.50, 0.10);
+    let holiday_color = Color::srgba(0.70, 0.25, 0.25, 0.15);
+
+    for (x, is_holiday) in weekend_band_positions(span, &model) {
+        let color = if is_holiday { holiday_color } else { weekend_color };
+        commands.spawn((
+            WeekendBand,
+            Sprite {
+                color,
+                custom_size: Some(Vec2::new(8.0, 20_000.0)),
+                ..default()
+            },
+            Transform::from_xyz(x, 0.0, -0.5),
+        ));
+    }
 }
 
 fn task_view_active(mode: Res<schedule::TimelineViewMode>) -> bool {
@@ -1367,5 +1433,51 @@ fn dep_type_abbrev(t: &model::DependencyType) -> &'static str {
         model::DependencyType::StartToStart   => "S→S",
         model::DependencyType::FinishToFinish => "F→F",
         model::DependencyType::StartToFinish  => "S→F",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn week_bands_at_every_wdpw_boundary() {
+        let model = model::Model::default();
+        let positions = weekend_band_positions(10, &model);
+        let xs: Vec<f32> = positions.iter().filter(|(_, h)| !h).map(|(x, _)| *x).collect();
+        // Default wdpw=5; bands at day 5, 10, 15 (span + wdpw).
+        assert!(xs.contains(&(5.0 * PIXELS_PER_DAY)));
+        assert!(xs.contains(&(10.0 * PIXELS_PER_DAY)));
+        assert!(xs.contains(&(15.0 * PIXELS_PER_DAY)));
+    }
+
+    #[test]
+    fn no_holiday_bands_without_non_working_dates() {
+        let model = model::Model::default();
+        let positions = weekend_band_positions(10, &model);
+        assert_eq!(positions.iter().filter(|(_, h)| *h).count(), 0);
+    }
+
+    #[test]
+    fn holiday_band_placed_at_next_working_day_boundary() {
+        let mut model = model::Model::default();
+        model.calendar.start_date = NaiveDate::from_ymd_opt(2025, 1, 6).unwrap(); // Monday
+        model.calendar.non_working_dates = vec![NaiveDate::from_ymd_opt(2025, 1, 7).unwrap()]; // Tuesday
+        let positions = weekend_band_positions(20, &model);
+        let holiday_xs: Vec<f32> =
+            positions.iter().filter(|(_, h)| *h).map(|(x, _)| *x).collect();
+        // date_to_day(Tue Jan 7 holiday, Mon Jan 6 start) = 0 → boundary = 1 → x = 100.0
+        assert!(holiday_xs.contains(&(1.0 * PIXELS_PER_DAY)));
+    }
+
+    #[test]
+    fn holiday_out_of_span_excluded() {
+        let mut model = model::Model::default();
+        model.calendar.start_date = NaiveDate::from_ymd_opt(2025, 1, 6).unwrap();
+        // Holiday 200 working days out — far beyond span=5.
+        model.calendar.non_working_dates =
+            vec![calendar::day_to_date(200.0, &model.calendar)];
+        let positions = weekend_band_positions(5, &model);
+        assert_eq!(positions.iter().filter(|(_, h)| *h).count(), 0);
     }
 }
