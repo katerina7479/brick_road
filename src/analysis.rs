@@ -1,3 +1,7 @@
+use std::collections::HashMap;
+
+use bevy::prelude::Resource;
+
 use crate::model::{DependencyId, DependencyType, Model, WorkBlockId};
 
 /// A single dependency whose constraint is not satisfied by the current
@@ -13,10 +17,14 @@ pub struct DependencyViolation {
     pub violation_days: f32,
 }
 
-/// All analysis results for a single pass over the model's dependencies.
-#[derive(Debug, Clone, Default, PartialEq)]
+/// All analysis results computed from the current model/plan state.
+#[derive(Debug, Clone, Default, PartialEq, Resource)]
 pub struct ScheduleAnalysis {
     pub violations: Vec<DependencyViolation>,
+    /// Zero-float blocks in topological order (from user placement backward pass).
+    pub critical_path: Vec<WorkBlockId>,
+    /// Total float per block (latest_finish − earliest_finish over user placement).
+    pub float: HashMap<WorkBlockId, f32>,
 }
 
 /// Check every dependency in `model` against the current user-placed
@@ -64,7 +72,7 @@ pub fn analyze_dependencies(model: &Model) -> ScheduleAnalysis {
         }
     }
 
-    ScheduleAnalysis { violations }
+    ScheduleAnalysis { violations, critical_path: vec![], float: HashMap::new() }
 }
 
 #[cfg(test)]

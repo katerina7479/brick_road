@@ -2,6 +2,7 @@ use bevy::prelude::*;
 use bevy_egui::EguiContexts;
 
 use crate::{
+    analysis::ScheduleAnalysis,
     constants::{PIXELS_PER_DAY, ROW_HEIGHT},
     model::WorkBlockId,
     schedule::{self, Schedule},
@@ -40,6 +41,7 @@ pub struct BlockSprite {
 pub fn spawn_block_sprites(
     mut commands: Commands,
     schedule: Res<Schedule>,
+    sa: Res<ScheduleAnalysis>,
     existing: Query<Entity, With<BlockSprite>>,
 ) {
     for entity in &existing {
@@ -49,7 +51,7 @@ pub fn spawn_block_sprites(
     let ordered = schedule::sorted_blocks(&schedule);
 
     let on_critical_path: std::collections::HashSet<WorkBlockId> =
-        schedule.critical_path.iter().copied().collect();
+        sa.critical_path.iter().copied().collect();
 
     for (row, block) in ordered.iter().enumerate() {
         let width = block.duration_days * PIXELS_PER_DAY;
@@ -87,11 +89,12 @@ pub fn spawn_block_sprites(
 ///   3. Palette default
 pub fn sync_block_sprites(
     schedule: Res<Schedule>,
+    sa: Res<ScheduleAnalysis>,
     selected: Res<SelectedBlock>,
     mut query: Query<(&BlockSprite, &mut Transform, &mut Sprite)>,
 ) {
     let on_critical: std::collections::HashSet<WorkBlockId> =
-        schedule.critical_path.iter().copied().collect();
+        sa.critical_path.iter().copied().collect();
 
     for (block_sprite, mut transform, mut sprite) in &mut query {
         let Some(block) = schedule.blocks.get(&block_sprite.work_block_id) else {
