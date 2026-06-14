@@ -108,8 +108,16 @@ pub fn sync_block_sprites(
     sa: Res<ScheduleAnalysis>,
     model: Res<model::Model>,
     selected: Res<SelectedBlock>,
+    camera_q: Query<&Projection, With<Camera2d>>,
     mut query: Query<(&BlockSprite, &mut Transform, &mut Sprite)>,
 ) {
+    let ortho_scale = camera_q
+        .single()
+        .ok()
+        .and_then(|p| if let Projection::Orthographic(o) = p { Some(o.scale) } else { None })
+        .unwrap_or(1.0);
+    let min_width = 8.0 * ortho_scale;
+
     let on_critical: std::collections::HashSet<WorkBlockId> =
         sa.critical_path.iter().copied().collect();
 
@@ -122,7 +130,9 @@ pub fn sync_block_sprites(
         let y = -(block_sprite.row as f32) * ROW_HEIGHT;
         transform.translation.x = x;
         transform.translation.y = y;
-        sprite.custom_size = Some(Vec2::new(width, BLOCK_HEIGHT));
+        // Clamp to minimum screen-space size so blocks stay visible and clickable
+        // at extreme zoom-out. The model's logical width is unchanged.
+        sprite.custom_size = Some(Vec2::new(width.max(min_width), BLOCK_HEIGHT));
 
         let base = PALETTE[block_sprite.row % PALETTE.len()];
         let id = block_sprite.work_block_id;
