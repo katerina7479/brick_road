@@ -36,6 +36,7 @@ fn main() {
         .insert_resource(blocks::ResizeDragState::default())
         .insert_resource(blocks::DepDragState::default())
         .insert_resource(blocks::DeleteConfirmState::default())
+        .insert_resource(blocks::CreateModeState::default())
         .insert_resource(schedule::ViewScope::default())
         .insert_resource(analysis::ScheduleAnalysis::default())
         .add_systems(Startup, (setup_db, setup_camera))
@@ -58,6 +59,11 @@ fn main() {
             Update,
             blocks::handle_block_delete.after(blocks::handle_name_edit),
         )
+        .add_systems(
+            Update,
+            blocks::handle_create_mode_toggle.after(blocks::handle_name_edit),
+        )
+        .add_systems(Update, blocks::handle_create_mode_click_exit)
         .add_systems(
             Update,
             blocks::handle_block_selection.after(blocks::handle_name_edit),
@@ -119,6 +125,7 @@ fn main() {
         .add_systems(EguiPrimaryContextPass, logo_ui)
         .add_systems(EguiPrimaryContextPass, blocks::draw_name_edit_overlay)
         .add_systems(EguiPrimaryContextPass, blocks::draw_delete_confirm_overlay)
+        .add_systems(EguiPrimaryContextPass, blocks::draw_create_mode_overlay)
         .run();
 }
 
@@ -306,6 +313,7 @@ fn side_panel_ui(
     conn: NonSend<rusqlite::Connection>,
     mut cycle_error: Local<Option<String>>,
     mut scope: ResMut<schedule::ViewScope>,
+    mut create_state: ResMut<blocks::CreateModeState>,
 ) {
     let Ok(ctx) = contexts.ctx_mut() else { return };
     egui::SidePanel::left("side_panel")
@@ -377,6 +385,20 @@ fn side_panel_ui(
 
             if let Some(msg) = &*cycle_error {
                 ui.colored_label(egui::Color32::from_rgb(220, 60, 60), msg);
+            }
+
+            ui.separator();
+
+            let label = if create_state.active {
+                "⏹ Creating Blocks [N]"
+            } else {
+                "＋ Create Blocks [N]"
+            };
+            if ui.selectable_label(create_state.active, label).clicked() {
+                create_state.active = !create_state.active;
+                if !create_state.active {
+                    create_state.text_buf.clear();
+                }
             }
 
             ui.separator();
