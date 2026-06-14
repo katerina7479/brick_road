@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use bevy::prelude::*;
 use bevy_egui::EguiContexts;
 
@@ -183,4 +185,78 @@ pub fn handle_block_selection(
     } else {
         clicked
     };
+}
+
+/// Marker: this sprite visualises one `ResourceConflict` window.
+#[derive(Component)]
+pub struct ConflictOverlay;
+
+/// Translucent red used for conflict overlays (behind blocks at z = −0.5).
+const CONFLICT_COLOR: Color = Color::srgba(1.0, 0.12, 0.05, 0.38);
+
+/// Vertical padding above/below the block height when sizing conflict overlays.
+const CONFLICT_PADDING: f32 = 5.0;
+
+/// Despawns all existing `ConflictOverlay` entities and re-spawns one per
+/// `ResourceConflict` in `ScheduleAnalysis`. Each overlay is a translucent red
+/// sprite placed behind blocks (z = −0.5) that spans the conflict time window
+/// in x and the contributing blocks' row range in y.
+pub fn sync_conflict_overlays(
+    mut commands: Commands,
+    sa: Res<ScheduleAnalysis>,
+    model: Res<model::Model>,
+    existing: Query<Entity, With<ConflictOverlay>>,
+) {
+    for entity in &existing {
+        commands.entity(entity).despawn();
+    }
+
+    if sa.resource_conflicts.is_empty() {
+        return;
+    }
+
+    // Row lookup: WorkBlockId → row index (same ordering as block sprites).
+    let ordered = schedule::sorted_blocks(&model);
+    let row_of: HashMap<WorkBlockId, usize> =
+        ordered.iter().enumerate().map(|(i, wb)| (wb.id, i)).collect();
+    let total_rows = ordered.len().max(1);
+
+    for conflict in &sa.resource_conflicts {
+        let width = (conflict.window_end - conflict.window_start) * PIXELS_PER_DAY;
+        if width <= 0.0 {
+            continue;
+        }
+
+        // Compute the y-center and height to cover contributing block rows.
+        let rows: Vec<usize> = conflict
+            .contributing_blocks
+            .iter()
+            .filter_map(|id| row_of.get(id).copied())
+            .collect();
+
+        let (y_center, height) = if rows.is_empty() {
+            // Fall back to covering all rows.
+            let h = (total_rows as f32) * ROW_HEIGHT + CONFLICT_PADDING * 2.0;
+            (-(total_rows as f32 - 1.0) * 0.5 * ROW_HEIGHT, h)
+        } else {
+            let min_row = *rows.iter().min().unwrap() as f32;
+            let max_row = *rows.iter().max().unwrap() as f32;
+            let y_top = -min_row * ROW_HEIGHT + BLOCK_HEIGHT * 0.5 + CONFLICT_PADDING;
+            let y_bot = -max_row * ROW_HEIGHT - BLOCK_HEIGHT * 0.5 - CONFLICT_PADDING;
+            let h = (y_top - y_bot).abs().max(BLOCK_HEIGHT + CONFLICT_PADDING * 2.0);
+            ((y_top + y_bot) * 0.5, h)
+        };
+
+        let x_center = conflict.window_start * PIXELS_PER_DAY + width * 0.5;
+
+        commands.spawn((
+            ConflictOverlay,
+            Sprite {
+                color: CONFLICT_COLOR,
+                custom_size: Some(Vec2::new(width, height)),
+                ..default()
+            },
+            Transform::from_xyz(x_center, y_center, -0.5),
+        ));
+    }
 }

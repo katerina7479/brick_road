@@ -48,6 +48,10 @@ fn main() {
             Update,
             blocks::sync_block_sprites.after(blocks::handle_block_selection),
         )
+        .add_systems(
+            Update,
+            blocks::sync_conflict_overlays.after(update_analysis),
+        )
         .add_systems(Update, labels::draw_nesting_indicators)
         .add_systems(Update, labels::draw_violation_indicators)
         .add_systems(EguiPrimaryContextPass, side_panel_ui)
