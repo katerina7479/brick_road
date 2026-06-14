@@ -45,6 +45,7 @@ fn main() {
         .insert_resource(analysis::ScheduleAnalysis::default())
         .insert_resource(blocks::BlockSpriteMap::default())
         .insert_resource(labels::NestingDepthMap::default())
+        .insert_resource(ResourceDragState::default())
         .add_systems(Startup, (setup_db, setup_camera))
         .add_systems(Startup, setup_demo_schedule.after(setup_db))
         .add_systems(PostStartup, update_analysis.before(blocks::reconcile_block_sprites))
@@ -185,6 +186,7 @@ fn main() {
                 .run_if(task_view_active),
         )
         .add_systems(Update, draw_resource_timeline)
+        .add_systems(Update, handle_resource_drag)
         .add_systems(EguiPrimaryContextPass, side_panel_ui)
         .add_systems(EguiPrimaryContextPass, camera_nav_ui)
         .add_systems(EguiPrimaryContextPass, logo_ui)
@@ -312,6 +314,126 @@ fn task_view_active(mode: Res<schedule::TimelineViewMode>) -> bool {
     *mode == schedule::TimelineViewMode::Task
 }
 
+/// Tracks an in-progress drag in the resource timeline view.
+#[derive(Resource, Default)]
+struct ResourceDragState {
+    /// The block being dragged and the resource row it came from.
+    dragging: Option<(model::WorkBlockId, model::ResourceBlockId)>,
+}
+
+/// Handles drag-to-reassign in the resource view: the user presses on an
+/// allocated block bar and releases over a different resource row to change
+/// which resource that block is assigned to.
+///
+/// Hit-test geometry mirrors `draw_resource_timeline` (same row Y and bar
+/// height). On release, the matching `ResourceAllocation` in the current plan
+/// has its `resource_id` updated and the model is persisted.
+fn handle_resource_drag(
+    mode: Res<schedule::TimelineViewMode>,
+    mut model: ResMut<model::Model>,
+    schedule: Res<schedule::Schedule>,
+    windows: Query<&Window>,
+    camera: Query<(&Camera, &GlobalTransform), With<Camera2d>>,
+    mouse: Res<ButtonInput<MouseButton>>,
+    conn: NonSend<rusqlite::Connection>,
+    mut drag: ResMut<ResourceDragState>,
+    mut egui_ctx: EguiContexts,
+) {
+    if *mode != schedule::TimelineViewMode::Resource {
+        drag.dragging = None;
+        return;
+    }
+    if let Ok(ctx) = egui_ctx.ctx_mut() {
+        if ctx.is_pointer_over_area() {
+            drag.dragging = None;
+            return;
+        }
+    }
+
+    let Ok(window) = windows.single() else { return };
+    let Ok((cam, cam_transform)) = camera.single() else { return };
+    let Some(cursor_pos) = window.cursor_position() else {
+        drag.dragging = None;
+        return;
+    };
+    let Ok(world_pos) = cam.viewport_to_world_2d(cam_transform, cursor_pos) else { return };
+
+    // Sorted resource list — same order as draw_resource_timeline.
+    let mut resource_ids: Vec<model::ResourceBlockId> =
+        model.resource_blocks.keys().copied().collect();
+    resource_ids.sort_by_key(|id| id.0);
+
+    let bar_h = constants::ROW_HEIGHT * 0.65;
+
+    if mouse.just_pressed(MouseButton::Left) {
+        drag.dragging = None;
+        // Clone allocations to avoid borrow conflict with model.work_blocks below.
+        let plan_id = schedule.plan_id;
+        let allocs: Vec<_> = model
+            .plans
+            .get(&plan_id)
+            .map(|p| p.allocations.iter().map(|a| (a.work_block_id, a.resource_id)).collect())
+            .unwrap_or_default();
+
+        'hit: for (block_id, resource_id) in allocs {
+            let Some(row) = resource_ids.iter().position(|&rid| rid == resource_id) else {
+                continue;
+            };
+            let Some(wb) = model.work_blocks.get(&block_id) else { continue };
+            if wb.duration_days <= 0.0 {
+                continue;
+            }
+            let x0 = wb.start_day * PIXELS_PER_DAY;
+            let w = (wb.duration_days * PIXELS_PER_DAY).max(4.0);
+            let cx = x0 + w * 0.5;
+            let y = -(row as f32) * constants::ROW_HEIGHT;
+
+            if world_pos.x >= cx - w * 0.5
+                && world_pos.x <= cx + w * 0.5
+                && world_pos.y >= y - bar_h * 0.5
+                && world_pos.y <= y + bar_h * 0.5
+            {
+                drag.dragging = Some((block_id, resource_id));
+                break 'hit;
+            }
+        }
+        return;
+    }
+
+    if mouse.just_released(MouseButton::Left) {
+        if let Some((block_id, old_resource_id)) = drag.dragging.take() {
+            // Determine which resource row the cursor is over on release.
+            let new_resource_id =
+                resource_ids.iter().enumerate().find_map(|(row, &rid)| {
+                    let y = -(row as f32) * constants::ROW_HEIGHT;
+                    if (world_pos.y - y).abs() <= constants::ROW_HEIGHT * 0.5 {
+                        Some(rid)
+                    } else {
+                        None
+                    }
+                });
+
+            if let Some(new_rid) = new_resource_id {
+                if new_rid != old_resource_id {
+                    let plan_id = schedule.plan_id;
+                    if let Some(plan) = model.plans.get_mut(&plan_id) {
+                        if let Some(alloc) = plan
+                            .allocations
+                            .iter_mut()
+                            .find(|a| a.work_block_id == block_id && a.resource_id == old_resource_id)
+                        {
+                            alloc.resource_id = new_rid;
+                        }
+                    }
+                    if let Err(e) = db::save_model(&conn, &model) {
+                        error!("save_model failed: {e}");
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Draws one row per resource block when `TimelineViewMode::Resource` is active.
 /// Each row shows bars for every work block allocated to that resource, coloured
 /// red if the window overlaps a detected resource conflict.
@@ -320,6 +442,7 @@ fn draw_resource_timeline(
     model: Res<model::Model>,
     schedule: Res<schedule::Schedule>,
     sa: Res<analysis::ScheduleAnalysis>,
+    drag: Res<ResourceDragState>,
     mut gizmos: Gizmos,
 ) {
     if *mode != schedule::TimelineViewMode::Resource {
@@ -375,6 +498,9 @@ fn draw_resource_timeline(
                 })
             });
 
+            let is_dragged = drag
+                .dragging
+                .is_some_and(|(bid, rid)| bid == alloc.work_block_id && rid == alloc.resource_id);
             let color = if is_conflicted { alloc_conflict } else { alloc_ok };
             let (x_lo, x_hi) = (cx - w * 0.5, cx + w * 0.5);
             let (y_lo, y_hi) = (y - bar_h * 0.5, y + bar_h * 0.5);
@@ -382,6 +508,15 @@ fn draw_resource_timeline(
             gizmos.line_2d(Vec2::new(x_hi, y_lo), Vec2::new(x_hi, y_hi), color);
             gizmos.line_2d(Vec2::new(x_hi, y_hi), Vec2::new(x_lo, y_hi), color);
             gizmos.line_2d(Vec2::new(x_lo, y_hi), Vec2::new(x_lo, y_lo), color);
+            if is_dragged {
+                // Bright white outer outline to indicate the block is being dragged.
+                let pad = 3.0;
+                let drag_color = Color::srgba(3.0, 3.0, 3.0, 1.0);
+                gizmos.line_2d(Vec2::new(x_lo - pad, y_lo - pad), Vec2::new(x_hi + pad, y_lo - pad), drag_color);
+                gizmos.line_2d(Vec2::new(x_hi + pad, y_lo - pad), Vec2::new(x_hi + pad, y_hi + pad), drag_color);
+                gizmos.line_2d(Vec2::new(x_hi + pad, y_hi + pad), Vec2::new(x_lo - pad, y_hi + pad), drag_color);
+                gizmos.line_2d(Vec2::new(x_lo - pad, y_hi + pad), Vec2::new(x_lo - pad, y_lo - pad), drag_color);
+            }
         }
     }
 
