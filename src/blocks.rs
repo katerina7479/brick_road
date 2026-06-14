@@ -32,6 +32,7 @@ const LOD_ABBREV_CHARS: usize = 3;
 #[derive(Component)]
 pub struct BlockLabel {
     pub full_name: String,
+    pub work_block_id: WorkBlockId,
 }
 
 /// Dark shadow layer rendered behind `BlockLabel` to ensure legibility on any
@@ -39,6 +40,15 @@ pub struct BlockLabel {
 #[derive(Component)]
 pub struct BlockLabelShadow {
     pub full_name: String,
+    pub work_block_id: WorkBlockId,
+}
+
+/// Marker for the description-dot indicator at a block's top-right corner.
+/// Carries `work_block_id` so `sync_description_dots` can locate and manage it
+/// without traversing the parent–child hierarchy.
+#[derive(Component)]
+pub struct DescriptionDot {
+    pub work_block_id: WorkBlockId,
 }
 
 /// HDR linear palette — one or more channels > 1.0 so the Bloom post-process fires.
@@ -58,6 +68,15 @@ const CRITICAL_PATH_COLOR: LinearRgba = LinearRgba::new(3.0, 2.5, 0.0, 1.0);
 #[derive(Resource, Default)]
 pub struct SelectedBlock(pub Option<WorkBlockId>);
 
+/// Maps each currently-visible `WorkBlockId` to its `BlockSprite` entity.
+///
+/// Maintained by `reconcile_block_sprites` to allow incremental ECS updates:
+/// only newly visible blocks are spawned; only removed blocks are despawned.
+#[derive(Resource, Default)]
+pub struct BlockSpriteMap {
+    pub entities: HashMap<WorkBlockId, Entity>,
+}
+
 /// Tracks inline name-edit state: which block is being renamed and the live text buffer.
 #[derive(Resource, Default)]
 pub struct NameEditState {
@@ -74,23 +93,28 @@ pub struct BlockSprite {
     pub row: usize,
 }
 
-/// Spawns (or re-spawns) one `Sprite` per `ScheduledBlock`.
-/// Row is assigned by ascending `start_day`, then `WorkBlockId` for stability.
-/// Should run once after the `Schedule` resource is first available, and
-/// again whenever the schedule changes.
-pub fn spawn_block_sprites(
+/// Reconciles `BlockSprite` entities against the current `VisibleBlocks` cache.
+///
+/// Fires only when the visible block set or order actually changes (not on every
+/// model mutation such as drag or resize). Despawns entities for blocks that left
+/// the visible set, spawns entities for newly visible blocks, and updates
+/// `BlockSprite.row` in place for blocks that stayed but changed row position.
+///
+/// Transform, size, and color are kept current every frame by `sync_block_sprites`;
+/// this system only manages entity lifetime and row order. Label `full_name` is
+/// kept current by `sync_block_label_names`; description-dot presence is kept
+/// current by `sync_description_dots`.
+pub fn reconcile_block_sprites(
     mut commands: Commands,
     sa: Res<ScheduleAnalysis>,
     model: Res<model::Model>,
     visible_blocks: Res<schedule::VisibleBlocks>,
     mode: Res<schedule::TimelineViewMode>,
-    existing: Query<Entity, With<BlockSprite>>,
+    mut sprite_map: ResMut<BlockSpriteMap>,
+    mut sprite_q: Query<&mut BlockSprite>,
 ) {
-    if !model.is_changed() && !visible_blocks.is_changed() && !mode.is_changed() {
+    if !visible_blocks.is_changed() && !mode.is_changed() {
         return;
-    }
-    for entity in &existing {
-        commands.entity(entity).despawn();
     }
     // In resource view the timeline shows resource rows instead of block rows.
     if *mode == schedule::TimelineViewMode::Resource {
@@ -99,79 +123,181 @@ pub fn spawn_block_sprites(
 
     let on_critical_path: std::collections::HashSet<WorkBlockId> =
         sa.critical_path.iter().copied().collect();
+    let new_id_set: std::collections::HashSet<WorkBlockId> =
+        visible_blocks.ids.iter().copied().collect();
 
+    // Despawn entities for blocks no longer in the visible set.
+    let removed: Vec<WorkBlockId> = sprite_map
+        .entities
+        .keys()
+        .filter(|id| !new_id_set.contains(id))
+        .copied()
+        .collect();
+    for id in removed {
+        if let Some(entity) = sprite_map.entities.remove(&id) {
+            commands.entity(entity).despawn();
+        }
+    }
+
+    // Reconcile each visible block in row order.
     for (row, &id) in visible_blocks.ids.iter().enumerate() {
-        let Some(wb) = model.work_blocks.get(&id) else { continue };
-        let width = wb.duration_days * PIXELS_PER_DAY;
-        // Sprite origin is at its center in Bevy 2D.
-        let x = wb.start_day * PIXELS_PER_DAY + width * 0.5;
-        let y = -(row as f32) * ROW_HEIGHT;
-
-        // Color hierarchy: user color > critical-path gold > palette default.
-        let color = if let Some([r, g, b]) = wb.color {
-            Color::from(LinearRgba::new(r, g, b, 1.0))
-        } else if on_critical_path.contains(&wb.id) {
-            Color::from(LinearRgba::new(3.0, 2.2, 0.1, 1.0))
-        } else {
-            Color::from(PALETTE[row % PALETTE.len()])
+        let Some(wb) = model.work_blocks.get(&id) else {
+            continue;
         };
 
-        let mut block_cmd = commands.spawn((
-            BlockSprite {
-                work_block_id: wb.id,
-                row,
-            },
-            Sprite {
-                color,
-                custom_size: Some(Vec2::new(width, BLOCK_HEIGHT)),
-                ..default()
-            },
-            Transform::from_xyz(x, y, 0.0),
-        ));
+        if let Some(&entity) = sprite_map.entities.get(&id) {
+            // Existing entity: update row in place. Transform and color are
+            // handled every frame by `sync_block_sprites`.
+            if let Ok(mut block_sprite) = sprite_q.get_mut(entity) {
+                block_sprite.row = row;
+            }
+        } else {
+            // New entity: spawn parent sprite + label and dot children.
+            let width = wb.duration_days * PIXELS_PER_DAY;
+            let x = wb.start_day * PIXELS_PER_DAY + width * 0.5;
+            let y = -(row as f32) * ROW_HEIGHT;
 
-        // Inline name label — only when the bar is wide enough to be readable.
-        if width >= MIN_LABEL_WIDTH {
-            let available_chars = ((width - 8.0) / LABEL_CHAR_WIDTH) as usize;
-            let display = if wb.name.chars().count() > available_chars && available_chars > 0 {
-                let truncated: String =
-                    wb.name.chars().take(available_chars.saturating_sub(1)).collect();
-                format!("{truncated}…")
+            let color = if let Some([r, g, b]) = wb.color {
+                Color::from(LinearRgba::new(r, g, b, 1.0))
+            } else if on_critical_path.contains(&id) {
+                Color::from(LinearRgba::new(3.0, 2.2, 0.1, 1.0))
             } else {
-                wb.name.clone()
+                Color::from(PALETTE[row % PALETTE.len()])
             };
-            block_cmd.with_children(|parent| {
-                // Dark shadow for contrast — 1 screen-pixel offset (updated by sync_block_labels).
-                parent.spawn((
-                    BlockLabelShadow { full_name: wb.name.clone() },
-                    Text2d::new(display.clone()),
-                    TextFont { font_size: 13.0, ..default() },
-                    TextColor(Color::srgba(0.0, 0.0, 0.0, 0.6)),
-                    Anchor::CENTER,
-                    Transform::from_xyz(0.0, 0.0, 0.08),
-                ));
-                // White main label centered in the block.
-                parent.spawn((
-                    BlockLabel { full_name: wb.name.clone() },
-                    Text2d::new(display),
-                    TextFont { font_size: 13.0, ..default() },
-                    TextColor(Color::srgba(1.0, 1.0, 1.0, 1.0)),
-                    Anchor::CENTER,
-                    Transform::from_xyz(0.0, 0.0, 0.15),
-                ));
-            });
-        }
 
-        // Small dot indicator at top-right corner when the block has notes.
-        if !wb.description.is_empty() && width >= 12.0 {
-            block_cmd.with_children(|parent| {
-                parent.spawn((
-                    Text2d::new("·"),
-                    TextFont { font_size: 14.0, ..default() },
-                    TextColor(Color::srgba(1.0, 1.0, 1.0, 0.7)),
-                    Anchor::TOP_RIGHT,
-                    Transform::from_xyz(width * 0.5 - 2.0, BLOCK_HEIGHT * 0.5 - 1.0, 0.2),
-                ));
-            });
+            let mut block_cmd = commands.spawn((
+                BlockSprite { work_block_id: id, row },
+                Sprite {
+                    color,
+                    custom_size: Some(Vec2::new(width, BLOCK_HEIGHT)),
+                    ..default()
+                },
+                Transform::from_xyz(x, y, 0.0),
+            ));
+
+            // Inline name label — only when the bar is wide enough to be readable.
+            if width >= MIN_LABEL_WIDTH {
+                let available_chars = ((width - 8.0) / LABEL_CHAR_WIDTH) as usize;
+                let display = if wb.name.chars().count() > available_chars && available_chars > 0 {
+                    let truncated: String =
+                        wb.name.chars().take(available_chars.saturating_sub(1)).collect();
+                    format!("{truncated}…")
+                } else {
+                    wb.name.clone()
+                };
+                let name = wb.name.clone();
+                block_cmd.with_children(|parent| {
+                    // Dark shadow for contrast — 1 screen-pixel offset (updated by sync_block_labels).
+                    parent.spawn((
+                        BlockLabelShadow { full_name: name.clone(), work_block_id: id },
+                        Text2d::new(display.clone()),
+                        TextFont { font_size: 13.0, ..default() },
+                        TextColor(Color::srgba(0.0, 0.0, 0.0, 0.6)),
+                        Anchor::CENTER,
+                        Transform::from_xyz(0.0, 0.0, 0.08),
+                    ));
+                    // White main label centered in the block.
+                    parent.spawn((
+                        BlockLabel { full_name: name, work_block_id: id },
+                        Text2d::new(display),
+                        TextFont { font_size: 13.0, ..default() },
+                        TextColor(Color::srgba(1.0, 1.0, 1.0, 1.0)),
+                        Anchor::CENTER,
+                        Transform::from_xyz(0.0, 0.0, 0.15),
+                    ));
+                });
+            }
+
+            // Small dot indicator at top-right corner when the block has notes.
+            if !wb.description.is_empty() && width >= 12.0 {
+                block_cmd.with_children(|parent| {
+                    parent.spawn((
+                        DescriptionDot { work_block_id: id },
+                        Text2d::new("·"),
+                        TextFont { font_size: 14.0, ..default() },
+                        TextColor(Color::srgba(1.0, 1.0, 1.0, 0.7)),
+                        Anchor::TOP_RIGHT,
+                        Transform::from_xyz(width * 0.5 - 2.0, BLOCK_HEIGHT * 0.5 - 1.0, 0.2),
+                    ));
+                });
+            }
+
+            sprite_map.entities.insert(id, block_cmd.id());
+        }
+    }
+}
+
+/// Keeps `BlockLabel::full_name` and `BlockLabelShadow::full_name` current when
+/// a block is renamed in the model. `sync_block_labels` drives displayed text
+/// from `full_name`; without this system a rename would not reflect until the
+/// next `reconcile_block_sprites` fires (only on visible-set/order changes).
+pub fn sync_block_label_names(
+    model: Res<model::Model>,
+    mut label_q: Query<&mut BlockLabel>,
+    mut shadow_q: Query<&mut BlockLabelShadow>,
+) {
+    if !model.is_changed() {
+        return;
+    }
+    for mut label in &mut label_q {
+        if let Some(wb) = model.work_blocks.get(&label.work_block_id) {
+            if label.full_name != wb.name {
+                label.full_name = wb.name.clone();
+            }
+        }
+    }
+    for mut shadow in &mut shadow_q {
+        if let Some(wb) = model.work_blocks.get(&shadow.work_block_id) {
+            if shadow.full_name != wb.name {
+                shadow.full_name = wb.name.clone();
+            }
+        }
+    }
+}
+
+/// Adds or removes the `DescriptionDot` child entity when a block's description
+/// changes from empty to non-empty (or vice versa).
+///
+/// `reconcile_block_sprites` only fires on visible-set changes, so description
+/// edits between re-orders would otherwise leave the dot out of sync without
+/// this system.
+pub fn sync_description_dots(
+    mut commands: Commands,
+    model: Res<model::Model>,
+    sprite_map: Res<BlockSpriteMap>,
+    dot_q: Query<(Entity, &DescriptionDot)>,
+) {
+    if !model.is_changed() {
+        return;
+    }
+
+    let existing_dots: HashMap<WorkBlockId, Entity> =
+        dot_q.iter().map(|(e, dot)| (dot.work_block_id, e)).collect();
+
+    for (&id, &sprite_entity) in &sprite_map.entities {
+        let Some(wb) = model.work_blocks.get(&id) else {
+            continue;
+        };
+        let width = wb.duration_days * PIXELS_PER_DAY;
+        let should_have_dot = !wb.description.is_empty() && width >= 12.0;
+
+        match (should_have_dot, existing_dots.get(&id)) {
+            (true, None) => {
+                commands.entity(sprite_entity).with_children(|parent| {
+                    parent.spawn((
+                        DescriptionDot { work_block_id: id },
+                        Text2d::new("·"),
+                        TextFont { font_size: 14.0, ..default() },
+                        TextColor(Color::srgba(1.0, 1.0, 1.0, 0.7)),
+                        Anchor::TOP_RIGHT,
+                        Transform::from_xyz(width * 0.5 - 2.0, BLOCK_HEIGHT * 0.5 - 1.0, 0.2),
+                    ));
+                });
+            }
+            (false, Some(&dot_entity)) => {
+                commands.entity(dot_entity).despawn();
+            }
+            _ => {}
         }
     }
 }
@@ -1295,8 +1421,8 @@ pub fn handle_name_edit(
 /// Renders an egui `TextEdit` overlay anchored to the editing block's screen
 /// position while `NameEditState::editing` is `Some`. Commits on Enter or
 /// focus-loss; cancels on Escape. On commit, persists to model + DB; the model
-/// change triggers `spawn_block_sprites` which re-creates the `BlockLabel` with
-/// the updated name automatically.
+/// change triggers `sync_block_label_names` which updates `BlockLabel::full_name`
+/// so the display text reflects the new name on the next frame.
 pub fn draw_name_edit_overlay(
     mut contexts: EguiContexts,
     mut name_edit: ResMut<NameEditState>,
@@ -1402,6 +1528,70 @@ pub fn handle_block_delete(
 /// Shows a confirmation dialog while `DeleteConfirmState::pending` is set.
 /// On confirm: removes the block and all references from the model, persists to
 /// DB, and clears the selection. On cancel: dismisses without deleting.
+/// Returns true if `id` has any variant with at least one child work block.
+fn has_variant_children(model: &model::Model, id: WorkBlockId) -> bool {
+    model
+        .work_blocks
+        .get(&id)
+        .is_some_and(|wb| {
+            wb.variants
+                .iter()
+                .any(|&vid| model.variants.get(&vid).is_some_and(|v| !v.children.is_empty()))
+        })
+}
+
+/// Remove a work block and all of its descendants (variants' children,
+/// recursively) from the model, cleaning up all cross-references.
+///
+/// Deleted:
+/// - The work block itself and every descendant `WorkBlock`
+/// - All `Dependency` edges that touch any deleted block
+/// - Entries in `plan.root_blocks`, `plan.selected_variants`, and
+///   `plan.allocations` for every deleted block
+/// - All `Variant` records whose parent is any deleted block
+/// - References to deleted blocks in the `children` lists of surviving variants
+pub fn delete_work_block(model: &mut model::Model, id: WorkBlockId) {
+    // BFS to collect the block and all of its variant descendants.
+    let mut to_delete: Vec<WorkBlockId> = vec![id];
+    let mut i = 0;
+    while i < to_delete.len() {
+        let cur = to_delete[i];
+        if let Some(wb) = model.work_blocks.get(&cur) {
+            for &var_id in &wb.variants.clone() {
+                if let Some(var) = model.variants.get(&var_id) {
+                    for &child_id in &var.children.clone() {
+                        if !to_delete.contains(&child_id) {
+                            to_delete.push(child_id);
+                        }
+                    }
+                }
+            }
+        }
+        i += 1;
+    }
+    let delete_set: HashSet<WorkBlockId> = to_delete.iter().copied().collect();
+
+    for &del_id in &to_delete {
+        model.work_blocks.remove(&del_id);
+    }
+    model.dependencies.retain(|_, dep| {
+        !delete_set.contains(&dep.predecessor) && !delete_set.contains(&dep.successor)
+    });
+    for plan in model.plans.values_mut() {
+        plan.root_blocks.retain(|bid| !delete_set.contains(bid));
+        for &del_id in &to_delete {
+            plan.selected_variants.remove(&del_id);
+        }
+        plan.allocations.retain(|a| !delete_set.contains(&a.work_block_id));
+    }
+    // Remove deleted IDs from surviving variants' children lists before
+    // removing the variants themselves, so the retain below is consistent.
+    for variant in model.variants.values_mut() {
+        variant.children.retain(|bid| !delete_set.contains(bid));
+    }
+    model.variants.retain(|_, v| !delete_set.contains(&v.parent));
+}
+
 pub fn draw_delete_confirm_overlay(
     mut contexts: EguiContexts,
     mut delete_confirm: ResMut<DeleteConfirmState>,
@@ -1416,6 +1606,7 @@ pub fn draw_delete_confirm_overlay(
         .get(&pending_id)
         .map(|wb| wb.name.clone())
         .unwrap_or_else(|| "Unknown".to_string());
+    let has_children = has_variant_children(&model, pending_id);
 
     let Ok(ctx) = contexts.ctx_mut() else { return };
 
@@ -1429,6 +1620,9 @@ pub fn draw_delete_confirm_overlay(
         .show(ctx, |ui| {
             ui.label(format!("Delete \"{}\"?", block_name));
             ui.label("This will also remove all its dependencies.");
+            if has_children {
+                ui.label("All variant child blocks will be deleted too.");
+            }
             ui.separator();
             ui.horizontal(|ui| {
                 if ui.button("Delete").clicked() {
@@ -1441,21 +1635,7 @@ pub fn draw_delete_confirm_overlay(
         });
 
     if confirmed {
-        model.work_blocks.remove(&pending_id);
-        model
-            .dependencies
-            .retain(|_, dep| dep.predecessor != pending_id && dep.successor != pending_id);
-        for plan in model.plans.values_mut() {
-            plan.root_blocks.retain(|&bid| bid != pending_id);
-            plan.selected_variants.remove(&pending_id);
-            plan.allocations.retain(|a| a.work_block_id != pending_id);
-        }
-        for variant in model.variants.values_mut() {
-            variant.children.retain(|&bid| bid != pending_id);
-        }
-        // Remove variants owned by the deleted block to avoid orphans.
-        model.variants.retain(|_, v| v.parent != pending_id);
-
+        delete_work_block(&mut model, pending_id);
         if let Err(e) = db::save_model(&conn, &model) {
             error!("save_model failed: {e}");
         }
@@ -1463,6 +1643,106 @@ pub fn draw_delete_confirm_overlay(
         delete_confirm.pending = None;
     } else if cancelled {
         delete_confirm.pending = None;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{Estimate, Model};
+
+    fn est() -> Estimate {
+        Estimate { most_likely: 5.0, optimistic: 3.0, pessimistic: 8.0, confidence: 0.8 }
+    }
+
+    #[test]
+    fn delete_simple_block_removes_it() {
+        let mut m = Model::default();
+        let a = m.create_work_block("A", est());
+        delete_work_block(&mut m, a);
+        assert!(!m.work_blocks.contains_key(&a));
+    }
+
+    #[test]
+    fn delete_block_with_variants_removes_children() {
+        let mut m = Model::default();
+        let parent = m.create_work_block("P", est());
+        let var = m.create_variant("V", parent);
+        let child = m.create_work_block("C", est());
+        m.work_blocks.get_mut(&parent).unwrap().variants.push(var);
+        m.variants.get_mut(&var).unwrap().children.push(child);
+
+        delete_work_block(&mut m, parent);
+
+        assert!(!m.work_blocks.contains_key(&parent), "parent removed");
+        assert!(!m.work_blocks.contains_key(&child), "child removed");
+        assert!(!m.variants.contains_key(&var), "variant removed");
+    }
+
+    #[test]
+    fn delete_block_cleans_plan_root_and_allocations() {
+        let mut m = Model::default();
+        let wid = m.create_world("w");
+        let pid = m.create_plan("p", wid);
+        let a = m.create_work_block("A", est());
+        m.plans.get_mut(&pid).unwrap().root_blocks.push(a);
+
+        delete_work_block(&mut m, a);
+
+        assert!(!m.plans[&pid].root_blocks.contains(&a));
+    }
+
+    #[test]
+    fn delete_block_removes_its_dependencies() {
+        use crate::model::DependencyType;
+        let mut m = Model::default();
+        let a = m.create_work_block("A", est());
+        let b = m.create_work_block("B", est());
+        let dep = m.create_dependency(a, b, DependencyType::FinishToStart);
+
+        delete_work_block(&mut m, a);
+
+        assert!(!m.dependencies.contains_key(&dep));
+        assert!(m.work_blocks.contains_key(&b), "B survives");
+    }
+
+    #[test]
+    fn delete_recursive_two_levels() {
+        let mut m = Model::default();
+        let parent = m.create_work_block("P", est());
+        let var = m.create_variant("V", parent);
+        let child = m.create_work_block("C", est());
+        let var2 = m.create_variant("V2", child);
+        let grandchild = m.create_work_block("GC", est());
+        m.work_blocks.get_mut(&parent).unwrap().variants.push(var);
+        m.variants.get_mut(&var).unwrap().children.push(child);
+        m.work_blocks.get_mut(&child).unwrap().variants.push(var2);
+        m.variants.get_mut(&var2).unwrap().children.push(grandchild);
+
+        delete_work_block(&mut m, parent);
+
+        assert!(!m.work_blocks.contains_key(&parent));
+        assert!(!m.work_blocks.contains_key(&child));
+        assert!(!m.work_blocks.contains_key(&grandchild));
+        assert!(m.variants.is_empty());
+    }
+
+    #[test]
+    fn has_variant_children_false_when_no_variants() {
+        let mut m = Model::default();
+        let a = m.create_work_block("A", est());
+        assert!(!has_variant_children(&m, a));
+    }
+
+    #[test]
+    fn has_variant_children_true_when_has_children() {
+        let mut m = Model::default();
+        let parent = m.create_work_block("P", est());
+        let var = m.create_variant("V", parent);
+        let child = m.create_work_block("C", est());
+        m.work_blocks.get_mut(&parent).unwrap().variants.push(var);
+        m.variants.get_mut(&var).unwrap().children.push(child);
+        assert!(has_variant_children(&m, parent));
     }
 }
 
@@ -1597,9 +1877,10 @@ pub fn draw_create_mode_overlay(
     }
 }
 
-/// Shows a description tooltip when the pointer hovers over a block that has notes.
-/// Renders an egui Area near the cursor so it floats above all other UI.
-pub fn draw_description_tooltip(
+/// Shows a stats tooltip when the pointer hovers over a block sprite.
+/// Displays start day, end day, duration, estimate range, and (if set) the
+/// block's description. Renders an egui Area near the cursor.
+pub fn draw_block_tooltip(
     mut egui_ctx: EguiContexts,
     model: Res<model::Model>,
     windows: Query<&Window>,
@@ -1625,17 +1906,41 @@ pub fn draw_description_tooltip(
             && world_pos.y <= center.y + half.y
         {
             let Some(wb) = model.work_blocks.get(&block_sprite.work_block_id) else { continue };
-            if wb.description.is_empty() {
-                return;
-            }
             let Some(screen_pos) = ctx.pointer_hover_pos() else { return };
-            egui::Area::new(egui::Id::new("block_desc_tooltip"))
+            let end_day = wb.start_day + wb.duration_days;
+            let est = &wb.estimate;
+            egui::Area::new(egui::Id::new("block_stats_tooltip"))
                 .order(egui::Order::Tooltip)
                 .fixed_pos(screen_pos + egui::Vec2::new(14.0, 14.0))
                 .show(ctx, |ui| {
                     egui::Frame::popup(ui.style()).show(ui, |ui| {
-                        ui.set_max_width(300.0);
-                        ui.label(&wb.description);
+                        ui.set_max_width(320.0);
+                        ui.strong(&wb.name);
+                        ui.separator();
+                        egui::Grid::new("block_tooltip_grid")
+                            .num_columns(2)
+                            .spacing([8.0, 2.0])
+                            .show(ui, |ui| {
+                                ui.label("Start:");
+                                ui.label(format!("day {:.1}", wb.start_day));
+                                ui.end_row();
+                                ui.label("End:");
+                                ui.label(format!("day {:.1}", end_day));
+                                ui.end_row();
+                                ui.label("Duration:");
+                                ui.label(format!("{:.1} days", wb.duration_days));
+                                ui.end_row();
+                                ui.label("Estimate:");
+                                ui.label(format!(
+                                    "opt {:.1} / ml {:.1} / pess {:.1}",
+                                    est.optimistic, est.most_likely, est.pessimistic
+                                ));
+                                ui.end_row();
+                            });
+                        if !wb.description.is_empty() {
+                            ui.separator();
+                            ui.label(&wb.description);
+                        }
                     });
                 });
             return;

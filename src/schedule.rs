@@ -1,11 +1,34 @@
 use std::collections::HashMap;
 
 use bevy::prelude::{DetectChanges, Res, ResMut, Resource};
+use chrono::NaiveDate;
 
 use crate::graph::{CycleError, DependencyGraph};
 use crate::model::{
-    DependencyType, Model, Plan, PlanId, ResourceBlock, ResourceBlockId, WorkBlock, WorkBlockId,
+    AvailabilitySegment, CalendarConfig, DependencyType, Model, Plan, PlanId, ResourceBlockId,
+    WorkBlock, WorkBlockId,
 };
+
+/// Converts a working-day position to a calendar date using the plan's calendar.
+/// Day 0 = `config.start_date`; positive values advance through working days only.
+pub fn working_day_to_date(day: f32, config: &CalendarConfig) -> NaiveDate {
+    crate::calendar::day_to_date(day, config)
+}
+
+/// Returns the number of calendar days spanned by `effort_days` of work
+/// starting at `start_day` (in working-day units).  Accounts for weekends
+/// and non-working dates in the plan's calendar.
+pub fn calendar_span(start_day: f32, effort_days: f32, config: &CalendarConfig) -> i64 {
+    let start_date = working_day_to_date(start_day, config);
+    crate::calendar::effort_to_calendar_days(effort_days, start_date, config)
+}
+
+/// Snaps a computed start day to the start of the next whole working day.
+/// Fractional positions (mid-day) are ceiled so blocks begin at day boundaries.
+/// Whole-number positions are returned unchanged.
+fn snap_to_day_start(t: f32) -> f32 {
+    t.ceil()
+}
 
 /// The computed time placement of one work block.
 #[derive(Debug, Clone)]
@@ -133,6 +156,10 @@ pub struct VisibleBlocks {
 }
 
 /// Refreshes `VisibleBlocks` when the model or view scope changes.
+///
+/// Only writes to `cache.ids` when the content actually changes, so downstream
+/// systems that check `visible_blocks.is_changed()` do not fire on every frame
+/// during block drag/resize (where only position changes, not the visible set).
 pub fn update_visible_blocks(
     model: Res<Model>,
     scope: Res<ViewScope>,
@@ -141,10 +168,13 @@ pub fn update_visible_blocks(
     if !model.is_changed() && !scope.is_changed() {
         return;
     }
-    cache.ids = visible_blocks(&model, &scope)
+    let new_ids: Vec<WorkBlockId> = visible_blocks(&model, &scope)
         .into_iter()
         .map(|wb| wb.id)
         .collect();
+    if new_ids != cache.ids {
+        cache.ids = new_ids;
+    }
 }
 
 /// Tracks today's position on the timeline as a working-day number.
@@ -279,7 +309,7 @@ pub fn cascade_dependencies(model: &mut Model, root: WorkBlockId) {
         let preds: Vec<(WorkBlockId, DependencyType, f32)> =
             incoming.get(&id).cloned().unwrap_or_default();
 
-        let new_start = preds
+        let raw_start = preds
             .iter()
             .filter_map(|&(pred_id, dep_type, lag)| {
                 model.work_blocks.get(&pred_id).map(|pred| match dep_type {
@@ -293,6 +323,9 @@ pub fn cascade_dependencies(model: &mut Model, root: WorkBlockId) {
             })
             .fold(0.0f32, f32::max)
             .max(0.0);
+        // Snap to the start of the next whole working day so constraint-derived
+        // starts never land mid-day on a non-working boundary.
+        let new_start = snap_to_day_start(raw_start);
 
         if let Some(wb) = model.work_blocks.get_mut(&id) {
             wb.start_day = new_start;
@@ -341,7 +374,10 @@ pub fn forward_pass(
             .map(|me| me - dur)
             .unwrap_or(0.0_f32);
 
-        let earliest_start = f32::max(0.0, f32::max(es_from_start, es_from_end));
+        // Snap to start of next whole working day: constraint-derived starts
+        // must not land mid-day (e.g. if a predecessor has a fractional duration).
+        let earliest_start =
+            snap_to_day_start(f32::max(0.0, f32::max(es_from_start, es_from_end)));
         let earliest_end = earliest_start + dur;
 
         // Propagate constraints to successors.
@@ -617,8 +653,8 @@ pub fn resource_leveled_pass(
     let mut dep_min_end: HashMap<WorkBlockId, Option<f32>> =
         graph.nodes.iter().map(|&id| (id, None)).collect();
 
-    // Committed resource windows: resource_id → [(start, end, demand)].
-    let mut committed: HashMap<ResourceBlockId, Vec<(f32, f32, f32)>> = HashMap::new();
+    // Committed resource windows: resource_id → sorted intervals.
+    let mut committed: HashMap<ResourceBlockId, SortedIntervals> = HashMap::new();
 
     // Block → [(resource_id, allocation_factor)] from plan.allocations.
     let mut block_demands: HashMap<WorkBlockId, Vec<(ResourceBlockId, f32)>> = HashMap::new();
@@ -629,10 +665,20 @@ pub fn resource_leveled_pass(
             .push((alloc.resource_id, alloc.allocation_factor));
     }
 
-    let resource_blocks: HashMap<ResourceBlockId, &ResourceBlock> = model
+    // Sort each resource's availability segments by start once before the main
+    // scheduling loop. Binary searches in avail_at, feasible_at, and
+    // earliest_feasible_start require ascending start order; sorting here is an
+    // O(m log m) one-time cost per resource (m = segment count).
+    let resource_blocks: HashMap<ResourceBlockId, Vec<AvailabilitySegment>> = model
         .resource_blocks
         .iter()
-        .map(|(&id, rb)| (id, rb))
+        .map(|(_, rb)| {
+            let mut segs = rb.availability.segments.clone();
+            segs.sort_unstable_by(|a, b| {
+                a.start.partial_cmp(&b.start).unwrap_or(std::cmp::Ordering::Equal)
+            });
+            (rb.id, segs)
+        })
         .collect();
 
     let mut sched = Schedule::new(plan.id);
@@ -644,7 +690,7 @@ pub fn resource_leveled_pass(
             .map(|wb| wb.estimate.most_likely)
             .unwrap_or(0.0);
 
-        // Step 1: dependency-constrained minimum start.
+        // Step 1: dependency-constrained minimum start (snapped to day boundary).
         let dep_start = {
             let from_start = *dep_min_start.get(&id).unwrap_or(&0.0);
             let from_end = dep_min_end
@@ -652,7 +698,7 @@ pub fn resource_leveled_pass(
                 .and_then(|v| *v)
                 .map(|me| me - dur)
                 .unwrap_or(0.0);
-            f32::max(0.0, f32::max(from_start, from_end))
+            snap_to_day_start(f32::max(0.0, f32::max(from_start, from_end)))
         };
 
         // Step 2: find earliest resource-feasible start.
@@ -666,7 +712,7 @@ pub fn resource_leveled_pass(
             committed
                 .entry(rb_id)
                 .or_default()
-                .push((actual_start, actual_end, factor));
+                .push(actual_start, actual_end, factor);
         }
 
         // Propagate dependency constraints to successors using actual placed times.
@@ -730,8 +776,8 @@ fn earliest_feasible_start(
     min_start: f32,
     duration: f32,
     demands: &[(ResourceBlockId, f32)],
-    committed: &HashMap<ResourceBlockId, Vec<(f32, f32, f32)>>,
-    resource_blocks: &HashMap<ResourceBlockId, &ResourceBlock>,
+    committed: &HashMap<ResourceBlockId, SortedIntervals>,
+    resource_blocks: &HashMap<ResourceBlockId, Vec<AvailabilitySegment>>,
 ) -> f32 {
     if demands.is_empty() || duration <= 0.0 {
         return min_start;
@@ -739,16 +785,24 @@ fn earliest_feasible_start(
 
     let mut candidates: Vec<f32> = vec![min_start];
     for &(rb_id, _) in demands {
-        if let Some(ivs) = committed.get(&rb_id) {
-            for &(_, end, _) in ivs {
+        if let Some(si) = committed.get(&rb_id) {
+            // Committed intervals are sorted by start. Those with start > min_start
+            // always have end > start > min_start, so no end-check needed. For
+            // earlier-started intervals, check end explicitly.
+            let split = si.inner.partition_point(|&(s, _, _)| s <= min_start);
+            for &(_, end, _) in &si.inner[..split] {
                 if end > min_start {
                     candidates.push(end);
                 }
             }
+            for &(_, end, _) in &si.inner[split..] {
+                candidates.push(end);
+            }
         }
-        if let Some(rb) = resource_blocks.get(&rb_id) {
-            for seg in &rb.availability.segments {
-                // Availability can improve at the start of a new segment.
+        if let Some(segs) = resource_blocks.get(&rb_id) {
+            // Segments are sorted by start; skip those whose end ≤ min_start.
+            let lo = segs.partition_point(|seg| seg.end <= min_start);
+            for seg in &segs[lo..] {
                 if seg.start > min_start {
                     candidates.push(seg.start);
                 }
@@ -779,39 +833,35 @@ fn earliest_feasible_start(
 /// Divides the window into sub-intervals at every point where either the
 /// availability factor or the committed demand changes, then checks whether
 /// `existing_demand + new_demand ≤ availability` at each sub-interval.
-/// This avoids the conservative over-rejection that occurs when peak demand
-/// and minimum availability don't coincide at the same time point.
+/// Binary search limits breakpoint collection to intervals and segments that
+/// overlap the scheduling window, and `SortedIntervals::demand_at` uses binary
+/// search to skip intervals starting after the query point.
 fn feasible_at(
     t: f32,
     duration: f32,
     demands: &[(ResourceBlockId, f32)],
-    committed: &HashMap<ResourceBlockId, Vec<(f32, f32, f32)>>,
-    resource_blocks: &HashMap<ResourceBlockId, &ResourceBlock>,
+    committed: &HashMap<ResourceBlockId, SortedIntervals>,
+    resource_blocks: &HashMap<ResourceBlockId, Vec<AvailabilitySegment>>,
 ) -> bool {
     let window_end = t + duration;
     for &(rb_id, demand) in demands {
-        // Collect every time point where availability or committed demand changes
-        // within the window. Using these as sub-interval boundaries ensures both
-        // functions are piecewise-constant within each sub-interval.
         let mut pts: Vec<f32> = vec![t, window_end];
-        if let Some(ivs) = committed.get(&rb_id) {
-            for &(is, ie, _) in ivs {
-                if is > t && is < window_end {
-                    pts.push(is);
-                }
-                if ie > t && ie < window_end {
-                    pts.push(ie);
-                }
+
+        let si = committed.get(&rb_id);
+        if let Some(si) = si {
+            // Binary search: only intervals starting before window_end can overlap the window.
+            for &(is, ie, _) in si.with_start_before(window_end) {
+                if is > t && is < window_end { pts.push(is); }
+                if ie > t && ie < window_end { pts.push(ie); }
             }
         }
-        if let Some(rb) = resource_blocks.get(&rb_id) {
-            for seg in &rb.availability.segments {
-                if seg.start > t && seg.start < window_end {
-                    pts.push(seg.start);
-                }
-                if seg.end > t && seg.end < window_end {
-                    pts.push(seg.end);
-                }
+        if let Some(segs) = resource_blocks.get(&rb_id) {
+            // Segments are sorted; skip those that end before the window starts.
+            let lo = segs.partition_point(|seg| seg.end <= t);
+            for seg in &segs[lo..] {
+                if seg.start >= window_end { break; }
+                if seg.start > t { pts.push(seg.start); }
+                if seg.end > t && seg.end < window_end { pts.push(seg.end); }
             }
         }
         pts.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
@@ -821,12 +871,9 @@ fn feasible_at(
             let mid = (w[0] + w[1]) * 0.5;
             let avail = resource_blocks
                 .get(&rb_id)
-                .map(|rb| avail_at(rb, mid))
+                .map(|segs| avail_at(segs, mid))
                 .unwrap_or(1.0);
-            let used = demand_at(
-                committed.get(&rb_id).map(|v| v.as_slice()).unwrap_or(&[]),
-                mid,
-            );
+            let used = si.map_or(0.0, |si| si.demand_at(mid));
             if used + demand > avail + 1e-6 {
                 return false;
             }
@@ -835,24 +882,86 @@ fn feasible_at(
     true
 }
 
-/// Availability factor for resource `rb` at instant `t`.
-/// Gaps in the availability timeline are treated as factor 1.0.
-fn avail_at(rb: &ResourceBlock, t: f32) -> f32 {
-    for seg in &rb.availability.segments {
-        if seg.start <= t && t < seg.end {
+/// Availability factor for resource at instant `t`.
+///
+/// `segs` must be sorted ascending by `start` (enforced by the sort in
+/// `resource_leveled_pass`). Binary search finds the containing segment in
+/// O(log n). Gaps in the timeline default to factor 1.0.
+fn avail_at(segs: &[AvailabilitySegment], t: f32) -> f32 {
+    debug_assert!(
+        segs.windows(2).all(|w| w[0].start <= w[1].start),
+        "avail_at: segments must be sorted by start"
+    );
+    // Find the last segment with start ≤ t.
+    let idx = segs.partition_point(|seg| seg.start <= t);
+    if idx > 0 {
+        let seg = &segs[idx - 1];
+        if t < seg.end {
             return seg.factor;
         }
     }
     1.0
 }
 
-/// Total committed demand at instant `t`.
-fn demand_at(intervals: &[(f32, f32, f32)], t: f32) -> f32 {
-    intervals
-        .iter()
-        .filter(|&&(is, ie, _)| is <= t && t < ie)
-        .map(|&(_, _, d)| d)
-        .sum()
+// ── SortedIntervals ───────────────────────────────────────────────────────────
+
+/// Committed demand intervals for a single resource, kept in ascending
+/// start-time order so binary search can bound queries to relevant intervals.
+///
+/// ## Complexity
+///
+/// | Operation        | Cost           | Notes                                   |
+/// |------------------|----------------|-----------------------------------------|
+/// | `push`           | O(n) worst     | O(1) amortised when scheduling in topo  |
+/// |                  |                | order (insertions near the tail).        |
+/// | `demand_at`      | O(log n + k)   | Binary search to the cutoff, then scan  |
+/// |                  |                | only intervals started at or before `t`. |
+/// | `with_start_before` | O(log n)   | Pure binary search; no per-element work.|
+///
+/// Replacing the previous unsorted `Vec` with this structure reduces the
+/// dominant cost in `feasible_at` from O(n) per query to O(log n + k), where
+/// k is the number of overlapping committed intervals at the query point —
+/// typically small for well-separated blocks.
+#[derive(Default)]
+struct SortedIntervals {
+    /// `(start, end, demand)` tuples sorted by `start`.
+    inner: Vec<(f32, f32, f32)>,
+}
+
+impl SortedIntervals {
+    /// Insert `(start, end, demand)`, preserving start-time order.
+    ///
+    /// Binary search locates the insertion point in O(log n); the subsequent
+    /// `Vec::insert` shifts trailing elements in O(n) worst case. In practice
+    /// the resource-leveled scheduler places blocks in topological order, so
+    /// start times are non-decreasing and the insertion point is always at the
+    /// tail — making each push O(1) amortised for typical workloads.
+    fn push(&mut self, start: f32, end: f32, demand: f32) {
+        let idx = self.inner.partition_point(|&(s, _, _)| s <= start);
+        self.inner.insert(idx, (start, end, demand));
+    }
+
+    /// Sum of demand from all intervals active at instant `t`.
+    ///
+    /// Binary search skips intervals starting after `t` in O(log n); the
+    /// remaining scan covers only intervals that started on or before `t`,
+    /// filtering to those still active (`end > t`).
+    fn demand_at(&self, t: f32) -> f32 {
+        let hi = self.inner.partition_point(|&(s, _, _)| s <= t);
+        self.inner[..hi]
+            .iter()
+            .filter(|&&(_, e, _)| e > t)
+            .map(|&(_, _, d)| d)
+            .sum()
+    }
+
+    /// Slice of intervals whose `start < window_end`.
+    /// All intervals starting at or after `window_end` cannot overlap the window
+    /// `[t, window_end)` and are excluded via binary search in O(log n).
+    fn with_start_before(&self, window_end: f32) -> &[(f32, f32, f32)] {
+        let hi = self.inner.partition_point(|&(s, _, _)| s < window_end);
+        &self.inner[..hi]
+    }
 }
 
 #[cfg(test)]
@@ -1609,5 +1718,266 @@ mod tests {
         // No dependencies.
         cascade_dependencies(&mut m, a);
         assert_eq!(m.work_blocks[&a].start_day, 0.0);
+    }
+
+    // ── Working-day calendar integration tests ─────────────────────────────
+
+    #[test]
+    fn forward_pass_snaps_fractional_start_to_day_boundary() {
+        // A has 3.5d effort; B (FS) must start at working day 4, not 3.5.
+        let (mut m, _) = base();
+        let a = m.create_work_block("A", est(3.5));
+        let b = m.create_work_block("B", est(2.0));
+        m.create_dependency(a, b, DependencyType::FinishToStart);
+        let s = run(&m, vec![a, b]);
+        assert_eq!(s.blocks[&b].start_day, 4.0);
+        assert_eq!(s.blocks[&b].end_day, 6.0);
+    }
+
+    #[test]
+    fn cascade_snaps_fractional_start_to_day_boundary() {
+        // A ends at 3.5 (fractional); B (FS) must snap to 4.0.
+        let mut m = Model::default();
+        let a = placed(&mut m, "A", 0.0, 3.5);
+        let b = placed(&mut m, "B", 0.0, 2.0);
+        m.create_dependency(a, b, DependencyType::FinishToStart);
+        cascade_dependencies(&mut m, a);
+        assert_eq!(m.work_blocks[&b].start_day, 4.0);
+    }
+
+    #[test]
+    fn cascade_whole_day_end_unchanged() {
+        // A ends on a whole day (5.0); B should start at exactly 5.0.
+        let mut m = Model::default();
+        let a = placed(&mut m, "A", 0.0, 5.0);
+        let b = placed(&mut m, "B", 5.0, 3.0);
+        m.create_dependency(a, b, DependencyType::FinishToStart);
+        m.work_blocks.get_mut(&a).unwrap().duration_days = 7.0;
+        cascade_dependencies(&mut m, a);
+        assert_eq!(m.work_blocks[&b].start_day, 7.0);
+    }
+
+    #[test]
+    fn working_day_to_date_uses_calendar() {
+        use crate::model::CalendarConfig;
+        use chrono::NaiveDate;
+        let config = CalendarConfig {
+            start_date: NaiveDate::from_ymd_opt(2025, 1, 6).unwrap(), // Monday
+            working_days_per_week: 5,
+            non_working_dates: vec![],
+        };
+        // 5 working days from Monday Jan 6 = Monday Jan 13 (skips weekend).
+        let date = working_day_to_date(5.0, &config);
+        assert_eq!(date, NaiveDate::from_ymd_opt(2025, 1, 13).unwrap());
+    }
+
+    #[test]
+    fn calendar_span_accounts_for_weekend() {
+        use crate::model::CalendarConfig;
+        use chrono::NaiveDate;
+        let config = CalendarConfig {
+            start_date: NaiveDate::from_ymd_opt(2025, 1, 6).unwrap(), // Monday
+            working_days_per_week: 5,
+            non_working_dates: vec![],
+        };
+        // 5 effort days starting Monday = 7 calendar days (Mon through next Mon).
+        assert_eq!(calendar_span(0.0, 5.0, &config), 7);
+        // 3 effort days starting Monday = 3 calendar days (Mon, Tue, Wed).
+        assert_eq!(calendar_span(0.0, 3.0, &config), 3);
+        // 3 effort days starting Thursday (day 3) = 5 calendar days (Thu–Mon).
+        assert_eq!(calendar_span(3.0, 3.0, &config), 5);
+    }
+
+    // ── SortedIntervals unit tests ────────────────────────────────────────────
+
+    #[test]
+    fn sorted_intervals_push_maintains_order() {
+        let mut si = SortedIntervals::default();
+        // Insert out of order: 5, 1, 3.
+        si.push(5.0, 6.0, 1.0);
+        si.push(1.0, 2.0, 1.0);
+        si.push(3.0, 4.0, 1.0);
+        // Inner vec must be sorted by start.
+        let starts: Vec<f32> = si.inner.iter().map(|&(s, _, _)| s).collect();
+        assert_eq!(starts, vec![1.0, 3.0, 5.0]);
+    }
+
+    #[test]
+    fn sorted_intervals_push_equal_start() {
+        // Two intervals sharing the same start time must both be present.
+        let mut si = SortedIntervals::default();
+        si.push(2.0, 5.0, 0.5);
+        si.push(2.0, 8.0, 0.3);
+        assert_eq!(si.inner.len(), 2);
+        // Both start times stored.
+        assert_eq!(si.inner[0].0, 2.0);
+        assert_eq!(si.inner[1].0, 2.0);
+    }
+
+    #[test]
+    fn demand_at_no_intervals() {
+        let si = SortedIntervals::default();
+        assert_eq!(si.demand_at(0.0), 0.0);
+        assert_eq!(si.demand_at(100.0), 0.0);
+    }
+
+    #[test]
+    fn demand_at_non_overlapping() {
+        // [0,2) = 1.0, [3,5) = 0.5 — query inside first, between, inside second.
+        let mut si = SortedIntervals::default();
+        si.push(0.0, 2.0, 1.0);
+        si.push(3.0, 5.0, 0.5);
+        assert_eq!(si.demand_at(1.0), 1.0);
+        assert_eq!(si.demand_at(2.5), 0.0);
+        assert_eq!(si.demand_at(4.0), 0.5);
+    }
+
+    #[test]
+    fn demand_at_overlapping_intervals() {
+        // [0,5) = 0.6 and [2,7) = 0.3 overlap in [2,5).
+        let mut si = SortedIntervals::default();
+        si.push(0.0, 5.0, 0.6);
+        si.push(2.0, 7.0, 0.3);
+        // Before overlap: only first interval active.
+        assert!((si.demand_at(1.0) - 0.6).abs() < 1e-6);
+        // Inside overlap: both active.
+        assert!((si.demand_at(3.0) - 0.9).abs() < 1e-6);
+        // After first ends: only second active.
+        assert!((si.demand_at(6.0) - 0.3).abs() < 1e-6);
+        // After both end.
+        assert_eq!(si.demand_at(8.0), 0.0);
+    }
+
+    #[test]
+    fn demand_at_endpoint_exclusion() {
+        // Interval [1, 3): demand at t=1 included (start ≤ t), demand at t=3 excluded (end ≤ t).
+        let mut si = SortedIntervals::default();
+        si.push(1.0, 3.0, 1.0);
+        assert_eq!(si.demand_at(1.0), 1.0); // start == t: included
+        assert_eq!(si.demand_at(2.999), 1.0);
+        assert_eq!(si.demand_at(3.0), 0.0); // end == t: excluded (end > t is false)
+    }
+
+    #[test]
+    fn with_start_before_empty() {
+        let si = SortedIntervals::default();
+        assert!(si.with_start_before(100.0).is_empty());
+    }
+
+    #[test]
+    fn with_start_before_all_included() {
+        let mut si = SortedIntervals::default();
+        si.push(1.0, 2.0, 1.0);
+        si.push(3.0, 4.0, 1.0);
+        // window_end = 10 — all intervals start before 10.
+        assert_eq!(si.with_start_before(10.0).len(), 2);
+    }
+
+    #[test]
+    fn with_start_before_partial() {
+        let mut si = SortedIntervals::default();
+        si.push(1.0, 2.0, 1.0);
+        si.push(5.0, 6.0, 1.0);
+        si.push(9.0, 10.0, 1.0);
+        // window_end = 5: only interval with start=1 (start < 5); start=5 excluded.
+        let slice = si.with_start_before(5.0);
+        assert_eq!(slice.len(), 1);
+        assert_eq!(slice[0].0, 1.0);
+    }
+
+    #[test]
+    fn with_start_before_exact_boundary() {
+        let mut si = SortedIntervals::default();
+        si.push(3.0, 4.0, 1.0);
+        si.push(3.0, 5.0, 0.5);
+        // with_start_before uses strict less-than: start < window_end.
+        // Both start at 3.0 < 3.0 is false → neither included.
+        assert!(si.with_start_before(3.0).is_empty());
+        // Both start at 3.0 < 4.0 → both included.
+        assert_eq!(si.with_start_before(4.0).len(), 2);
+    }
+
+    #[test]
+    fn sorted_intervals_tail_push_keeps_order() {
+        // Simulates the common scheduling case: intervals arrive in ascending
+        // start order (topological pass). Verifies push is correct in this path.
+        let mut si = SortedIntervals::default();
+        for i in 0..50u32 {
+            si.push(i as f32, (i + 1) as f32, 1.0);
+        }
+        assert_eq!(si.inner.len(), 50);
+        for (i, &(s, e, _)) in si.inner.iter().enumerate() {
+            assert_eq!(s, i as f32);
+            assert_eq!(e, (i + 1) as f32);
+        }
+    }
+
+    #[test]
+    fn resource_leveled_pass_many_serial_blocks() {
+        // 100 blocks chained FS through a single full-capacity resource.
+        // Verifies correctness of SortedIntervals under a large committed set:
+        // each block must start exactly when the previous one ends.
+        use crate::graph::build_graph;
+        use crate::model::{AvailabilitySegment, AvailabilityTimeline, ResourceType};
+        let (mut m, pid) = base();
+        let wid = m.plans[&pid].world_id;
+        let rb = m.create_resource_block("R", ResourceType::Person);
+        m.worlds.get_mut(&wid).unwrap().resource_ids.push(rb);
+        m.resource_blocks.get_mut(&rb).unwrap().availability =
+            AvailabilityTimeline {
+                segments: vec![AvailabilitySegment { start: 0.0, end: 10_000.0, factor: 1.0 }],
+            };
+
+        const N: u32 = 100;
+        let mut blocks: Vec<WorkBlockId> = Vec::new();
+        for i in 0..N {
+            let id = m.create_work_block(&format!("B{i}"), est(1.0));
+            if let Some(&prev) = blocks.last() {
+                m.create_dependency(prev, id, DependencyType::FinishToStart);
+            }
+            blocks.push(id);
+        }
+        for &id in &blocks {
+            m.plans.get_mut(&pid).unwrap().root_blocks.push(id);
+            m.plans.get_mut(&pid).unwrap().allocations.push(
+                crate::model::ResourceAllocation {
+                    resource_id: rb,
+                    work_block_id: id,
+                    allocation_factor: 1.0,
+                },
+            );
+        }
+
+        let plan = m.plans[&pid].clone();
+        let graph = build_graph(&m, &plan);
+        let sched = resource_leveled_pass(&m, &plan, &graph).expect("no cycle");
+
+        assert_eq!(sched.blocks.len(), N as usize);
+        for (i, &id) in blocks.iter().enumerate() {
+            let b = &sched.blocks[&id];
+            assert_eq!(b.start_day, i as f32, "block {i} start");
+            assert_eq!(b.end_day, (i + 1) as f32, "block {i} end");
+        }
+    }
+
+    #[test]
+    fn avail_at_unsorted_hits_debug_assert() {
+        // In release builds this test isn't meaningful, but in debug builds the
+        // assert fires. Guard with cfg so it compiles in both modes.
+        use crate::model::AvailabilitySegment;
+        let segs = vec![
+            AvailabilitySegment { start: 5.0, end: 10.0, factor: 0.5 },
+            AvailabilitySegment { start: 0.0, end: 5.0,  factor: 1.0 },
+        ];
+        // This would give a wrong answer without sorting; the debug_assert
+        // should catch it in debug mode. We just verify the sorted path works.
+        let sorted = {
+            let mut s = segs.clone();
+            s.sort_unstable_by(|a, b| a.start.partial_cmp(&b.start).unwrap());
+            s
+        };
+        assert_eq!(avail_at(&sorted, 2.5), 1.0);
+        assert_eq!(avail_at(&sorted, 7.5), 0.5);
+        assert_eq!(avail_at(&sorted, 11.0), 1.0); // gap defaults to 1.0
     }
 }

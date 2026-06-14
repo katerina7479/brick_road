@@ -44,17 +44,24 @@ fn main() {
         .insert_resource(schedule::VisibleBlocks::default())
         .insert_resource(analysis::ScheduleAnalysis::default())
         .insert_resource(schedule::TodayMarker::default())
+        .insert_resource(blocks::BlockSpriteMap::default())
+        .insert_resource(labels::NestingDepthMap::default())
         .add_systems(Startup, (setup_db, setup_camera))
         .add_systems(Startup, setup_demo_schedule.after(setup_db))
-        .add_systems(PostStartup, update_analysis.before(blocks::spawn_block_sprites))
+        .add_systems(PostStartup, update_analysis.before(blocks::reconcile_block_sprites))
         .add_systems(
             PostStartup,
-            schedule::update_visible_blocks.before(blocks::spawn_block_sprites),
+            labels::compute_nesting_depths.before(blocks::reconcile_block_sprites),
         )
-        .add_systems(PostStartup, blocks::spawn_block_sprites)
         .add_systems(
             PostStartup,
-            labels::spawn_labels.after(blocks::spawn_block_sprites),
+            schedule::update_visible_blocks.before(blocks::reconcile_block_sprites),
+        )
+        .add_systems(PostStartup, blocks::reconcile_block_sprites)
+        .add_systems(PostStartup, sync_weekend_bands.after(blocks::reconcile_block_sprites))
+        .add_systems(
+            PostStartup,
+            labels::spawn_labels.after(blocks::reconcile_block_sprites),
         )
         .add_systems(
             PostStartup,
@@ -63,11 +70,12 @@ fn main() {
         .add_systems(Update, (camera_nav_keys, update_camera_target, smooth_camera).chain())
         .add_systems(Update, draw_grid)
         .add_systems(Update, schedule::update_today_marker)
+        .add_systems(Update, sync_weekend_bands)
         .add_systems(Update, update_analysis)
         .add_systems(
             Update,
             schedule::update_visible_blocks
-                .before(blocks::spawn_block_sprites)
+                .before(blocks::reconcile_block_sprites)
                 .before(blocks::sync_conflict_overlays)
                 .before(blocks::sync_uncertainty_overlays)
                 .before(blocks::draw_dependency_edges)
@@ -99,13 +107,13 @@ fn main() {
         )
         .add_systems(
             Update,
-            blocks::spawn_block_sprites.after(blocks::handle_block_selection),
+            blocks::reconcile_block_sprites.after(blocks::handle_block_selection),
         )
         .add_systems(
             Update,
             blocks::sync_block_sprites
                 .after(blocks::handle_block_drag)
-                .after(blocks::spawn_block_sprites)
+                .after(blocks::reconcile_block_sprites)
                 .run_if(task_view_active),
         )
         .add_systems(
@@ -123,7 +131,7 @@ fn main() {
         .add_systems(
             Update,
             blocks::sync_uncertainty_overlays
-                .after(blocks::spawn_block_sprites)
+                .after(blocks::reconcile_block_sprites)
                 .run_if(task_view_active),
         )
         .add_systems(
@@ -151,7 +159,7 @@ fn main() {
             Update,
             labels::spawn_labels
                 .after(blocks::handle_block_selection)
-                .after(blocks::spawn_block_sprites),
+                .after(blocks::reconcile_block_sprites),
         )
         .add_systems(
             Update,
@@ -159,23 +167,41 @@ fn main() {
                 .after(update_camera_target)
                 .after(smooth_camera),
         )
+        .add_systems(
+            Update,
+            labels::compute_nesting_depths.before(labels::draw_nesting_indicators),
+        )
         .add_systems(Update, labels::draw_nesting_indicators.run_if(task_view_active))
         .add_systems(Update, labels::draw_violation_indicators.run_if(task_view_active))
         .add_systems(Update, labels::scale_labels_to_zoom)
         .add_systems(
             Update,
             blocks::sync_block_labels
-                .after(blocks::spawn_block_sprites)
+                .after(blocks::reconcile_block_sprites)
+                .run_if(task_view_active),
+        )
+        .add_systems(
+            Update,
+            blocks::sync_block_label_names
+                .after(blocks::reconcile_block_sprites)
+                .before(blocks::sync_block_labels)
+                .run_if(task_view_active),
+        )
+        .add_systems(
+            Update,
+            blocks::sync_description_dots
+                .after(blocks::reconcile_block_sprites)
                 .run_if(task_view_active),
         )
         .add_systems(Update, draw_resource_timeline)
         .add_systems(EguiPrimaryContextPass, side_panel_ui)
         .add_systems(EguiPrimaryContextPass, camera_nav_ui)
         .add_systems(EguiPrimaryContextPass, logo_ui)
+        .add_systems(EguiPrimaryContextPass, resource_row_labels_ui)
         .add_systems(EguiPrimaryContextPass, blocks::draw_name_edit_overlay)
         .add_systems(EguiPrimaryContextPass, blocks::draw_delete_confirm_overlay)
         .add_systems(EguiPrimaryContextPass, blocks::draw_create_mode_overlay)
-        .add_systems(EguiPrimaryContextPass, blocks::draw_description_tooltip)
+        .add_systems(EguiPrimaryContextPass, blocks::draw_block_tooltip)
         .run();
 }
 
@@ -233,6 +259,70 @@ fn draw_grid(
     // Prominent today marker — HDR color triggers Bloom.
     let x_today = today.day * PIXELS_PER_DAY;
     gizmos.line_2d(Vec2::new(x_today, y_bottom), Vec2::new(x_today, y_top), today_line_color);
+}
+
+/// Marker for weekend and holiday band sprites behind the timeline grid.
+#[derive(Component)]
+struct WeekendBand;
+
+/// Returns `(x_world_position, is_holiday)` for each non-working day band within
+/// the given span.
+///
+/// Week-boundary bands appear every `working_days_per_week` days (`is_holiday = false`).
+/// Calendar holiday bands are placed at the next working-day boundary after each
+/// date in `non_working_dates` (`is_holiday = true`).
+fn weekend_band_positions(span_days: i32, model: &model::Model) -> Vec<(f32, bool)> {
+    let mut positions = Vec::new();
+    let wdpw = model.calendar.working_days_per_week as i32;
+
+    let mut day = wdpw;
+    while day <= span_days + wdpw {
+        positions.push((day as f32 * PIXELS_PER_DAY, false));
+        day += wdpw;
+    }
+
+    for &holiday in &model.calendar.non_working_dates {
+        // date_to_day for a non-working day returns the last working-day count
+        // before it; +1 gives the next working day's index, which is the correct
+        // band position (immediately after the holiday gap).
+        let boundary = calendar::date_to_day(holiday, &model.calendar) + 1;
+        if boundary >= 0 && boundary <= span_days + 10 {
+            positions.push((boundary as f32 * PIXELS_PER_DAY, true));
+        }
+    }
+
+    positions
+}
+
+fn sync_weekend_bands(
+    model: Res<model::Model>,
+    schedule: Res<schedule::Schedule>,
+    mut commands: Commands,
+    band_q: Query<Entity, With<WeekendBand>>,
+) {
+    if !model.is_changed() && !schedule.is_changed() {
+        return;
+    }
+    for e in &band_q {
+        commands.entity(e).despawn();
+    }
+
+    let span = schedule.total_duration_days.ceil() as i32 + 10;
+    let weekend_color = Color::srgba(0.35, 0.30, 0.50, 0.10);
+    let holiday_color = Color::srgba(0.70, 0.25, 0.25, 0.15);
+
+    for (x, is_holiday) in weekend_band_positions(span, &model) {
+        let color = if is_holiday { holiday_color } else { weekend_color };
+        commands.spawn((
+            WeekendBand,
+            Sprite {
+                color,
+                custom_size: Some(Vec2::new(8.0, 20_000.0)),
+                ..default()
+            },
+            Transform::from_xyz(x, 0.0, -0.5),
+        ));
+    }
 }
 
 fn task_view_active(mode: Res<schedule::TimelineViewMode>) -> bool {
@@ -303,7 +393,6 @@ fn draw_resource_timeline(
             });
 
             let color = if is_conflicted { alloc_conflict } else { alloc_ok };
-            // Draw bar as four border lines (rect outline).
             let (x_lo, x_hi) = (cx - w * 0.5, cx + w * 0.5);
             let (y_lo, y_hi) = (y - bar_h * 0.5, y + bar_h * 0.5);
             gizmos.line_2d(Vec2::new(x_lo, y_lo), Vec2::new(x_hi, y_lo), color);
@@ -312,6 +401,117 @@ fn draw_resource_timeline(
             gizmos.line_2d(Vec2::new(x_lo, y_hi), Vec2::new(x_lo, y_lo), color);
         }
     }
+
+    // Unassigned row: placed blocks with no allocation in the current plan.
+    let allocated: std::collections::HashSet<model::WorkBlockId> =
+        plan.allocations.iter().map(|a| a.work_block_id).collect();
+    let unassigned: Vec<_> = model
+        .work_blocks
+        .values()
+        .filter(|wb| wb.duration_days > 0.0 && !allocated.contains(&wb.id))
+        .collect();
+
+    if !unassigned.is_empty() {
+        let row = resources.len();
+        let y = -(row as f32) * constants::ROW_HEIGHT;
+
+        gizmos.line_2d(
+            Vec2::new(-50_000.0, y - constants::ROW_HEIGHT * 0.5),
+            Vec2::new(50_000.0,  y - constants::ROW_HEIGHT * 0.5),
+            row_sep,
+        );
+
+        let unassigned_color = Color::srgba(0.55, 0.55, 0.55, 0.5);
+        for wb in &unassigned {
+            let x0 = wb.start_day * PIXELS_PER_DAY;
+            let x1 = (wb.start_day + wb.duration_days) * PIXELS_PER_DAY;
+            let w  = (x1 - x0).max(4.0);
+            let cx = x0 + w * 0.5;
+            let (x_lo, x_hi) = (cx - w * 0.5, cx + w * 0.5);
+            let (y_lo, y_hi) = (y - bar_h * 0.5, y + bar_h * 0.5);
+            gizmos.line_2d(Vec2::new(x_lo, y_lo), Vec2::new(x_hi, y_lo), unassigned_color);
+            gizmos.line_2d(Vec2::new(x_hi, y_lo), Vec2::new(x_hi, y_hi), unassigned_color);
+            gizmos.line_2d(Vec2::new(x_hi, y_hi), Vec2::new(x_lo, y_hi), unassigned_color);
+            gizmos.line_2d(Vec2::new(x_lo, y_hi), Vec2::new(x_lo, y_lo), unassigned_color);
+        }
+    }
+}
+
+/// Renders resource row name labels in Resource view using egui, positioned at
+/// the screen Y that corresponds to each row's world-space Y coordinate.
+fn resource_row_labels_ui(
+    mut contexts: EguiContexts,
+    mode: Res<schedule::TimelineViewMode>,
+    model: Res<model::Model>,
+    schedule: Res<schedule::Schedule>,
+    cam_q: Query<(&Transform, &Projection), With<Camera2d>>,
+    windows: Query<&Window>,
+) {
+    if *mode != schedule::TimelineViewMode::Resource {
+        return;
+    }
+    let Ok(ctx) = contexts.ctx_mut() else { return };
+    let Ok((cam_t, proj)) = cam_q.single() else { return };
+    let Projection::Orthographic(ortho) = proj else { return };
+    let Ok(window) = windows.single() else { return };
+
+    let cam_y = cam_t.translation.y;
+    let scale = ortho.scale;
+    let win_h = window.height();
+
+    let world_y_to_screen = |world_y: f32| -> f32 {
+        win_h * 0.5 - (world_y - cam_y) / scale
+    };
+
+    let Some(plan) = model.plans.get(&schedule.plan_id) else { return };
+
+    let mut resources: Vec<_> = model.resource_blocks.values().collect();
+    resources.sort_by_key(|r| r.id.0);
+
+    let allocated: std::collections::HashSet<model::WorkBlockId> =
+        plan.allocations.iter().map(|a| a.work_block_id).collect();
+    let has_unassigned = model
+        .work_blocks
+        .values()
+        .any(|wb| wb.duration_days > 0.0 && !allocated.contains(&wb.id));
+
+    egui::Area::new(egui::Id::new("resource_row_labels"))
+        .fixed_pos(egui::Pos2::ZERO)
+        .interactable(false)
+        .show(ctx, |ui| {
+            let label_x = 6.0;
+            for (row, resource) in resources.iter().enumerate() {
+                let world_y = -(row as f32) * constants::ROW_HEIGHT;
+                let sy = world_y_to_screen(world_y);
+                ui.put(
+                    egui::Rect::from_min_size(
+                        egui::Pos2::new(label_x, sy - 8.0),
+                        egui::Vec2::new(150.0, 16.0),
+                    ),
+                    egui::Label::new(
+                        egui::RichText::new(resource.name.as_str())
+                            .size(12.0)
+                            .color(egui::Color32::from_rgb(180, 180, 210)),
+                    ),
+                );
+            }
+            if has_unassigned {
+                let row = resources.len();
+                let world_y = -(row as f32) * constants::ROW_HEIGHT;
+                let sy = world_y_to_screen(world_y);
+                ui.put(
+                    egui::Rect::from_min_size(
+                        egui::Pos2::new(label_x, sy - 8.0),
+                        egui::Vec2::new(150.0, 16.0),
+                    ),
+                    egui::Label::new(
+                        egui::RichText::new("Unassigned")
+                            .size(12.0)
+                            .color(egui::Color32::from_rgba_unmultiplied(140, 140, 170, 180)),
+                    ),
+                );
+            }
+        });
 }
 
 fn setup_demo_schedule(mut model: ResMut<model::Model>, mut commands: Commands) {
@@ -462,15 +662,15 @@ fn logo_ui(
         });
 }
 
-/// Maps a confidence level to (optimistic_factor, pessimistic_factor).
-/// Factors multiply `duration_days` to derive the uncertainty spread.
-fn confidence_to_factors(confidence: f32) -> (f32, f32) {
+/// Maps a confidence level to (optimistic_factor, pessimistic_factor) using
+/// the project's configured multipliers.
+fn confidence_to_factors(confidence: f32, cf: &model::ConfidenceFactors) -> (f32, f32) {
     if confidence >= 1.0 {
-        (1.0, 1.0) // Actual — no uncertainty
+        (1.0, 1.0)
     } else if confidence >= 0.75 {
-        (0.7, 1.4) // 75% — confident, modest spread
+        (cf.opt_75, cf.pes_75)
     } else {
-        (0.5, 2.0) // 50% — rough guess, wide spread
+        (cf.opt_50, cf.pes_50)
     }
 }
 
@@ -483,13 +683,15 @@ fn side_panel_ui(
     mut cycle_error: Local<Option<String>>,
     mut scope: ResMut<schedule::ViewScope>,
     mut create_state: ResMut<blocks::CreateModeState>,
+    mut new_size_label: Local<String>,
+    mut new_size_error: Local<Option<String>>,
+    mut camera_target: ResMut<CameraTarget>,
+    mut compare_plan: Local<Option<model::PlanId>>,
 ) {
     let Ok(ctx) = contexts.ctx_mut() else { return };
-    egui::SidePanel::left("side_panel")
+    egui::SidePanel::right("side_panel")
         .min_width(SIDE_PANEL_WIDTH)
         .show(ctx, |ui| {
-            ui.heading("brick_road");
-
             // Plan selector — tabs across the top of the panel.
             {
                 let mut sorted_plans: Vec<_> = model
@@ -662,6 +864,316 @@ fn side_panel_ui(
             }
 
             ui.separator();
+            ui.collapsing("Size Mapping", |ui| {
+                let mut mapping_changed = false;
+                let mut to_remove: Option<usize> = None;
+                for (i, size) in model.t_shirt_sizes.iter_mut().enumerate() {
+                    let row = ui.horizontal(|ui| {
+                        let label_changed = ui
+                            .add(egui::TextEdit::singleline(&mut size.label).desired_width(36.0))
+                            .lost_focus();
+                        let days_changed = ui
+                            .add(
+                                egui::DragValue::new(&mut size.days)
+                                    .speed(0.5)
+                                    .range(0.5f32..=120.0)
+                                    .suffix(" d"),
+                            )
+                            .changed();
+                        let removed = ui.small_button("×").clicked();
+                        if removed {
+                            to_remove = Some(i);
+                        }
+                        label_changed || days_changed || removed
+                    });
+                    if row.inner {
+                        mapping_changed = true;
+                    }
+                }
+                if let Some(idx) = to_remove {
+                    model.t_shirt_sizes.remove(idx);
+                }
+
+                // New-size input row: validate uniqueness before inserting.
+                ui.horizontal(|ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut *new_size_label)
+                            .desired_width(36.0)
+                            .hint_text("label"),
+                    );
+                    if ui.small_button("+ Add").clicked() {
+                        let label = new_size_label.trim().to_string();
+                        if label.is_empty() {
+                            *new_size_error = Some("Label cannot be empty".to_string());
+                        } else if model.t_shirt_sizes.iter().any(|s| s.label == label) {
+                            *new_size_error = Some(format!("'{label}' already exists"));
+                        } else {
+                            model.t_shirt_sizes.push(model::TShirtSize { label, days: 1.0 });
+                            new_size_label.clear();
+                            *new_size_error = None;
+                            mapping_changed = true;
+                        }
+                    }
+                });
+                if let Some(ref err) = *new_size_error {
+                    ui.colored_label(egui::Color32::from_rgb(220, 60, 60), err);
+                }
+
+                if mapping_changed {
+                    // Guard against duplicate labels from inline edits before saving.
+                    let unique: std::collections::HashSet<_> =
+                        model.t_shirt_sizes.iter().map(|s| &s.label).collect();
+                    if unique.len() < model.t_shirt_sizes.len() {
+                        *new_size_error =
+                            Some("Duplicate size label — rename before saving".to_string());
+                    } else {
+                        *new_size_error = None;
+                        if let Err(e) = db::save_model(&conn, &model) {
+                            error!("save_model failed: {e}");
+                        }
+                    }
+                }
+            });
+
+            ui.collapsing("Confidence Spread", |ui| {
+                let mut cf = model.confidence_factors.clone();
+                let mut changed = false;
+                ui.label("50% confidence");
+                changed |= ui.horizontal(|ui| {
+                    let a = ui.add(
+                        egui::DragValue::new(&mut cf.opt_50)
+                            .speed(0.01)
+                            .range(0.1f32..=1.0)
+                            .prefix("opt ×")
+                            .max_decimals(2),
+                    ).changed();
+                    let b = ui.add(
+                        egui::DragValue::new(&mut cf.pes_50)
+                            .speed(0.05)
+                            .range(1.0f32..=10.0)
+                            .prefix("pes ×")
+                            .max_decimals(2),
+                    ).changed();
+                    a || b
+                }).inner;
+                ui.label("75% confidence");
+                changed |= ui.horizontal(|ui| {
+                    let a = ui.add(
+                        egui::DragValue::new(&mut cf.opt_75)
+                            .speed(0.01)
+                            .range(0.1f32..=1.0)
+                            .prefix("opt ×")
+                            .max_decimals(2),
+                    ).changed();
+                    let b = ui.add(
+                        egui::DragValue::new(&mut cf.pes_75)
+                            .speed(0.05)
+                            .range(1.0f32..=10.0)
+                            .prefix("pes ×")
+                            .max_decimals(2),
+                    ).changed();
+                    a || b
+                }).inner;
+                if changed {
+                    model.confidence_factors = cf;
+                    if let Err(e) = db::save_model(&conn, &model) {
+                        error!("save_model failed: {e}");
+                    }
+                }
+            });
+
+            // ── Plan Comparison ───────────────────────────────────────────────────
+            ui.separator();
+            ui.collapsing("Compare Plans", |ui| {
+                let current_plan_id = schedule.plan_id;
+
+                // Sorted list of other plans for the picker.
+                let mut other_plans: Vec<(model::PlanId, String)> = model
+                    .plans
+                    .values()
+                    .filter(|p| p.id != current_plan_id)
+                    .map(|p| (p.id, p.name.clone()))
+                    .collect();
+                other_plans.sort_by_key(|(id, _)| id.0);
+
+                // Invalidate compare selection if that plan no longer exists.
+                if let Some(cmp_id) = *compare_plan {
+                    if !model.plans.contains_key(&cmp_id) {
+                        *compare_plan = None;
+                    }
+                }
+
+                let compare_label = compare_plan
+                    .and_then(|id| model.plans.get(&id))
+                    .map(|p| p.name.clone())
+                    .unwrap_or_else(|| "None".to_string());
+
+                egui::ComboBox::from_label("vs.")
+                    .selected_text(&compare_label)
+                    .show_ui(ui, |ui| {
+                        if ui.selectable_label(compare_plan.is_none(), "None").clicked() {
+                            *compare_plan = None;
+                        }
+                        for (pid, ref name) in &other_plans {
+                            if ui
+                                .selectable_label(*compare_plan == Some(*pid), name.as_str())
+                                .clicked()
+                            {
+                                *compare_plan = Some(*pid);
+                            }
+                        }
+                    });
+
+                let Some(cmp_id) = *compare_plan else { return };
+
+                let plan_a = match model.plans.get(&current_plan_id).cloned() {
+                    Some(p) => p,
+                    None => return,
+                };
+                let plan_b = match model.plans.get(&cmp_id).cloned() {
+                    Some(p) => p,
+                    None => return,
+                };
+                let name_a = plan_a.name.clone();
+                let name_b = plan_b.name.clone();
+
+                let graph_a = graph::build_graph(&model, &plan_a);
+                let graph_b = graph::build_graph(&model, &plan_b);
+                let sched_a = schedule::forward_pass(&model, &plan_a, &graph_a).ok();
+                let sched_b = schedule::forward_pass(&model, &plan_b, &graph_b).ok();
+                let conflicts_a = analysis::analyze_resources(&model, &plan_a).len();
+                let conflicts_b = analysis::analyze_resources(&model, &plan_b).len();
+
+                // Build id→duration maps for each plan.
+                let map_a: std::collections::HashMap<model::WorkBlockId, f32> = sched_a
+                    .as_ref()
+                    .map(|s| s.blocks.iter().map(|(&id, sb)| (id, sb.duration_days)).collect())
+                    .unwrap_or_default();
+                let map_b: std::collections::HashMap<model::WorkBlockId, f32> = sched_b
+                    .as_ref()
+                    .map(|s| s.blocks.iter().map(|(&id, sb)| (id, sb.duration_days)).collect())
+                    .unwrap_or_default();
+                let total_a = sched_a.as_ref().map(|s| s.total_duration_days).unwrap_or(0.0);
+                let total_b = sched_b.as_ref().map(|s| s.total_duration_days).unwrap_or(0.0);
+
+                // Collect all block IDs that differ between the two plans.
+                let mut all_ids: Vec<model::WorkBlockId> = {
+                    let mut ids: std::collections::HashSet<model::WorkBlockId> = std::collections::HashSet::new();
+                    ids.extend(map_a.keys());
+                    ids.extend(map_b.keys());
+                    ids.into_iter().collect()
+                };
+                all_ids.sort_by_key(|id| id.0);
+
+                // ── Summary ───────────────────────────────────────────────────────
+                ui.separator();
+                egui::Grid::new("plan_compare_summary")
+                    .num_columns(3)
+                    .spacing([8.0, 2.0])
+                    .show(ui, |ui| {
+                        ui.label("");
+                        ui.strong(&name_a);
+                        ui.strong(&name_b);
+                        ui.end_row();
+
+                        ui.label("Duration:");
+                        ui.label(format!("{:.1} d", total_a));
+                        ui.label(format!("{:.1} d", total_b));
+                        ui.end_row();
+
+                        ui.label("Blocks:");
+                        ui.label(format!("{}", map_a.len()));
+                        ui.label(format!("{}", map_b.len()));
+                        ui.end_row();
+
+                        ui.label("Conflicts:");
+                        ui.label(format!("{}", conflicts_a));
+                        ui.label(format!("{}", conflicts_b));
+                        ui.end_row();
+                    });
+
+                // ── Block-level diff ─────────────────────────────────────────────
+                let diff_rows: Vec<(String, Option<f32>, Option<f32>)> = all_ids
+                    .iter()
+                    .filter_map(|id| {
+                        let dur_a = map_a.get(id).copied();
+                        let dur_b = map_b.get(id).copied();
+                        // Only show blocks that differ: unique to one plan or
+                        // present in both with a meaningful duration difference.
+                        let differs = match (dur_a, dur_b) {
+                            (Some(a), Some(b)) => (a - b).abs() > 0.05,
+                            _ => true,
+                        };
+                        if !differs {
+                            return None;
+                        }
+                        let name = model
+                            .work_blocks
+                            .get(id)
+                            .map(|wb| wb.name.clone())
+                            .unwrap_or_else(|| format!("#{}", id.0));
+                        Some((name, dur_a, dur_b))
+                    })
+                    .collect();
+
+                if diff_rows.is_empty() {
+                    ui.weak("Plans are identical.");
+                } else {
+                    ui.separator();
+                    ui.weak(format!("{} differing block(s):", diff_rows.len()));
+                    egui::ScrollArea::vertical()
+                        .id_salt("plan_compare_scroll")
+                        .max_height(180.0)
+                        .show(ui, |ui| {
+                            egui::Grid::new("plan_compare_diff")
+                                .num_columns(4)
+                                .spacing([6.0, 2.0])
+                                .striped(true)
+                                .show(ui, |ui| {
+                                    ui.weak("Block");
+                                    ui.weak(&name_a);
+                                    ui.weak(&name_b);
+                                    ui.weak("Δ");
+                                    ui.end_row();
+                                    for (name, dur_a, dur_b) in &diff_rows {
+                                        let only_a = dur_b.is_none();
+                                        let only_b = dur_a.is_none();
+                                        let row_color = if only_a {
+                                            egui::Color32::from_rgb(80, 160, 80)
+                                        } else if only_b {
+                                            egui::Color32::from_rgb(180, 80, 80)
+                                        } else {
+                                            egui::Color32::from_rgb(180, 160, 80)
+                                        };
+                                        ui.colored_label(row_color, name.as_str());
+                                        match dur_a {
+                                            Some(d) => ui.label(format!("{d:.1}d")),
+                                            None => ui.weak("—"),
+                                        };
+                                        match dur_b {
+                                            Some(d) => ui.label(format!("{d:.1}d")),
+                                            None => ui.weak("—"),
+                                        };
+                                        let delta_label = match (dur_a, dur_b) {
+                                            (Some(a), Some(b)) => {
+                                                let d = b - a;
+                                                if d > 0.0 {
+                                                    format!("+{d:.1}")
+                                                } else {
+                                                    format!("{d:.1}")
+                                                }
+                                            }
+                                            _ => "—".to_string(),
+                                        };
+                                        ui.label(delta_label);
+                                        ui.end_row();
+                                    }
+                                });
+                        });
+                }
+            });
+
+            ui.separator();
 
             let Some(sel_id) = selected.0 else {
                 ui.label("Click a block to inspect.");
@@ -684,10 +1196,16 @@ fn side_panel_ui(
             let color = wb.color;
             let priority = wb.priority;
             let block_variant_ids = wb.variants.clone();
+            let current_t_shirt_size = wb.t_shirt_size.clone();
 
             let (start_day, end_day) = (wb.start_day, wb.start_day + wb.duration_days);
 
-            // Clone variant names and current selection before any mutable model borrow.
+            // Clone t-shirt sizes and variant names before any mutable model borrow.
+            let t_shirt_sizes: Vec<(String, f32)> = model
+                .t_shirt_sizes
+                .iter()
+                .map(|s| (s.label.clone(), s.days))
+                .collect();
             let variant_names: Vec<(model::VariantId, String)> = block_variant_ids
                 .iter()
                 .filter_map(|&vid| model.variants.get(&vid).map(|v| (vid, v.name.clone())))
@@ -779,15 +1297,63 @@ fn side_panel_ui(
             }
 
             ui.separator();
-            ui.label(format!("Start:  day {:.1}", start_day));
-            ui.label(format!("End:    day {:.1}", end_day));
+            {
+                let cal = &model.calendar;
+                let start_date = schedule::working_day_to_date(start_day, cal);
+                let end_date = schedule::working_day_to_date(end_day, cal);
+                let cal_days = schedule::calendar_span(start_day, duration_days, cal);
+                ui.label(format!("Start:  {} (day {:.0})", start_date.format("%b %-d"), start_day));
+                ui.label(format!(
+                    "End:    {} ({:.0}d effort / {} cal)",
+                    end_date.format("%b %-d"),
+                    duration_days,
+                    cal_days
+                ));
+            }
             if let Some(r) = row {
                 ui.label(format!("Row:    {}", r));
             }
 
             ui.separator();
+            ui.label("Size");
+            let mut size_chosen: Option<(String, f32)> = None;
+            ui.horizontal_wrapped(|ui| {
+                for (label, days) in &t_shirt_sizes {
+                    let active = current_t_shirt_size.as_deref() == Some(label.as_str());
+                    let btn = egui::Button::new(label.as_str()).min_size(egui::Vec2::new(32.0, 22.0));
+                    let btn = if active {
+                        btn.stroke(egui::Stroke::new(2.0, egui::Color32::WHITE))
+                    } else {
+                        btn
+                    };
+                    if ui.add(btn).on_hover_text(format!("{} days", days)).clicked() {
+                        size_chosen = Some((label.clone(), *days));
+                    }
+                }
+            });
+
+            if let Some((label, days)) = size_chosen {
+                duration_days = days;
+                let (opt_f, pes_f) = confidence_to_factors(confidence, &model.confidence_factors);
+                if let Some(wb) = model.work_blocks.get_mut(&sel_id) {
+                    wb.t_shirt_size = Some(label);
+                    wb.duration_days = days;
+                    wb.estimate.most_likely = days;
+                    wb.estimate.optimistic = days * opt_f;
+                    wb.estimate.pessimistic = days * pes_f;
+                }
+                schedule::cascade_dependencies(&mut model, sel_id);
+                if let Err(e) = db::record_estimate_snapshot(&conn, sel_id.0, duration_days, confidence) {
+                    error!("record_estimate_snapshot failed: {e}");
+                }
+                if let Err(e) = db::save_model(&conn, &model) {
+                    error!("save_model failed: {e}");
+                }
+            }
+
+            // Custom numeric override — clears the t-shirt size label.
             let dur_changed = ui.horizontal(|ui| {
-                ui.label("Duration:");
+                ui.label("Custom:");
                 ui.add(
                     egui::DragValue::new(&mut duration_days)
                         .speed(0.5)
@@ -797,8 +1363,9 @@ fn side_panel_ui(
             }).inner;
 
             if dur_changed {
-                let (opt_f, pes_f) = confidence_to_factors(confidence);
+                let (opt_f, pes_f) = confidence_to_factors(confidence, &model.confidence_factors);
                 if let Some(wb) = model.work_blocks.get_mut(&sel_id) {
+                    wb.t_shirt_size = None;
                     wb.duration_days = duration_days;
                     wb.estimate.most_likely = duration_days;
                     wb.estimate.optimistic = duration_days * opt_f;
@@ -829,7 +1396,7 @@ fn side_panel_ui(
             });
 
             if (new_confidence - confidence).abs() > 0.001 {
-                let (opt_f, pes_f) = confidence_to_factors(new_confidence);
+                let (opt_f, pes_f) = confidence_to_factors(new_confidence, &model.confidence_factors);
                 if let Some(wb) = model.work_blocks.get_mut(&sel_id) {
                     wb.estimate.confidence = new_confidence;
                     wb.estimate.most_likely = duration_days;
@@ -1016,6 +1583,16 @@ fn side_panel_ui(
             }
             if let Some(target_id) = jump_to {
                 selected.0 = Some(target_id);
+                // Pan the camera to centre the target block in the timeline.
+                if let Some(wb) = model.work_blocks.get(&target_id) {
+                    if wb.duration_days > 0.0 {
+                        let sorted = schedule::sorted_blocks(&model);
+                        let row = sorted.iter().position(|b| b.id == target_id).unwrap_or(0);
+                        let cx = (wb.start_day + wb.duration_days * 0.5) * PIXELS_PER_DAY;
+                        let cy = -(row as f32) * constants::ROW_HEIGHT;
+                        camera_target.pos = Vec2::new(cx, cy);
+                    }
+                }
             }
 
             ui.separator();
@@ -1062,5 +1639,51 @@ fn dep_type_abbrev(t: &model::DependencyType) -> &'static str {
         model::DependencyType::StartToStart   => "S→S",
         model::DependencyType::FinishToFinish => "F→F",
         model::DependencyType::StartToFinish  => "S→F",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn week_bands_at_every_wdpw_boundary() {
+        let model = model::Model::default();
+        let positions = weekend_band_positions(10, &model);
+        let xs: Vec<f32> = positions.iter().filter(|(_, h)| !h).map(|(x, _)| *x).collect();
+        // Default wdpw=5; bands at day 5, 10, 15 (span + wdpw).
+        assert!(xs.contains(&(5.0 * PIXELS_PER_DAY)));
+        assert!(xs.contains(&(10.0 * PIXELS_PER_DAY)));
+        assert!(xs.contains(&(15.0 * PIXELS_PER_DAY)));
+    }
+
+    #[test]
+    fn no_holiday_bands_without_non_working_dates() {
+        let model = model::Model::default();
+        let positions = weekend_band_positions(10, &model);
+        assert_eq!(positions.iter().filter(|(_, h)| *h).count(), 0);
+    }
+
+    #[test]
+    fn holiday_band_placed_at_next_working_day_boundary() {
+        let mut model = model::Model::default();
+        model.calendar.start_date = NaiveDate::from_ymd_opt(2025, 1, 6).unwrap(); // Monday
+        model.calendar.non_working_dates = vec![NaiveDate::from_ymd_opt(2025, 1, 7).unwrap()]; // Tuesday
+        let positions = weekend_band_positions(20, &model);
+        let holiday_xs: Vec<f32> =
+            positions.iter().filter(|(_, h)| *h).map(|(x, _)| *x).collect();
+        // date_to_day(Tue Jan 7 holiday, Mon Jan 6 start) = 0 → boundary = 1 → x = 100.0
+        assert!(holiday_xs.contains(&(1.0 * PIXELS_PER_DAY)));
+    }
+
+    #[test]
+    fn holiday_out_of_span_excluded() {
+        let mut model = model::Model::default();
+        model.calendar.start_date = NaiveDate::from_ymd_opt(2025, 1, 6).unwrap();
+        // Holiday 200 working days out — far beyond span=5.
+        model.calendar.non_working_dates =
+            vec![calendar::day_to_date(200.0, &model.calendar)];
+        let positions = weekend_band_positions(5, &model);
+        assert_eq!(positions.iter().filter(|(_, h)| *h).count(), 0);
     }
 }
