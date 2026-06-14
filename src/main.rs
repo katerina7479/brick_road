@@ -297,14 +297,17 @@ fn side_panel_ui(
 
             ui.separator();
             ui.label("Estimate");
-            let ml_changed = ui
-                .add(egui::Slider::new(&mut most_likely, 0.5f32..=60.0).text("most likely").step_by(0.5))
-                .changed();
+            // Sliders are ordered best→expected→worst. Each slider's range is
+            // bounded by its neighbours so the three-point ordering invariant
+            // optimistic ≤ most_likely ≤ pessimistic is always maintained.
             let opt_changed = ui
-                .add(egui::Slider::new(&mut optimistic, 0.5f32..=60.0).text("optimistic").step_by(0.5))
+                .add(egui::Slider::new(&mut optimistic, 0.5f32..=most_likely).text("optimistic").step_by(0.5))
+                .changed();
+            let ml_changed = ui
+                .add(egui::Slider::new(&mut most_likely, optimistic..=pessimistic).text("most likely").step_by(0.5))
                 .changed();
             let pes_changed = ui
-                .add(egui::Slider::new(&mut pessimistic, 0.5f32..=60.0).text("pessimistic").step_by(0.5))
+                .add(egui::Slider::new(&mut pessimistic, most_likely..=200.0f32).text("pessimistic").step_by(0.5))
                 .changed();
             ui.label(format!("Confidence:   {:.0}%", confidence * 100.0));
 
