@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 use chrono::{Datelike, Duration, NaiveDate};
 
-use crate::model::CalendarConfig;
+use crate::model::{CalendarConfig, Day};
 
 /// Returns true if `date` is a working day under `config`.
 ///
@@ -23,8 +23,8 @@ fn is_working_day(date: NaiveDate, working_days_per_week: u8, non_working: &Hash
 ///
 /// Non-working days (weekends beyond `working_days_per_week` and dates in
 /// `non_working_dates`) are skipped during the count.
-pub fn day_to_date(day: f32, config: &CalendarConfig) -> NaiveDate {
-    let working_days = day.floor() as i64;
+pub fn day_to_date(day: Day, config: &CalendarConfig) -> NaiveDate {
+    let working_days = day as i64;
     let non_working: HashSet<NaiveDate> = config.non_working_dates.iter().copied().collect();
 
     if working_days == 0 {
@@ -83,7 +83,7 @@ pub fn date_to_day(date: NaiveDate, config: &CalendarConfig) -> i32 {
 ///
 /// Returns the number of calendar days from `start_date` to complete
 /// `effort_days` working days of work.
-pub fn effort_to_calendar_days(effort_days: f32, start_date: NaiveDate, config: &CalendarConfig) -> i64 {
+pub fn effort_to_calendar_days(effort_days: Day, start_date: NaiveDate, config: &CalendarConfig) -> i64 {
     let finish = day_to_date(effort_days, &CalendarConfig {
         start_date,
         ..config.clone()
@@ -107,14 +107,14 @@ mod tests {
     #[test]
     fn day_zero_is_start_date() {
         let cfg = mon_fri_config();
-        assert_eq!(day_to_date(0.0, &cfg), cfg.start_date);
+        assert_eq!(day_to_date(0, &cfg), cfg.start_date);
     }
 
     #[test]
     fn five_days_skips_weekend() {
         let cfg = mon_fri_config();
         // Mon Jan 6 + 5 working days = Mon Jan 13
-        let result = day_to_date(5.0, &cfg);
+        let result = day_to_date(5, &cfg);
         assert_eq!(result, NaiveDate::from_ymd_opt(2025, 1, 13).unwrap());
     }
 
@@ -125,7 +125,7 @@ mod tests {
             working_days_per_week: 5,
             non_working_dates: vec![],
         };
-        let result = day_to_date(1.0, &cfg);
+        let result = day_to_date(1, &cfg);
         assert_eq!(result, NaiveDate::from_ymd_opt(2025, 1, 13).unwrap()); // Monday
     }
 
@@ -139,7 +139,7 @@ mod tests {
         };
         // 1 working day after Mon Jan 6, skipping Tue Jan 7 → Wed Jan 8
         assert_eq!(
-            day_to_date(1.0, &cfg),
+            day_to_date(1, &cfg),
             NaiveDate::from_ymd_opt(2025, 1, 8).unwrap()
         );
     }
@@ -153,7 +153,7 @@ mod tests {
         };
         // 1 working day after Friday → Saturday (included in 6-day week)
         assert_eq!(
-            day_to_date(1.0, &cfg),
+            day_to_date(1, &cfg),
             NaiveDate::from_ymd_opt(2025, 1, 11).unwrap()
         );
     }
@@ -162,7 +162,7 @@ mod tests {
     fn date_to_day_roundtrip() {
         let cfg = mon_fri_config();
         for day in [0, 1, 5, 10, 20] {
-            let date = day_to_date(day as f32, &cfg);
+            let date = day_to_date(day, &cfg);
             assert_eq!(date_to_day(date, &cfg), day, "roundtrip failed for day {day}");
         }
     }
@@ -185,6 +185,6 @@ mod tests {
     fn effort_to_calendar_days_basic() {
         let cfg = mon_fri_config();
         // 5 working days starting Monday = 7 calendar days (Mon through next Mon)
-        assert_eq!(effort_to_calendar_days(5.0, cfg.start_date, &cfg), 7);
+        assert_eq!(effort_to_calendar_days(5, cfg.start_date, &cfg), 7);
     }
 }
