@@ -785,8 +785,19 @@ fn side_panel_ui(
             }
 
             ui.separator();
-            ui.label(format!("Start:  day {:.1}", start_day));
-            ui.label(format!("End:    day {:.1}", end_day));
+            {
+                let cal = &model.calendar;
+                let start_date = schedule::working_day_to_date(start_day, cal);
+                let end_date = schedule::working_day_to_date(end_day, cal);
+                let cal_days = schedule::calendar_span(start_day, duration_days, cal);
+                ui.label(format!("Start:  {} (day {:.0})", start_date.format("%b %-d"), start_day));
+                ui.label(format!(
+                    "End:    {} ({:.0}d effort / {} cal)",
+                    end_date.format("%b %-d"),
+                    duration_days,
+                    cal_days
+                ));
+            }
             if let Some(r) = row {
                 ui.label(format!("Row:    {}", r));
             }

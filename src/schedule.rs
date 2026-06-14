@@ -1,11 +1,34 @@
 use std::collections::HashMap;
 
 use bevy::prelude::{DetectChanges, Res, ResMut, Resource};
+use chrono::NaiveDate;
 
 use crate::graph::{CycleError, DependencyGraph};
 use crate::model::{
-    DependencyType, Model, Plan, PlanId, ResourceBlock, ResourceBlockId, WorkBlock, WorkBlockId,
+    CalendarConfig, DependencyType, Model, Plan, PlanId, ResourceBlock, ResourceBlockId,
+    WorkBlock, WorkBlockId,
 };
+
+/// Converts a working-day position to a calendar date using the plan's calendar.
+/// Day 0 = `config.start_date`; positive values advance through working days only.
+pub fn working_day_to_date(day: f32, config: &CalendarConfig) -> NaiveDate {
+    crate::calendar::day_to_date(day, config)
+}
+
+/// Returns the number of calendar days spanned by `effort_days` of work
+/// starting at `start_day` (in working-day units).  Accounts for weekends
+/// and non-working dates in the plan's calendar.
+pub fn calendar_span(start_day: f32, effort_days: f32, config: &CalendarConfig) -> i64 {
+    let start_date = working_day_to_date(start_day, config);
+    crate::calendar::effort_to_calendar_days(effort_days, start_date, config)
+}
+
+/// Snaps a computed start day to the start of the next whole working day.
+/// Fractional positions (mid-day) are ceiled so blocks begin at day boundaries.
+/// Whole-number positions are returned unchanged.
+fn snap_to_day_start(t: f32) -> f32 {
+    t.ceil()
+}
 
 /// The computed time placement of one work block.
 #[derive(Debug, Clone)]
@@ -253,7 +276,7 @@ pub fn cascade_dependencies(model: &mut Model, root: WorkBlockId) {
         let preds: Vec<(WorkBlockId, DependencyType, f32)> =
             incoming.get(&id).cloned().unwrap_or_default();
 
-        let new_start = preds
+        let raw_start = preds
             .iter()
             .filter_map(|&(pred_id, dep_type, lag)| {
                 model.work_blocks.get(&pred_id).map(|pred| match dep_type {
@@ -267,6 +290,9 @@ pub fn cascade_dependencies(model: &mut Model, root: WorkBlockId) {
             })
             .fold(0.0f32, f32::max)
             .max(0.0);
+        // Snap to the start of the next whole working day so constraint-derived
+        // starts never land mid-day on a non-working boundary.
+        let new_start = snap_to_day_start(raw_start);
 
         if let Some(wb) = model.work_blocks.get_mut(&id) {
             wb.start_day = new_start;
@@ -315,7 +341,10 @@ pub fn forward_pass(
             .map(|me| me - dur)
             .unwrap_or(0.0_f32);
 
-        let earliest_start = f32::max(0.0, f32::max(es_from_start, es_from_end));
+        // Snap to start of next whole working day: constraint-derived starts
+        // must not land mid-day (e.g. if a predecessor has a fractional duration).
+        let earliest_start =
+            snap_to_day_start(f32::max(0.0, f32::max(es_from_start, es_from_end)));
         let earliest_end = earliest_start + dur;
 
         // Propagate constraints to successors.
@@ -618,7 +647,7 @@ pub fn resource_leveled_pass(
             .map(|wb| wb.estimate.most_likely)
             .unwrap_or(0.0);
 
-        // Step 1: dependency-constrained minimum start.
+        // Step 1: dependency-constrained minimum start (snapped to day boundary).
         let dep_start = {
             let from_start = *dep_min_start.get(&id).unwrap_or(&0.0);
             let from_end = dep_min_end
@@ -626,7 +655,7 @@ pub fn resource_leveled_pass(
                 .and_then(|v| *v)
                 .map(|me| me - dur)
                 .unwrap_or(0.0);
-            f32::max(0.0, f32::max(from_start, from_end))
+            snap_to_day_start(f32::max(0.0, f32::max(from_start, from_end)))
         };
 
         // Step 2: find earliest resource-feasible start.
@@ -1583,5 +1612,73 @@ mod tests {
         // No dependencies.
         cascade_dependencies(&mut m, a);
         assert_eq!(m.work_blocks[&a].start_day, 0.0);
+    }
+
+    // ── Working-day calendar integration tests ─────────────────────────────
+
+    #[test]
+    fn forward_pass_snaps_fractional_start_to_day_boundary() {
+        // A has 3.5d effort; B (FS) must start at working day 4, not 3.5.
+        let (mut m, _) = base();
+        let a = m.create_work_block("A", est(3.5));
+        let b = m.create_work_block("B", est(2.0));
+        m.create_dependency(a, b, DependencyType::FinishToStart);
+        let s = run(&m, vec![a, b]);
+        assert_eq!(s.blocks[&b].start_day, 4.0);
+        assert_eq!(s.blocks[&b].end_day, 6.0);
+    }
+
+    #[test]
+    fn cascade_snaps_fractional_start_to_day_boundary() {
+        // A ends at 3.5 (fractional); B (FS) must snap to 4.0.
+        let mut m = Model::default();
+        let a = placed(&mut m, "A", 0.0, 3.5);
+        let b = placed(&mut m, "B", 0.0, 2.0);
+        m.create_dependency(a, b, DependencyType::FinishToStart);
+        cascade_dependencies(&mut m, a);
+        assert_eq!(m.work_blocks[&b].start_day, 4.0);
+    }
+
+    #[test]
+    fn cascade_whole_day_end_unchanged() {
+        // A ends on a whole day (5.0); B should start at exactly 5.0.
+        let mut m = Model::default();
+        let a = placed(&mut m, "A", 0.0, 5.0);
+        let b = placed(&mut m, "B", 5.0, 3.0);
+        m.create_dependency(a, b, DependencyType::FinishToStart);
+        m.work_blocks.get_mut(&a).unwrap().duration_days = 7.0;
+        cascade_dependencies(&mut m, a);
+        assert_eq!(m.work_blocks[&b].start_day, 7.0);
+    }
+
+    #[test]
+    fn working_day_to_date_uses_calendar() {
+        use crate::model::CalendarConfig;
+        use chrono::NaiveDate;
+        let config = CalendarConfig {
+            start_date: NaiveDate::from_ymd_opt(2025, 1, 6).unwrap(), // Monday
+            working_days_per_week: 5,
+            non_working_dates: vec![],
+        };
+        // 5 working days from Monday Jan 6 = Monday Jan 13 (skips weekend).
+        let date = working_day_to_date(5.0, &config);
+        assert_eq!(date, NaiveDate::from_ymd_opt(2025, 1, 13).unwrap());
+    }
+
+    #[test]
+    fn calendar_span_accounts_for_weekend() {
+        use crate::model::CalendarConfig;
+        use chrono::NaiveDate;
+        let config = CalendarConfig {
+            start_date: NaiveDate::from_ymd_opt(2025, 1, 6).unwrap(), // Monday
+            working_days_per_week: 5,
+            non_working_dates: vec![],
+        };
+        // 5 effort days starting Monday = 7 calendar days (Mon through next Mon).
+        assert_eq!(calendar_span(0.0, 5.0, &config), 7);
+        // 3 effort days starting Monday = 3 calendar days (Mon, Tue, Wed).
+        assert_eq!(calendar_span(0.0, 3.0, &config), 3);
+        // 3 effort days starting Thursday (day 3) = 5 calendar days (Thu–Mon).
+        assert_eq!(calendar_span(3.0, 3.0, &config), 5);
     }
 }
