@@ -1,7 +1,7 @@
 use bevy::prelude::*;
 use bevy_egui::EguiContexts;
 
-use crate::{constants::{PIXELS_PER_DAY, ROW_HEIGHT}, model::WorkBlockId, schedule::Schedule};
+use crate::{constants::{PIXELS_PER_DAY, ROW_HEIGHT}, model::WorkBlockId, schedule::{self, Schedule}};
 
 const BLOCK_HEIGHT: f32 = 28.0;
 
@@ -42,13 +42,7 @@ pub fn spawn_block_sprites(
         commands.entity(entity).despawn();
     }
 
-    let mut ordered: Vec<_> = schedule.blocks.values().collect();
-    ordered.sort_by(|a, b| {
-        a.start_day
-            .partial_cmp(&b.start_day)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then(a.work_block_id.0.cmp(&b.work_block_id.0))
-    });
+    let ordered = schedule::sorted_blocks(&schedule);
 
     let on_critical_path: std::collections::HashSet<WorkBlockId> =
         schedule.critical_path.iter().copied().collect();
