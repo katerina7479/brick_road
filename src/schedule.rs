@@ -1215,4 +1215,57 @@ mod tests {
         assert!(ana.float[&a].abs() < 1e-4);
         assert!(ana.float[&b].abs() < 1e-4);
     }
+
+    #[test]
+    fn user_placement_ss_predecessor_has_float() {
+        // A(0→3) --SS--> B(1→5): SS requires B.start ≥ A.start (slack = 1 day).
+        // total = 5; backward: LS_B = 5−4 = 1; LF_A_bound = LS_B − 0 + dur_A = 1 + 3 = 4
+        // float_A = 4 − 3 = 1; float_B = 0 (B is the last block).
+        let (mut m, _) = base();
+        let a = m.create_work_block("A", est(3.0));
+        let b = m.create_work_block("B", est(4.0));
+        m.create_dependency(a, b, DependencyType::StartToStart);
+        place(&mut m, a, 0.0, 3.0);
+        place(&mut m, b, 1.0, 4.0);
+        let ana = analyze_placed(&m, vec![a, b]);
+        assert!((ana.float[&a] - 1.0).abs() < 1e-4, "A float should be 1");
+        assert!(ana.float[&b].abs() < 1e-4, "B float should be 0");
+        assert!(ana.critical_path.contains(&b), "B is critical");
+        assert!(!ana.critical_path.contains(&a), "A is not critical");
+    }
+
+    #[test]
+    fn user_placement_ff_both_critical() {
+        // A(0→3) --FF--> B(1→3): FF requires B.end ≥ A.end = 3; B.end = 3 (tight).
+        // total = 3; backward: LF_A_bound = LF_B − 0 = 3 → float_A = 3−3 = 0; float_B = 0.
+        let (mut m, _) = base();
+        let a = m.create_work_block("A", est(3.0));
+        let b = m.create_work_block("B", est(2.0));
+        m.create_dependency(a, b, DependencyType::FinishToFinish);
+        place(&mut m, a, 0.0, 3.0);
+        place(&mut m, b, 1.0, 2.0);
+        let ana = analyze_placed(&m, vec![a, b]);
+        assert!(ana.float[&a].abs() < 1e-4, "A float should be 0");
+        assert!(ana.float[&b].abs() < 1e-4, "B float should be 0");
+        assert!(ana.critical_path.contains(&a), "A is critical");
+        assert!(ana.critical_path.contains(&b), "B is critical");
+    }
+
+    #[test]
+    fn user_placement_sf_with_lag_both_critical() {
+        // A(0→3) --SF+4--> B(0→4): SF+4 requires B.end ≥ A.start+4 = 4; B.end = 4 (tight).
+        // total = 4; backward: LF_A_bound = LF_B − 4 + dur_A = 4 − 4 + 3 = 3 → float_A = 0.
+        let (mut m, _) = base();
+        let a = m.create_work_block("A", est(3.0));
+        let b = m.create_work_block("B", est(4.0));
+        let dep = m.create_dependency(a, b, DependencyType::StartToFinish);
+        m.dependencies.get_mut(&dep).unwrap().lag = 4.0;
+        place(&mut m, a, 0.0, 3.0);
+        place(&mut m, b, 0.0, 4.0);
+        let ana = analyze_placed(&m, vec![a, b]);
+        assert!(ana.float[&a].abs() < 1e-4, "A float should be 0");
+        assert!(ana.float[&b].abs() < 1e-4, "B float should be 0");
+        assert!(ana.critical_path.contains(&a), "A is critical");
+        assert!(ana.critical_path.contains(&b), "B is critical");
+    }
 }
