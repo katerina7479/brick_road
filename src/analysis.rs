@@ -14,17 +14,17 @@ pub struct DependencyViolation {
     pub predecessor: WorkBlockId,
     pub successor: WorkBlockId,
     pub dependency_type: DependencyType,
-    pub lag: f32,
+    pub lag: i32,
     /// Days by which the constraint is violated (always > 0 when present).
-    pub violation_days: f32,
+    pub violation_days: i32,
 }
 
 /// A time window in which total resource demand exceeds available capacity.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ResourceConflict {
     pub resource_id: ResourceBlockId,
-    pub window_start: f32,
-    pub window_end: f32,
+    pub window_start: i32,
+    pub window_end: i32,
     /// Sum of `allocation_factor` for all blocks active in this window.
     pub demand: f32,
     /// Available capacity at this time (from `AvailabilityTimeline`, or 1.0 if none).
@@ -43,7 +43,7 @@ pub struct ScheduleAnalysis {
     /// Zero-float blocks in topological order (from user placement backward pass).
     pub critical_path: Vec<WorkBlockId>,
     /// Total float per block (latest_finish − earliest_finish over user placement).
-    pub float: HashMap<WorkBlockId, f32>,
+    pub float: HashMap<WorkBlockId, i32>,
 }
 
 /// Check every dependency in `model` against the current user-placed
@@ -79,7 +79,7 @@ pub fn analyze_dependencies(model: &Model) -> ScheduleAnalysis {
             DependencyType::StartToFinish => pred.start_day + lag - succ_end,
         };
 
-        if violation_days > 0.0 {
+        if violation_days > 0 {
             violations.push(DependencyViolation {
                 dependency_id: dep_id,
                 predecessor: dep.predecessor,
@@ -124,10 +124,10 @@ pub fn analyze_resources(model: &Model, plan: &Plan) -> Vec<ResourceConflict> {
         let rb = model.resource_blocks.get(rb_id);
 
         // Collect all event points: block starts/ends + availability boundaries.
-        let mut events: Vec<f32> = Vec::new();
+        let mut events: Vec<i32> = Vec::new();
         for &(wb_id, _) in allocs {
             if let Some(wb) = model.work_blocks.get(&wb_id) {
-                if wb.duration_days > 0.0 {
+                if wb.duration_days > 0 {
                     events.push(wb.start_day);
                     events.push(wb.start_day + wb.duration_days);
                 }
@@ -140,15 +140,15 @@ pub fn analyze_resources(model: &Model, plan: &Plan) -> Vec<ResourceConflict> {
             }
         }
 
-        events.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        events.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
+        events.sort();
+        events.dedup();
 
         for w in events.windows(2) {
             let (t0, t1) = (w[0], w[1]);
             if t1 <= t0 {
                 continue;
             }
-            let mid = (t0 + t1) * 0.5;
+            let mid = (t0 + t1) / 2;
 
             let mut demand = 0.0_f32;
             let mut contributing = Vec::new();
@@ -185,9 +185,9 @@ pub fn analyze_resources(model: &Model, plan: &Plan) -> Vec<ResourceConflict> {
     conflicts
 }
 
-/// Availability factor for resource `rb` at instant `t`.
+/// Availability factor for resource `rb` at day `t`.
 /// Gaps in the availability timeline are treated as factor 1.0.
-fn avail_at(rb: &ResourceBlock, t: f32) -> f32 {
+fn avail_at(rb: &ResourceBlock, t: i32) -> f32 {
     for seg in &rb.availability.segments {
         if seg.start <= t && t < seg.end {
             return seg.factor;
@@ -204,11 +204,11 @@ mod tests {
         ResourceType,
     };
 
-    fn est(d: f32) -> Estimate {
+    fn est(d: i32) -> Estimate {
         Estimate { most_likely: d, optimistic: d, pessimistic: d, confidence: 1.0 }
     }
 
-    fn placed(model: &mut Model, name: &str, start: f32, dur: f32) -> WorkBlockId {
+    fn placed(model: &mut Model, name: &str, start: i32, dur: i32) -> WorkBlockId {
         let id = model.create_work_block(name, est(dur));
         let wb = model.work_blocks.get_mut(&id).unwrap();
         wb.start_day = start;
@@ -228,8 +228,8 @@ mod tests {
     #[test]
     fn fs_no_violation() {
         let mut m = Model::default();
-        let a = placed(&mut m, "A", 0.0, 5.0);
-        let b = placed(&mut m, "B", 5.0, 3.0);
+        let a = placed(&mut m, "A", 0, 5);
+        let b = placed(&mut m, "B", 5, 3);
         m.create_dependency(a, b, DependencyType::FinishToStart);
         assert!(analyze_dependencies(&m).violations.is_empty());
     }
@@ -237,33 +237,33 @@ mod tests {
     #[test]
     fn fs_violation() {
         let mut m = Model::default();
-        let a = placed(&mut m, "A", 0.0, 5.0);
-        let b = placed(&mut m, "B", 3.0, 3.0);
+        let a = placed(&mut m, "A", 0, 5);
+        let b = placed(&mut m, "B", 3, 3);
         m.create_dependency(a, b, DependencyType::FinishToStart);
         let v = &analyze_dependencies(&m).violations;
         assert_eq!(v.len(), 1);
         assert_eq!(v[0].predecessor, a);
         assert_eq!(v[0].successor, b);
-        assert!((v[0].violation_days - 2.0).abs() < f32::EPSILON);
+        assert_eq!(v[0].violation_days, 2);
     }
 
     #[test]
     fn fs_with_lag_violation() {
         let mut m = Model::default();
-        let a = placed(&mut m, "A", 0.0, 3.0);
-        let b = placed(&mut m, "B", 4.0, 2.0);
+        let a = placed(&mut m, "A", 0, 3);
+        let b = placed(&mut m, "B", 4, 2);
         let dep_id = m.create_dependency(a, b, DependencyType::FinishToStart);
-        m.dependencies.get_mut(&dep_id).unwrap().lag = 2.0;
+        m.dependencies.get_mut(&dep_id).unwrap().lag = 2;
         let v = &analyze_dependencies(&m).violations;
         assert_eq!(v.len(), 1);
-        assert!((v[0].violation_days - 1.0).abs() < f32::EPSILON);
+        assert_eq!(v[0].violation_days, 1);
     }
 
     #[test]
     fn ss_no_violation() {
         let mut m = Model::default();
-        let a = placed(&mut m, "A", 2.0, 4.0);
-        let b = placed(&mut m, "B", 2.0, 3.0);
+        let a = placed(&mut m, "A", 2, 4);
+        let b = placed(&mut m, "B", 2, 3);
         m.create_dependency(a, b, DependencyType::StartToStart);
         assert!(analyze_dependencies(&m).violations.is_empty());
     }
@@ -271,19 +271,19 @@ mod tests {
     #[test]
     fn ss_violation() {
         let mut m = Model::default();
-        let a = placed(&mut m, "A", 3.0, 4.0);
-        let b = placed(&mut m, "B", 2.0, 3.0);
+        let a = placed(&mut m, "A", 3, 4);
+        let b = placed(&mut m, "B", 2, 3);
         m.create_dependency(a, b, DependencyType::StartToStart);
         let v = &analyze_dependencies(&m).violations;
         assert_eq!(v.len(), 1);
-        assert!((v[0].violation_days - 1.0).abs() < f32::EPSILON);
+        assert_eq!(v[0].violation_days, 1);
     }
 
     #[test]
     fn ff_no_violation() {
         let mut m = Model::default();
-        let a = placed(&mut m, "A", 0.0, 5.0);
-        let b = placed(&mut m, "B", 1.0, 4.0);
+        let a = placed(&mut m, "A", 0, 5);
+        let b = placed(&mut m, "B", 1, 4);
         m.create_dependency(a, b, DependencyType::FinishToFinish);
         assert!(analyze_dependencies(&m).violations.is_empty());
     }
@@ -291,19 +291,19 @@ mod tests {
     #[test]
     fn ff_violation() {
         let mut m = Model::default();
-        let a = placed(&mut m, "A", 0.0, 6.0);
-        let b = placed(&mut m, "B", 1.0, 4.0);
+        let a = placed(&mut m, "A", 0, 6);
+        let b = placed(&mut m, "B", 1, 4);
         m.create_dependency(a, b, DependencyType::FinishToFinish);
         let v = &analyze_dependencies(&m).violations;
         assert_eq!(v.len(), 1);
-        assert!((v[0].violation_days - 1.0).abs() < f32::EPSILON);
+        assert_eq!(v[0].violation_days, 1);
     }
 
     #[test]
     fn sf_no_violation() {
         let mut m = Model::default();
-        let a = placed(&mut m, "A", 4.0, 2.0);
-        let b = placed(&mut m, "B", 0.0, 5.0);
+        let a = placed(&mut m, "A", 4, 2);
+        let b = placed(&mut m, "B", 0, 5);
         m.create_dependency(a, b, DependencyType::StartToFinish);
         assert!(analyze_dependencies(&m).violations.is_empty());
     }
@@ -311,20 +311,20 @@ mod tests {
     #[test]
     fn sf_violation() {
         let mut m = Model::default();
-        let a = placed(&mut m, "A", 5.0, 2.0);
-        let b = placed(&mut m, "B", 0.0, 4.0);
+        let a = placed(&mut m, "A", 5, 2);
+        let b = placed(&mut m, "B", 0, 4);
         m.create_dependency(a, b, DependencyType::StartToFinish);
         let v = &analyze_dependencies(&m).violations;
         assert_eq!(v.len(), 1);
-        assert!((v[0].violation_days - 1.0).abs() < f32::EPSILON);
+        assert_eq!(v[0].violation_days, 1);
     }
 
     #[test]
     fn no_violations_clean_schedule() {
         let mut m = Model::default();
-        let a = placed(&mut m, "A", 0.0, 5.0);
-        let b = placed(&mut m, "B", 5.0, 8.0);
-        let c = placed(&mut m, "C", 13.0, 4.0);
+        let a = placed(&mut m, "A", 0, 5);
+        let b = placed(&mut m, "B", 5, 8);
+        let c = placed(&mut m, "C", 13, 4);
         m.create_dependency(a, b, DependencyType::FinishToStart);
         m.create_dependency(b, c, DependencyType::FinishToStart);
         assert!(analyze_dependencies(&m).violations.is_empty());
@@ -333,8 +333,8 @@ mod tests {
     #[test]
     fn missing_block_skipped() {
         let mut m = Model::default();
-        let a = placed(&mut m, "A", 0.0, 3.0);
-        let b = placed(&mut m, "B", 5.0, 2.0);
+        let a = placed(&mut m, "A", 0, 3);
+        let b = placed(&mut m, "B", 5, 2);
         m.create_dependency(a, b, DependencyType::FinishToStart);
         m.work_blocks.remove(&b);
         assert!(analyze_dependencies(&m).violations.is_empty());
@@ -361,8 +361,8 @@ mod tests {
         let wid = m.create_world("w");
         let r = m.create_resource_block("R", ResourceType::Person);
         m.worlds.get_mut(&wid).unwrap().resource_ids.push(r);
-        let a = placed(&mut m, "A", 0.0, 3.0);
-        let b = placed(&mut m, "B", 3.0, 3.0);
+        let a = placed(&mut m, "A", 0, 3);
+        let b = placed(&mut m, "B", 3, 3);
         let pid = make_plan(&mut m, vec![alloc(r, a, 1.0), alloc(r, b, 1.0)]);
         let plan = m.plans[&pid].clone();
         assert!(analyze_resources(&m, &plan).is_empty());
@@ -375,8 +375,8 @@ mod tests {
         let wid = m.create_world("w");
         let r = m.create_resource_block("R", ResourceType::Person);
         m.worlds.get_mut(&wid).unwrap().resource_ids.push(r);
-        let a = placed(&mut m, "A", 0.0, 5.0);
-        let b = placed(&mut m, "B", 2.0, 6.0);
+        let a = placed(&mut m, "A", 0, 5);
+        let b = placed(&mut m, "B", 2, 6);
         let pid = make_plan(&mut m, vec![alloc(r, a, 1.0), alloc(r, b, 1.0)]);
         let plan = m.plans[&pid].clone();
         let cs = analyze_resources(&m, &plan);
@@ -388,8 +388,8 @@ mod tests {
         assert!(c.contributing_blocks.contains(&a));
         assert!(c.contributing_blocks.contains(&b));
         // Non-overlapping windows should NOT appear as conflicts.
-        assert!(!cs.iter().any(|c| c.window_end <= 2.0));
-        assert!(!cs.iter().any(|c| c.window_start >= 5.0));
+        assert!(!cs.iter().any(|c| c.window_end <= 2));
+        assert!(!cs.iter().any(|c| c.window_start >= 5));
     }
 
     #[test]
@@ -399,8 +399,8 @@ mod tests {
         let wid = m.create_world("w");
         let r = m.create_resource_block("R", ResourceType::Person);
         m.worlds.get_mut(&wid).unwrap().resource_ids.push(r);
-        let a = placed(&mut m, "A", 0.0, 4.0);
-        let b = placed(&mut m, "B", 0.0, 4.0);
+        let a = placed(&mut m, "A", 0, 4);
+        let b = placed(&mut m, "B", 0, 4);
         let pid = make_plan(&mut m, vec![alloc(r, a, 0.5), alloc(r, b, 0.5)]);
         let plan = m.plans[&pid].clone();
         assert!(analyze_resources(&m, &plan).is_empty());
@@ -413,8 +413,8 @@ mod tests {
         let wid = m.create_world("w");
         let r = m.create_resource_block("R", ResourceType::Person);
         m.worlds.get_mut(&wid).unwrap().resource_ids.push(r);
-        let a = placed(&mut m, "A", 0.0, 4.0);
-        let b = placed(&mut m, "B", 0.0, 4.0);
+        let a = placed(&mut m, "A", 0, 4);
+        let b = placed(&mut m, "B", 0, 4);
         let pid = make_plan(&mut m, vec![alloc(r, a, 0.6), alloc(r, b, 0.6)]);
         let plan = m.plans[&pid].clone();
         let cs = analyze_resources(&m, &plan);
@@ -430,9 +430,9 @@ mod tests {
         let r = m.create_resource_block("R", ResourceType::Person);
         m.worlds.get_mut(&wid).unwrap().resource_ids.push(r);
         m.resource_blocks.get_mut(&r).unwrap().availability = AvailabilityTimeline {
-            segments: vec![AvailabilitySegment { start: 0.0, end: 10.0, factor: 0.5 }],
+            segments: vec![AvailabilitySegment { start: 0, end: 10, factor: 0.5 }],
         };
-        let a = placed(&mut m, "A", 0.0, 5.0);
+        let a = placed(&mut m, "A", 0, 5);
         let pid = make_plan(&mut m, vec![alloc(r, a, 1.0)]);
         let plan = m.plans[&pid].clone();
         let cs = analyze_resources(&m, &plan);
@@ -452,11 +452,11 @@ mod tests {
         m.worlds.get_mut(&wid).unwrap().resource_ids.push(r);
         m.resource_blocks.get_mut(&r).unwrap().availability = AvailabilityTimeline {
             segments: vec![
-                AvailabilitySegment { start: 0.0, end: 5.0, factor: 0.5 },
-                AvailabilitySegment { start: 8.0, end: 12.0, factor: 0.5 },
+                AvailabilitySegment { start: 0, end: 5, factor: 0.5 },
+                AvailabilitySegment { start: 8, end: 12, factor: 0.5 },
             ],
         };
-        let a = placed(&mut m, "A", 5.0, 3.0); // [5, 8) — entirely in the gap
+        let a = placed(&mut m, "A", 5, 3); // [5, 8) — entirely in the gap
         let pid = make_plan(&mut m, vec![alloc(r, a, 1.2)]);
         let plan = m.plans[&pid].clone();
         let cs = analyze_resources(&m, &plan);
@@ -465,7 +465,7 @@ mod tests {
         assert!((c.capacity - 1.0).abs() < 1e-5, "gap capacity must default to 1.0");
         assert!((c.demand - 1.2).abs() < 1e-5);
         assert!((c.overload - 0.2).abs() < 1e-5);
-        assert!((c.window_start - 5.0).abs() < 1e-5);
-        assert!((c.window_end - 8.0).abs() < 1e-5);
+        assert_eq!(c.window_start, 5);
+        assert_eq!(c.window_end, 8);
     }
 }

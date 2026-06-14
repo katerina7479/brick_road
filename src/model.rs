@@ -17,12 +17,12 @@ id_newtype!(MilestoneId);
 id_newtype!(WorldId);
 id_newtype!(PlanId);
 
-/// Three-point effort estimate in workdays.
+/// Three-point effort estimate in whole workdays.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Estimate {
-    pub most_likely: f32,
-    pub optimistic: f32,
-    pub pessimistic: f32,
+    pub most_likely: i32,
+    pub optimistic: i32,
+    pub pessimistic: i32,
     /// Subjective confidence that the true value falls in the given range (0.0–1.0).
     pub confidence: f32,
 }
@@ -39,12 +39,10 @@ pub struct WorkBlock {
     pub estimate: Estimate,
     /// Alternative implementations of this block (mutually exclusive).
     pub variants: Vec<VariantId>,
-    /// User-defined placement: start offset in days from the plan origin.
-    /// 0.0 until the user manually positions the block.
-    pub start_day: f32,
-    /// User-defined placement: duration in days.
-    /// 0.0 until the user manually sizes the block.
-    pub duration_days: f32,
+    /// User-defined placement: start offset in whole days from the plan origin.
+    pub start_day: i32,
+    /// User-defined placement: duration in whole days.
+    pub duration_days: i32,
 }
 
 /// One alternative decomposition of a parent WorkBlock into an ordered sequence
@@ -76,11 +74,11 @@ pub struct ResourceBlock {
 }
 
 /// A contiguous span of time during which a resource is available.
-/// Start and end are in days relative to the plan origin.
+/// Start and end are in whole days relative to the plan origin.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AvailabilitySegment {
-    pub start: f32,
-    pub end: f32,
+    pub start: i32,
+    pub end: i32,
     /// Fraction of full capacity available in this segment (0.0–1.0).
     pub factor: f32,
 }
@@ -105,17 +103,17 @@ pub struct Dependency {
     pub predecessor: WorkBlockId,
     pub successor: WorkBlockId,
     pub dependency_type: DependencyType,
-    /// Optional lag in days (positive = delay, negative = lead).
-    pub lag: f32,
+    /// Optional lag in whole days (positive = delay, negative = lead).
+    pub lag: i32,
 }
 
 /// A significant named date in the plan timeline.
-/// Date is in days relative to the plan origin.
+/// Date is in whole days relative to the plan origin.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Milestone {
     pub id: MilestoneId,
     pub name: String,
-    pub date: f32,
+    pub date: i32,
 }
 
 /// Assignment of a fraction of a resource's capacity to a work block.
@@ -185,8 +183,8 @@ impl Model {
                 name: name.into(),
                 estimate,
                 variants: vec![],
-                start_day: 0.0,
-                duration_days: 0.0,
+                start_day: 0,
+                duration_days: 0,
             },
         );
         id
@@ -238,13 +236,13 @@ impl Model {
                 predecessor,
                 successor,
                 dependency_type,
-                lag: 0.0,
+                lag: 0,
             },
         );
         id
     }
 
-    pub fn create_milestone(&mut self, name: impl Into<String>, date: f32) -> MilestoneId {
+    pub fn create_milestone(&mut self, name: impl Into<String>, date: i32) -> MilestoneId {
         let id = MilestoneId(self.alloc_id());
         self.milestones.insert(
             id,
@@ -329,9 +327,9 @@ mod tests {
 
     fn est() -> Estimate {
         Estimate {
-            most_likely: 3.0,
-            optimistic: 1.0,
-            pessimistic: 7.0,
+            most_likely: 3,
+            optimistic: 1,
+            pessimistic: 7,
             confidence: 0.8,
         }
     }
@@ -406,7 +404,7 @@ mod tests {
         let world_id = m.create_world("baseline");
         let plan_id = m.create_plan("plan A", world_id);
         let res_id = m.create_resource_block("Alice", ResourceType::Person);
-        let ms_id = m.create_milestone("launch", 90.0);
+        let ms_id = m.create_milestone("launch", 90);
         let block_a = m.create_work_block("a", est());
         let block_b = m.create_work_block("b", est());
         let dep_id = m.create_dependency(block_a, block_b, DependencyType::FinishToStart);
@@ -414,7 +412,7 @@ mod tests {
         assert_eq!(m.get_world(world_id).unwrap().name, "baseline");
         assert_eq!(m.get_plan(plan_id).unwrap().world_id, world_id);
         assert_eq!(m.get_resource_block(res_id).unwrap().name, "Alice");
-        assert_eq!(m.get_milestone(ms_id).unwrap().date, 90.0);
+        assert_eq!(m.get_milestone(ms_id).unwrap().date, 90);
         let dep = m.get_dependency(dep_id).unwrap();
         assert_eq!(dep.predecessor, block_a);
         assert_eq!(dep.successor, block_b);

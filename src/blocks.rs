@@ -56,9 +56,9 @@ pub fn spawn_block_sprites(
         sa.critical_path.iter().copied().collect();
 
     for (row, wb) in ordered.iter().enumerate() {
-        let width = wb.duration_days * PIXELS_PER_DAY;
+        let width = wb.duration_days as f32 * PIXELS_PER_DAY;
         // Sprite origin is at its center in Bevy 2D.
-        let x = wb.start_day * PIXELS_PER_DAY + width * 0.5;
+        let x = wb.start_day as f32 * PIXELS_PER_DAY + width * 0.5;
         let y = -(row as f32) * ROW_HEIGHT;
 
         // Critical-path blocks glow gold; others cycle through the palette.
@@ -102,8 +102,8 @@ pub fn sync_block_sprites(
         let Some(wb) = model.work_blocks.get(&block_sprite.work_block_id) else {
             continue;
         };
-        let width = wb.duration_days * PIXELS_PER_DAY;
-        let x = wb.start_day * PIXELS_PER_DAY + width * 0.5;
+        let width = wb.duration_days as f32 * PIXELS_PER_DAY;
+        let x = wb.start_day as f32 * PIXELS_PER_DAY + width * 0.5;
         let y = -(block_sprite.row as f32) * ROW_HEIGHT;
         transform.translation.x = x;
         transform.translation.y = y;
@@ -222,7 +222,7 @@ pub fn sync_conflict_overlays(
     let total_rows = ordered.len().max(1);
 
     for conflict in &sa.resource_conflicts {
-        let width = (conflict.window_end - conflict.window_start) * PIXELS_PER_DAY;
+        let width = (conflict.window_end - conflict.window_start) as f32 * PIXELS_PER_DAY;
         if width <= 0.0 {
             continue;
         }
@@ -247,7 +247,7 @@ pub fn sync_conflict_overlays(
             ((y_top + y_bot) * 0.5, h)
         };
 
-        let x_center = conflict.window_start * PIXELS_PER_DAY + width * 0.5;
+        let x_center = conflict.window_start as f32 * PIXELS_PER_DAY + width * 0.5;
 
         commands.spawn((
             ConflictOverlay,
@@ -299,8 +299,8 @@ pub fn draw_dependency_edges(
             (
                 wb.id,
                 BlockGeom {
-                    xl: wb.start_day * PIXELS_PER_DAY,
-                    xr: (wb.start_day + wb.duration_days) * PIXELS_PER_DAY,
+                    xl: wb.start_day as f32 * PIXELS_PER_DAY,
+                    xr: (wb.start_day + wb.duration_days) as f32 * PIXELS_PER_DAY,
                     y: -(row as f32) * ROW_HEIGHT,
                 },
             )

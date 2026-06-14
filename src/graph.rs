@@ -7,8 +7,8 @@ use crate::model::{DependencyType, Model, Plan, WorkBlockId};
 pub struct Edge {
     pub successor: WorkBlockId,
     pub dependency_type: DependencyType,
-    /// Lag in days (positive = delay, negative = lead).
-    pub lag: f32,
+    /// Lag in whole days (positive = delay, negative = lead).
+    pub lag: i32,
 }
 
 /// Directed acyclic graph of active work blocks for one Plan.
@@ -168,9 +168,9 @@ mod tests {
 
     fn est() -> Estimate {
         Estimate {
-            most_likely: 1.0,
-            optimistic: 1.0,
-            pessimistic: 1.0,
+            most_likely: 1,
+            optimistic: 1,
+            pessimistic: 1,
             confidence: 1.0,
         }
     }

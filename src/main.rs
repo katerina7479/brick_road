@@ -97,21 +97,21 @@ fn draw_grid(mut gizmos: Gizmos) {
 fn setup_demo_schedule(mut model: ResMut<model::Model>, mut commands: Commands) {
     use model::{DependencyType, Estimate};
 
-    let est = |d: f32| Estimate {
+    let est = |d: i32| Estimate {
         most_likely: d,
-        optimistic: d * 0.7,
-        pessimistic: d * 1.5,
+        optimistic: d * 7 / 10,
+        pessimistic: d * 3 / 2,
         confidence: 0.8,
     };
 
     let world_id = model.create_world("Demo");
     let plan_id = model.create_plan("Demo Plan", world_id);
 
-    let design = model.create_work_block("Design", est(5.0));
-    let build = model.create_work_block("Build", est(8.0));
-    let test = model.create_work_block("Test", est(4.0));
-    let review = model.create_work_block("Review", est(2.0));
-    let deploy = model.create_work_block("Deploy", est(1.0));
+    let design = model.create_work_block("Design", est(5));
+    let build = model.create_work_block("Build", est(8));
+    let test = model.create_work_block("Test", est(4));
+    let review = model.create_work_block("Review", est(2));
+    let deploy = model.create_work_block("Deploy", est(1));
 
     model.create_dependency(design, build, DependencyType::FinishToStart);
     model.create_dependency(build, test, DependencyType::FinishToStart);
@@ -239,8 +239,8 @@ fn side_panel_ui(
 
             ui.strong(&name);
             ui.separator();
-            ui.label(format!("Start:  day {:.1}", start_day));
-            ui.label(format!("End:    day {:.1}", end_day));
+            ui.label(format!("Start:  day {}", start_day));
+            ui.label(format!("End:    day {}", end_day));
             if let Some(r) = row {
                 ui.label(format!("Row:    {}", r));
             }
@@ -248,11 +248,7 @@ fn side_panel_ui(
             ui.separator();
             ui.label("Duration");
             let changed = ui
-                .add(
-                    egui::Slider::new(&mut duration_days, 0.5f32..=60.0)
-                        .text("days")
-                        .step_by(0.5),
-                )
+                .add(egui::Slider::new(&mut duration_days, 1i32..=60).text("days"))
                 .changed();
 
             if changed {
@@ -268,13 +264,13 @@ fn side_panel_ui(
             ui.separator();
             ui.label("Estimate");
             let ml_changed = ui
-                .add(egui::Slider::new(&mut most_likely, 0.5f32..=60.0).text("most likely").step_by(0.5))
+                .add(egui::Slider::new(&mut most_likely, 1i32..=60).text("most likely"))
                 .changed();
             let opt_changed = ui
-                .add(egui::Slider::new(&mut optimistic, 0.5f32..=60.0).text("optimistic").step_by(0.5))
+                .add(egui::Slider::new(&mut optimistic, 1i32..=60).text("optimistic"))
                 .changed();
             let pes_changed = ui
-                .add(egui::Slider::new(&mut pessimistic, 0.5f32..=60.0).text("pessimistic").step_by(0.5))
+                .add(egui::Slider::new(&mut pessimistic, 1i32..=60).text("pessimistic"))
                 .changed();
             ui.label(format!("Confidence:   {:.0}%", confidence * 100.0));
 

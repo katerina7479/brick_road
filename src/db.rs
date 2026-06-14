@@ -14,8 +14,8 @@ pub fn create_tables(conn: &Connection) -> Result<()> {
     // SQLite has no ADD COLUMN IF NOT EXISTS. Run each migration and ignore
     // the "duplicate column name" error that fires when it already exists.
     for sql in [
-        "ALTER TABLE work_blocks ADD COLUMN start_day REAL NOT NULL DEFAULT 0",
-        "ALTER TABLE work_blocks ADD COLUMN duration_days REAL NOT NULL DEFAULT 0",
+        "ALTER TABLE work_blocks ADD COLUMN start_day INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE work_blocks ADD COLUMN duration_days INTEGER NOT NULL DEFAULT 0",
     ] {
         match conn.execute_batch(sql) {
             Ok(()) => {}
@@ -93,8 +93,8 @@ pub fn save_model(conn: &Connection, model: &Model) -> Result<()> {
                  VALUES (?1, ?2, ?3, ?4, ?5)",
                 (
                     rb.id.0,
-                    seg.start as f64,
-                    seg.end as f64,
+                    seg.start as i64,
+                    seg.end as i64,
                     seg.factor as f64,
                     order as i64,
                 ),
@@ -113,12 +113,12 @@ pub fn save_model(conn: &Connection, model: &Model) -> Result<()> {
             (
                 wb.id.0,
                 &wb.name,
-                wb.estimate.most_likely as f64,
-                wb.estimate.optimistic as f64,
-                wb.estimate.pessimistic as f64,
+                wb.estimate.most_likely as i64,
+                wb.estimate.optimistic as i64,
+                wb.estimate.pessimistic as i64,
                 wb.estimate.confidence as f64,
-                wb.start_day as f64,
-                wb.duration_days as f64,
+                wb.start_day as i64,
+                wb.duration_days as i64,
             ),
         )?;
     }
@@ -160,7 +160,7 @@ pub fn save_model(conn: &Connection, model: &Model) -> Result<()> {
                 dep.predecessor.0,
                 dep.successor.0,
                 dependency_type_str(dep.dependency_type),
-                dep.lag as f64,
+                dep.lag as i64,
             ),
         )?;
     }
@@ -169,7 +169,7 @@ pub fn save_model(conn: &Connection, model: &Model) -> Result<()> {
     for ms in model.milestones.values() {
         tx.execute(
             "INSERT INTO milestones (id, name, date_day) VALUES (?1, ?2, ?3)",
-            (ms.id.0, &ms.name, ms.date as f64),
+            (ms.id.0, &ms.name, ms.date as i64),
         )?;
     }
 
@@ -284,6 +284,7 @@ pub fn load_model(conn: &Connection) -> Result<Model> {
     }
 
     // availability_segments  (ORDER BY guarantees segment ordering)
+    // Read start/end as f64 to handle both legacy REAL columns and new INTEGER columns.
     {
         let mut stmt = conn.prepare(
             "SELECT resource_block_id, start_day, end_day, factor
@@ -305,8 +306,8 @@ pub fn load_model(conn: &Connection) -> Result<Model> {
                 .get_mut(&ResourceBlockId(rb_id as u64))
             {
                 rb.availability.segments.push(AvailabilitySegment {
-                    start: start as f32,
-                    end: end as f32,
+                    start: start as i32,
+                    end: end as i32,
                     factor: factor as f32,
                 });
             }
@@ -314,6 +315,7 @@ pub fn load_model(conn: &Connection) -> Result<Model> {
     }
 
     // work_blocks
+    // Read estimate and placement fields as f64 to handle both legacy REAL and new INTEGER columns.
     {
         let mut stmt = conn.prepare(
             "SELECT id, name, estimate_most_likely, estimate_optimistic,
@@ -342,14 +344,14 @@ pub fn load_model(conn: &Connection) -> Result<Model> {
                     id: WorkBlockId(id as u64),
                     name,
                     estimate: Estimate {
-                        most_likely: ml as f32,
-                        optimistic: opt as f32,
-                        pessimistic: pes as f32,
+                        most_likely: ml as i32,
+                        optimistic: opt as i32,
+                        pessimistic: pes as i32,
                         confidence: conf as f32,
                     },
                     variants: vec![],
-                    start_day: start_day as f32,
-                    duration_days: duration_days as f32,
+                    start_day: start_day as i32,
+                    duration_days: duration_days as i32,
                 },
             );
         }
@@ -406,6 +408,7 @@ pub fn load_model(conn: &Connection) -> Result<Model> {
     }
 
     // dependencies
+    // Read lag_days as f64 to handle both legacy REAL and new INTEGER columns.
     {
         let mut stmt = conn.prepare(
             "SELECT id, predecessor_id, successor_id, dependency_type, lag_days
@@ -431,13 +434,14 @@ pub fn load_model(conn: &Connection) -> Result<Model> {
                     predecessor: WorkBlockId(pred as u64),
                     successor: WorkBlockId(succ as u64),
                     dependency_type,
-                    lag: lag as f32,
+                    lag: lag as i32,
                 },
             );
         }
     }
 
     // milestones
+    // Read date_day as f64 to handle both legacy REAL and new INTEGER columns.
     {
         let mut stmt = conn.prepare("SELECT id, name, date_day FROM milestones")?;
         let rows = stmt.query_map([], |row| {
@@ -455,7 +459,7 @@ pub fn load_model(conn: &Connection) -> Result<Model> {
                 Milestone {
                     id: MilestoneId(id as u64),
                     name,
-                    date: date as f32,
+                    date: date as i32,
                 },
             );
         }
@@ -729,7 +733,7 @@ mod tests {
         conn
     }
 
-    fn est(ml: f32, opt: f32, pes: f32, conf: f32) -> Estimate {
+    fn est(ml: i32, opt: i32, pes: i32, conf: f32) -> Estimate {
         Estimate {
             most_likely: ml,
             optimistic: opt,
@@ -751,9 +755,9 @@ mod tests {
     fn sparse_model_round_trip() {
         let conn = open_in_memory();
         let mut m = Model::default();
-        m.create_milestone("kickoff", 0.0);
-        m.create_milestone("launch", 120.0);
-        m.create_work_block("prep", est(5.0, 3.0, 10.0, 0.8));
+        m.create_milestone("kickoff", 0);
+        m.create_milestone("launch", 120);
+        m.create_work_block("prep", est(5, 3, 10, 0.8));
 
         save_model(&conn, &m).unwrap();
         let loaded = load_model(&conn).unwrap();
@@ -782,8 +786,8 @@ mod tests {
             .availability
             .segments
             .push(AvailabilitySegment {
-                start: 0.0,
-                end: 100.0,
+                start: 0,
+                end: 100,
                 factor: 1.0,
             });
         m.resource_blocks
@@ -792,17 +796,17 @@ mod tests {
             .availability
             .segments
             .push(AvailabilitySegment {
-                start: 100.0,
-                end: 200.0,
+                start: 100,
+                end: 200,
                 factor: 0.5,
             });
         let rb2 = m.create_resource_block("Team Alpha", ResourceType::Team);
         m.worlds.get_mut(&world_id).unwrap().resource_ids.push(rb1);
         m.worlds.get_mut(&world_id).unwrap().resource_ids.push(rb2);
 
-        let wb_a = m.create_work_block("Design", est(3.0, 1.0, 7.0, 0.75));
-        let wb_b = m.create_work_block("Implement", est(10.0, 5.0, 20.0, 0.5));
-        let wb_child = m.create_work_block("Sub-task", est(4.0, 2.0, 8.0, 0.75));
+        let wb_a = m.create_work_block("Design", est(3, 1, 7, 0.75));
+        let wb_b = m.create_work_block("Implement", est(10, 5, 20, 0.5));
+        let wb_child = m.create_work_block("Sub-task", est(4, 2, 8, 0.75));
 
         let v1 = m.create_variant("fast", wb_b);
         let v2 = m.create_variant("thorough", wb_b);
@@ -811,9 +815,9 @@ mod tests {
         m.variants.get_mut(&v1).unwrap().children.push(wb_child);
 
         let dep_id = m.create_dependency(wb_a, wb_b, DependencyType::FinishToStart);
-        m.dependencies.get_mut(&dep_id).unwrap().lag = 1.5;
+        m.dependencies.get_mut(&dep_id).unwrap().lag = 1;
 
-        m.create_milestone("launch", 90.0);
+        m.create_milestone("launch", 90);
 
         let plan_id = m.create_plan("alpha", world_id);
         m.plans.get_mut(&plan_id).unwrap().root_blocks.push(wb_a);
@@ -876,17 +880,17 @@ mod tests {
         // persistence path for user-defined placement values.
         let conn = open_in_memory();
         let mut m = Model::default();
-        let id = m.create_work_block("task", est(5.0, 3.0, 8.0, 0.9));
+        let id = m.create_work_block("task", est(5, 3, 8, 0.9));
         let wb = m.work_blocks.get_mut(&id).unwrap();
-        wb.start_day = 7.5;
-        wb.duration_days = 3.0;
+        wb.start_day = 7;
+        wb.duration_days = 3;
 
         save_model(&conn, &m).unwrap();
         let loaded = load_model(&conn).unwrap();
 
         let loaded_wb = loaded.work_blocks.get(&id).unwrap();
-        assert_eq!(loaded_wb.start_day, 7.5);
-        assert_eq!(loaded_wb.duration_days, 3.0);
+        assert_eq!(loaded_wb.start_day, 7);
+        assert_eq!(loaded_wb.duration_days, 3);
         assert_eq!(m.work_blocks, loaded.work_blocks);
     }
 
@@ -894,17 +898,17 @@ mod tests {
     fn nonzero_start_day_and_duration_round_trip() {
         let conn = open_in_memory();
         let mut m = Model::default();
-        let id = m.create_work_block("placed task", est(4.0, 2.0, 8.0, 0.8));
+        let id = m.create_work_block("placed task", est(4, 2, 8, 0.8));
         let wb = m.work_blocks.get_mut(&id).unwrap();
-        wb.start_day = 3.5;
-        wb.duration_days = 7.0;
+        wb.start_day = 3;
+        wb.duration_days = 7;
 
         save_model(&conn, &m).unwrap();
         let loaded = load_model(&conn).unwrap();
 
         let loaded_wb = loaded.work_blocks.get(&id).unwrap();
-        assert_eq!(loaded_wb.start_day, 3.5);
-        assert_eq!(loaded_wb.duration_days, 7.0);
+        assert_eq!(loaded_wb.start_day, 3);
+        assert_eq!(loaded_wb.duration_days, 7);
     }
 
     #[test]
@@ -947,8 +951,8 @@ mod tests {
         let wb_id = WorkBlockId(1);
         let wb = model.work_blocks.get(&wb_id).expect("legacy block loaded");
         assert_eq!(wb.name, "legacy task");
-        assert_eq!(wb.start_day, 0.0, "start_day should default to 0.0");
-        assert_eq!(wb.duration_days, 0.0, "duration_days should default to 0.0");
+        assert_eq!(wb.start_day, 0, "start_day should default to 0");
+        assert_eq!(wb.duration_days, 0, "duration_days should default to 0");
     }
 
     #[test]
@@ -957,8 +961,8 @@ mod tests {
         let w = m.create_world("w");
         let rb = m.create_resource_block("Alice", ResourceType::Person);
         m.worlds.get_mut(&w).unwrap().resource_ids.push(rb);
-        let wb_a = m.create_work_block("a", est(1.0, 0.5, 2.0, 1.0));
-        let wb_b = m.create_work_block("b", est(1.0, 0.5, 2.0, 1.0));
+        let wb_a = m.create_work_block("a", est(1, 1, 2, 1.0));
+        let wb_b = m.create_work_block("b", est(1, 1, 2, 1.0));
         let v = m.create_variant("v", wb_a);
         m.work_blocks.get_mut(&wb_a).unwrap().variants.push(v);
         let _dep = m.create_dependency(wb_a, wb_b, DependencyType::FinishToStart);
@@ -984,7 +988,7 @@ mod tests {
     #[test]
     fn validate_catches_orphan_variant_parent() {
         let mut m = Model::default();
-        let wb_id = m.create_work_block("wb", est(1.0, 0.5, 2.0, 1.0));
+        let wb_id = m.create_work_block("wb", est(1, 1, 2, 1.0));
         let v_id = m.create_variant("v", wb_id);
         m.work_blocks.get_mut(&wb_id).unwrap().variants.push(v_id);
         m.variants.insert(
@@ -1029,8 +1033,8 @@ mod tests {
     fn validate_catches_mismatched_variant_selection() {
         let mut m = Model::default();
         let world_id = m.create_world("w");
-        let wb_a = m.create_work_block("a", est(1.0, 0.5, 2.0, 1.0));
-        let wb_b = m.create_work_block("b", est(1.0, 0.5, 2.0, 1.0));
+        let wb_a = m.create_work_block("a", est(1, 1, 2, 1.0));
+        let wb_b = m.create_work_block("b", est(1, 1, 2, 1.0));
         let v = m.create_variant("v", wb_a);
         m.work_blocks.get_mut(&wb_a).unwrap().variants.push(v);
         let plan_id = m.create_plan("p", world_id);
@@ -1064,21 +1068,21 @@ CREATE TABLE IF NOT EXISTS resource_blocks (
 CREATE TABLE IF NOT EXISTS availability_segments (
     id                INTEGER PRIMARY KEY,
     resource_block_id INTEGER NOT NULL REFERENCES resource_blocks(id),
-    start_day         REAL    NOT NULL,
-    end_day           REAL    NOT NULL,
+    start_day         INTEGER NOT NULL,
+    end_day           INTEGER NOT NULL,
     factor            REAL    NOT NULL,
     sort_order        INTEGER NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS work_blocks (
     id                   INTEGER PRIMARY KEY,
-    name                 TEXT NOT NULL,
-    estimate_most_likely REAL NOT NULL,
-    estimate_optimistic  REAL NOT NULL,
-    estimate_pessimistic REAL NOT NULL,
-    estimate_confidence  REAL NOT NULL,
-    start_day            REAL NOT NULL DEFAULT 0,
-    duration_days        REAL NOT NULL DEFAULT 0
+    name                 TEXT    NOT NULL,
+    estimate_most_likely INTEGER NOT NULL,
+    estimate_optimistic  INTEGER NOT NULL,
+    estimate_pessimistic INTEGER NOT NULL,
+    estimate_confidence  REAL    NOT NULL,
+    start_day            INTEGER NOT NULL DEFAULT 0,
+    duration_days        INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS variants (
@@ -1101,13 +1105,13 @@ CREATE TABLE IF NOT EXISTS dependencies (
     predecessor_id  INTEGER NOT NULL REFERENCES work_blocks(id),
     successor_id    INTEGER NOT NULL REFERENCES work_blocks(id),
     dependency_type TEXT    NOT NULL,
-    lag_days        REAL    NOT NULL DEFAULT 0.0
+    lag_days        INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS milestones (
     id       INTEGER PRIMARY KEY,
-    name     TEXT NOT NULL,
-    date_day REAL NOT NULL
+    name     TEXT    NOT NULL,
+    date_day INTEGER NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS plans (
@@ -1141,7 +1145,7 @@ CREATE TABLE IF NOT EXISTS resource_allocations (
 CREATE TABLE IF NOT EXISTS plan_milestone_targets (
     plan_id      INTEGER NOT NULL REFERENCES plans(id),
     milestone_id INTEGER NOT NULL REFERENCES milestones(id),
-    target_day   REAL    NOT NULL,
+    target_day   INTEGER NOT NULL,
     PRIMARY KEY (plan_id, milestone_id)
 );
 ";

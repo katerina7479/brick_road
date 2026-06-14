@@ -47,7 +47,7 @@ pub fn spawn_labels(
     }
 
     // Day number labels along the top of the grid.
-    let span = schedule.total_duration_days.ceil() as i32 + DAY_STEP;
+    let span = schedule.total_duration_days + DAY_STEP;
     for day in (0..=span).step_by(DAY_STEP as usize) {
         let x = day as f32 * PIXELS_PER_DAY;
         commands.spawn((
@@ -126,7 +126,7 @@ pub fn draw_nesting_indicators(
             .children
             .iter()
             .filter_map(|id| schedule.blocks.get(id))
-            .map(|b| b.start_day * PIXELS_PER_DAY)
+            .map(|b| b.start_day as f32 * PIXELS_PER_DAY)
             .fold(f32::INFINITY, f32::min);
 
         if !left_x.is_finite() {
@@ -195,8 +195,8 @@ pub fn draw_violation_indicators(
             continue;
         };
 
-        let pred_x = (pred.start_day + pred.duration_days) * PIXELS_PER_DAY;
-        let succ_x = succ.start_day * PIXELS_PER_DAY;
+        let pred_x = (pred.start_day + pred.duration_days) as f32 * PIXELS_PER_DAY;
+        let succ_x = succ.start_day as f32 * PIXELS_PER_DAY;
 
         gizmos.line_2d(
             Vec2::new(pred_x, pred_y),
