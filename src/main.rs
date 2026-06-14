@@ -211,6 +211,7 @@ fn camera_nav_ui(
     mut contexts: EguiContexts,
     mut target: ResMut<CameraTarget>,
     model: Res<model::Model>,
+    scope: Res<schedule::ViewScope>,
     windows: Query<&Window>,
 ) {
     let Ok(ctx) = contexts.ctx_mut() else { return };
@@ -223,7 +224,7 @@ fn camera_nav_ui(
                     target.zoom = 1.0;
                 }
                 if ui.small_button("Fit to view [F]").clicked() {
-                    if let Some(new_target) = camera::fit_to_blocks(&model, &windows) {
+                    if let Some(new_target) = camera::fit_to_blocks(&model, &scope, &windows) {
                         *target = new_target;
                     }
                 }
