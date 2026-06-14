@@ -9,7 +9,7 @@ use crate::{
     analysis::ScheduleAnalysis,
     constants::{PIXELS_PER_DAY, ROW_HEIGHT},
     db,
-    model::{self, DependencyId, DependencyType, Estimate, WorkBlockId},
+    model::{self, Day, DependencyId, DependencyType, Estimate, WorkBlockId},
     schedule::{self, ViewScope},
 };
 
@@ -153,8 +153,8 @@ pub fn reconcile_block_sprites(
             }
         } else {
             // New entity: spawn parent sprite + label and dot children.
-            let width = wb.duration_days * PIXELS_PER_DAY;
-            let x = wb.start_day * PIXELS_PER_DAY + width * 0.5;
+            let width = wb.duration_days as f32 * PIXELS_PER_DAY;
+            let x = wb.start_day as f32 * PIXELS_PER_DAY + width * 0.5;
             let y = -(row as f32) * ROW_HEIGHT;
 
             let color = if let Some([r, g, b]) = wb.color {
@@ -278,7 +278,7 @@ pub fn sync_description_dots(
         let Some(wb) = model.work_blocks.get(&id) else {
             continue;
         };
-        let width = wb.duration_days * PIXELS_PER_DAY;
+        let width = wb.duration_days as f32 * PIXELS_PER_DAY;
         let should_have_dot = !wb.description.is_empty() && width >= 12.0;
 
         match (should_have_dot, existing_dots.get(&id)) {
@@ -329,11 +329,11 @@ pub fn sync_block_sprites(
         let Some(wb) = model.work_blocks.get(&block_sprite.work_block_id) else {
             continue;
         };
-        let width = wb.duration_days * PIXELS_PER_DAY;
+        let width = wb.duration_days as f32 * PIXELS_PER_DAY;
         // Expand to min_width before computing x so the sprite is always
         // left-anchored at start_day, not centered on the model midpoint.
         let visual_width = width.max(min_width);
-        let x = wb.start_day * PIXELS_PER_DAY + visual_width * 0.5;
+        let x = wb.start_day as f32 * PIXELS_PER_DAY + visual_width * 0.5;
         let y = -(block_sprite.row as f32) * ROW_HEIGHT;
         transform.translation.x = x;
         transform.translation.y = y;
@@ -489,20 +489,17 @@ pub fn handle_block_selection(
         if is_double_click {
             // Reset so a subsequent third click doesn't trigger another creation.
             *last_empty_click = 0.0;
-            let start_day = (world_pos.x / PIXELS_PER_DAY).max(0.0);
-            // Snap to the nearest 0.5-day grid line.
-            let start_day = (start_day * 2.0).round() / 2.0;
-            let duration_days = 1.0f32;
+            let start_day = (world_pos.x / PIXELS_PER_DAY).max(0.0).round() as Day;
             let est = Estimate {
-                most_likely: duration_days,
-                optimistic: duration_days * 0.7,
-                pessimistic: duration_days * 1.5,
+                most_likely: 1,
+                optimistic: 1,
+                pessimistic: 2,
                 confidence: 0.8,
             };
             let new_id = model.create_work_block("New Block", est);
             if let Some(wb) = model.work_blocks.get_mut(&new_id) {
                 wb.start_day = start_day;
-                wb.duration_days = duration_days;
+                wb.duration_days = 1;
             }
             if let Some(plan) = model.plans.values_mut().next() {
                 plan.root_blocks.push(new_id);
@@ -603,8 +600,8 @@ pub fn handle_block_resize(
         if let Some(id) = resize.dragging {
             if let Some(wb) = model.work_blocks.get_mut(&id) {
                 let raw_dur =
-                    ((world_pos.x - wb.start_day * PIXELS_PER_DAY) / PIXELS_PER_DAY).max(0.5);
-                wb.duration_days = (raw_dur * 2.0).round() / 2.0;
+                    ((world_pos.x - wb.start_day as f32 * PIXELS_PER_DAY) / PIXELS_PER_DAY).max(1.0);
+                wb.duration_days = raw_dur.round() as Day;
             }
         }
         return;
@@ -686,7 +683,7 @@ pub fn handle_block_drag(
                 let start_px = model
                     .work_blocks
                     .get(&id)
-                    .map(|wb| wb.start_day * PIXELS_PER_DAY)
+                    .map(|wb| wb.start_day as f32 * PIXELS_PER_DAY)
                     .unwrap_or(0.0);
                 // Offset preserves where within the block the user grabbed.
                 drag.dragging = Some((id, world_pos.x - start_px));
@@ -700,7 +697,7 @@ pub fn handle_block_drag(
     // Held: slide start_day to follow cursor.
     if mouse.pressed(MouseButton::Left) {
         if let Some((id, offset_px)) = drag.dragging {
-            let new_start = ((world_pos.x - offset_px) / PIXELS_PER_DAY).max(0.0);
+            let new_start = ((world_pos.x - offset_px) / PIXELS_PER_DAY).max(0.0).round() as Day;
             if let Some(wb) = model.work_blocks.get_mut(&id) {
                 wb.start_day = new_start;
             }
@@ -757,7 +754,7 @@ pub fn sync_conflict_overlays(
     let total_rows = visible_blocks.ids.len().max(1);
 
     for conflict in &sa.resource_conflicts {
-        let width = (conflict.window_end - conflict.window_start) * PIXELS_PER_DAY;
+        let width = (conflict.window_end - conflict.window_start) as f32 * PIXELS_PER_DAY;
         if width <= 0.0 {
             continue;
         }
@@ -782,7 +779,7 @@ pub fn sync_conflict_overlays(
             ((y_top + y_bot) * 0.5, h)
         };
 
-        let x_center = conflict.window_start * PIXELS_PER_DAY + width * 0.5;
+        let x_center = conflict.window_start as f32 * PIXELS_PER_DAY + width * 0.5;
 
         commands.spawn((
             ConflictOverlay,
@@ -847,8 +844,8 @@ pub fn sync_uncertainty_overlays(
         let tail_alpha = (1.0 - confidence) * 0.55;
 
         // Pessimistic tail — extends past the right edge to the pessimistic end.
-        let x_right = (wb.start_day + wb.duration_days) * PIXELS_PER_DAY;
-        let x_pes  = (wb.start_day + wb.estimate.pessimistic) * PIXELS_PER_DAY;
+        let x_right = (wb.start_day + wb.duration_days) as f32 * PIXELS_PER_DAY;
+        let x_pes  = (wb.start_day + wb.estimate.pessimistic) as f32 * PIXELS_PER_DAY;
         let tail_w = (x_pes - x_right).max(0.0);
         if tail_w > 0.5 && tail_alpha > 0.01 {
             desired.push(Overlay {
@@ -860,8 +857,8 @@ pub fn sync_uncertainty_overlays(
         }
 
         // Optimistic marker — narrow bar at the optimistic estimate end.
-        let x_left    = wb.start_day * PIXELS_PER_DAY;
-        let x_opt_end = (wb.start_day + wb.estimate.optimistic) * PIXELS_PER_DAY;
+        let x_left    = wb.start_day as f32 * PIXELS_PER_DAY;
+        let x_opt_end = (wb.start_day + wb.estimate.optimistic) as f32 * PIXELS_PER_DAY;
         if x_opt_end > x_left + 1.0 && x_opt_end < x_right - 1.0 {
             desired.push(Overlay {
                 key:   UncertaintyOverlay::OptimisticMarker(id),
@@ -995,8 +992,8 @@ pub fn draw_dependency_edges(
             Some((
                 wb.id,
                 BlockGeom {
-                    xl: wb.start_day * PIXELS_PER_DAY,
-                    xr: (wb.start_day + wb.duration_days) * PIXELS_PER_DAY,
+                    xl: wb.start_day as f32 * PIXELS_PER_DAY,
+                    xr: (wb.start_day + wb.duration_days) as f32 * PIXELS_PER_DAY,
                     y: -(row as f32) * ROW_HEIGHT,
                 },
             ))
@@ -1098,12 +1095,12 @@ pub fn draw_block_handles(
 
     for (row, &id) in visible_blocks.ids.iter().enumerate() {
         let Some(wb) = model.work_blocks.get(&id) else { continue };
-        if wb.duration_days <= 0.0 {
+        if wb.duration_days <= 0 {
             continue;
         }
         let y = -(row as f32) * ROW_HEIGHT;
-        let xl = wb.start_day * PIXELS_PER_DAY;
-        let xr = (wb.start_day + wb.duration_days) * PIXELS_PER_DAY;
+        let xl = wb.start_day as f32 * PIXELS_PER_DAY;
+        let xr = (wb.start_day + wb.duration_days) as f32 * PIXELS_PER_DAY;
 
         let is_source = drag.from == Some(wb.id);
 
@@ -1773,9 +1770,9 @@ pub fn draw_create_mode_overlay(
         let name = state.text_buf.trim().to_string();
         if !name.is_empty() {
             let est = Estimate {
-                most_likely: 1.0,
-                optimistic: 0.7,
-                pessimistic: 1.5,
+                most_likely: 1,
+                optimistic: 1,
+                pessimistic: 2,
                 confidence: 0.8,
             };
             let new_id = model.create_work_block(name, est);
