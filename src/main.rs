@@ -981,15 +981,43 @@ fn side_panel_ui(
                     }
                 }
                 if let Some(selection) = new_sel {
-                    // Zero out the old variant's children so they disappear from the timeline.
+                    // Snapshot placed positions for the old variant before zeroing children.
                     if let Some(old_vid) = current_var {
-                        if let Some(old_v) = model.variants.get(&old_vid) {
-                            let children: Vec<_> = old_v.children.clone();
-                            for child_id in children {
-                                if let Some(wb) = model.work_blocks.get_mut(&child_id) {
-                                    wb.start_day = 0.0;
-                                    wb.duration_days = 0.0;
-                                }
+                        let snapshot: Vec<(model::WorkBlockId, f32, f32)> = model
+                            .variants
+                            .get(&old_vid)
+                            .map(|v| {
+                                v.children
+                                    .iter()
+                                    .filter_map(|&cid| {
+                                        model.work_blocks.get(&cid).filter(|wb| wb.duration_days > 0.0)
+                                            .map(|wb| (cid, wb.start_day, wb.duration_days))
+                                    })
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        if let Some(old_v) = model.variants.get_mut(&old_vid) {
+                            old_v.block_positions.clear();
+                            for &(cid, sd, dd) in &snapshot {
+                                old_v.block_positions.insert(cid, (sd, dd));
+                            }
+                        }
+                        for &(cid, _, _) in &snapshot {
+                            if let Some(wb) = model.work_blocks.get_mut(&cid) {
+                                wb.start_day = 0.0;
+                                wb.duration_days = 0.0;
+                            }
+                        }
+                        // Also zero any unplaced children not captured in snapshot.
+                        let unplaced: Vec<_> = model
+                            .variants
+                            .get(&old_vid)
+                            .map(|v| v.children.clone())
+                            .unwrap_or_default();
+                        for cid in unplaced {
+                            if let Some(wb) = model.work_blocks.get_mut(&cid) {
+                                wb.start_day = 0.0;
+                                wb.duration_days = 0.0;
                             }
                         }
                     }
@@ -1016,6 +1044,26 @@ fn side_panel_ui(
                                 }
                             }
                             *schedule = new_sched;
+                        }
+                    }
+                    // Restore saved positions for the newly activated variant,
+                    // overriding what forward_pass derived from estimate.most_likely.
+                    if let Some(new_vid) = selection {
+                        let saved: Vec<(model::WorkBlockId, f32, f32)> = model
+                            .variants
+                            .get(&new_vid)
+                            .map(|v| {
+                                v.block_positions
+                                    .iter()
+                                    .map(|(&cid, &(sd, dd))| (cid, sd, dd))
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        for (cid, sd, dd) in saved {
+                            if let Some(wb) = model.work_blocks.get_mut(&cid) {
+                                wb.start_day = sd;
+                                wb.duration_days = dd;
+                            }
                         }
                     }
                     if let Err(e) = db::save_model(&conn, &model) {

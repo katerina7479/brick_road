@@ -118,6 +118,10 @@ pub struct Variant {
     pub parent: WorkBlockId,
     /// Ordered child WorkBlocks that collectively implement this variant.
     pub children: Vec<WorkBlockId>,
+    /// Saved (start_day, duration_days) for each child, snapshotted when this
+    /// variant is deactivated and restored when it is re-activated. Only
+    /// entries for blocks that were placed (duration_days > 0) are stored.
+    pub block_positions: HashMap<WorkBlockId, (f32, f32)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -272,6 +276,7 @@ impl Model {
                 name: name.into(),
                 parent,
                 children: vec![],
+                block_positions: HashMap::new(),
             },
         );
         id
