@@ -71,50 +71,56 @@ pub fn record_estimate_snapshot(
 
 /// Persists the complete Model to SQLite in a single transaction.
 ///
-/// All existing rows are deleted and reinserted, so the DB reflects
-/// the model exactly after this call (including deletions).
+/// Uses a three-phase approach to minimise WAL traffic:
+///
+/// 1. **Clear join tables** (fully owned rows with no FK children — safe to truncate).
+/// 2. **Upsert entity rows** via `INSERT … ON CONFLICT(id) DO UPDATE SET`.
+///    This is a genuine in-place update, not a delete+insert, so the WAL
+///    records only changed columns for existing rows instead of re-writing
+///    every row on every save.
+/// 3. **Delete stale entity rows** whose IDs are no longer in the model
+///    (`DELETE … WHERE id NOT IN (…)`), in reverse FK order.
+/// 4. **Reinsert join-table rows** for all current entities.
+///
+/// Maintains FK correctness throughout: join tables are cleared before entity
+/// rows are touched, and stale entities are deleted after their referents are
+/// gone. The DB reflects the model exactly when the transaction commits.
 pub fn save_model(conn: &Connection, model: &Model) -> Result<()> {
     let tx = conn.unchecked_transaction()?;
 
-    // Clear in reverse FK order so no constraint is violated.
+    // ── Phase 1: clear join tables ────────────────────────────────────────────
+    // These tables are fully owned by their parent entity and have no FK
+    // children of their own, so truncating them is always safe.
     tx.execute_batch(
-        "
-        DELETE FROM plan_milestone_targets;
-        DELETE FROM resource_allocations;
-        DELETE FROM plan_variant_selections;
-        DELETE FROM plan_root_blocks;
-        DELETE FROM plans;
-        DELETE FROM milestones;
-        DELETE FROM dependencies;
-        DELETE FROM variant_children;
-        DELETE FROM variants;
-        DELETE FROM work_blocks;
-        DELETE FROM availability_segments;
-        DELETE FROM resource_blocks;
-        DELETE FROM worlds;
-        DELETE FROM calendar_non_working_dates;
-        DELETE FROM calendar_config;
-        DELETE FROM t_shirt_sizes;
-    ",
+        "DELETE FROM plan_milestone_targets;
+         DELETE FROM resource_allocations;
+         DELETE FROM plan_variant_selections;
+         DELETE FROM plan_root_blocks;
+         DELETE FROM variant_children;
+         DELETE FROM availability_segments;
+         DELETE FROM calendar_non_working_dates;
+         DELETE FROM t_shirt_sizes;",
     )?;
 
-    // worlds
+    // ── Phase 2: upsert all current entity rows ───────────────────────────────
+    // INSERT … ON CONFLICT(id) DO UPDATE SET performs a genuine in-place
+    // update on existing rows — no delete+insert — so WAL traffic is
+    // proportional to changed rows rather than total row count.
+
     for world in model.worlds.values() {
         tx.execute(
-            "INSERT INTO worlds (id, name) VALUES (?1, ?2)",
-            (world.id.0, &world.name),
+            "INSERT INTO worlds (id, name) VALUES (?1, ?2)
+             ON CONFLICT(id) DO UPDATE SET name = excluded.name",
+            (world.id.0 as i64, &world.name),
         )?;
     }
 
-    // Build resource_block_id → world_id from World.resource_ids.
-    let mut rb_to_world: std::collections::HashMap<u64, u64> = std::collections::HashMap::new();
+    let mut rb_to_world: HashMap<u64, u64> = HashMap::new();
     for world in model.worlds.values() {
         for &rb_id in &world.resource_ids {
             rb_to_world.insert(rb_id.0, world.id.0);
         }
     }
-
-    // resource_blocks + availability_segments
     for rb in model.resource_blocks.values() {
         let world_id = rb_to_world.get(&rb.id.0).copied().ok_or_else(|| {
             rusqlite::Error::InvalidParameterName(format!(
@@ -124,31 +130,15 @@ pub fn save_model(conn: &Connection, model: &Model) -> Result<()> {
         })?;
         tx.execute(
             "INSERT INTO resource_blocks (id, world_id, name, resource_type)
-             VALUES (?1, ?2, ?3, ?4)",
-            (
-                rb.id.0,
-                world_id,
-                &rb.name,
-                resource_type_str(rb.resource_type),
-            ),
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(id) DO UPDATE SET
+                 world_id = excluded.world_id,
+                 name = excluded.name,
+                 resource_type = excluded.resource_type",
+            (rb.id.0 as i64, world_id as i64, &rb.name, resource_type_str(rb.resource_type)),
         )?;
-        for (order, seg) in rb.availability.segments.iter().enumerate() {
-            tx.execute(
-                "INSERT INTO availability_segments
-                     (resource_block_id, start_day, end_day, factor, sort_order)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
-                (
-                    rb.id.0,
-                    seg.start as f64,
-                    seg.end as f64,
-                    seg.factor as f64,
-                    order as i64,
-                ),
-            )?;
-        }
     }
 
-    // work_blocks
     for wb in model.work_blocks.values() {
         tx.execute(
             "INSERT INTO work_blocks
@@ -156,9 +146,23 @@ pub fn save_model(conn: &Connection, model: &Model) -> Result<()> {
                   estimate_pessimistic, estimate_confidence,
                   start_day, duration_days, color_r, color_g, color_b, description, priority,
                   t_shirt_size)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+             ON CONFLICT(id) DO UPDATE SET
+                 name = excluded.name,
+                 estimate_most_likely = excluded.estimate_most_likely,
+                 estimate_optimistic = excluded.estimate_optimistic,
+                 estimate_pessimistic = excluded.estimate_pessimistic,
+                 estimate_confidence = excluded.estimate_confidence,
+                 start_day = excluded.start_day,
+                 duration_days = excluded.duration_days,
+                 color_r = excluded.color_r,
+                 color_g = excluded.color_g,
+                 color_b = excluded.color_b,
+                 description = excluded.description,
+                 priority = excluded.priority,
+                 t_shirt_size = excluded.t_shirt_size",
             (
-                wb.id.0,
+                wb.id.0 as i64,
                 &wb.name,
                 wb.estimate.most_likely as f64,
                 wb.estimate.optimistic as f64,
@@ -176,102 +180,139 @@ pub fn save_model(conn: &Connection, model: &Model) -> Result<()> {
         )?;
     }
 
-    // Build variant → sort_order from each WorkBlock's ordered variants vec.
-    let mut variant_sort_order: std::collections::HashMap<u64, i64> =
-        std::collections::HashMap::new();
+    // variants: use INSERT OR REPLACE rather than ON CONFLICT DO UPDATE because
+    // the UNIQUE(parent_work_block_id, sort_order) constraint would fire if two
+    // variants swap positions during an in-place UPDATE. INSERT OR REPLACE
+    // deletes the conflicting row first, then inserts, avoiding the collision.
+    // variant_children was cleared in phase 1, so any cascade-delete is safe.
+    let mut variant_sort_order: HashMap<u64, i64> = HashMap::new();
     for wb in model.work_blocks.values() {
         for (order, &var_id) in wb.variants.iter().enumerate() {
             variant_sort_order.insert(var_id.0, order as i64);
         }
     }
-
-    // variants + variant_children
     for v in model.variants.values() {
         let order = variant_sort_order.get(&v.id.0).copied().unwrap_or(0);
         tx.execute(
-            "INSERT INTO variants (id, name, parent_work_block_id, sort_order)
+            "INSERT OR REPLACE INTO variants (id, name, parent_work_block_id, sort_order)
              VALUES (?1, ?2, ?3, ?4)",
-            (v.id.0, &v.name, v.parent.0, order),
+            (v.id.0 as i64, &v.name, v.parent.0 as i64, order),
         )?;
-        for (order, &child_id) in v.children.iter().enumerate() {
-            tx.execute(
-                "INSERT INTO variant_children (variant_id, child_work_block_id, sort_order)
-                 VALUES (?1, ?2, ?3)",
-                (v.id.0, child_id.0, order as i64),
-            )?;
-        }
     }
 
-    // dependencies
     for dep in model.dependencies.values() {
         tx.execute(
             "INSERT INTO dependencies
                  (id, predecessor_id, successor_id, dependency_type, lag_days)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(id) DO UPDATE SET
+                 predecessor_id = excluded.predecessor_id,
+                 successor_id = excluded.successor_id,
+                 dependency_type = excluded.dependency_type,
+                 lag_days = excluded.lag_days",
             (
-                dep.id.0,
-                dep.predecessor.0,
-                dep.successor.0,
+                dep.id.0 as i64,
+                dep.predecessor.0 as i64,
+                dep.successor.0 as i64,
                 dependency_type_str(dep.dependency_type),
                 dep.lag as f64,
             ),
         )?;
     }
 
-    // milestones
     for ms in model.milestones.values() {
         tx.execute(
-            "INSERT INTO milestones (id, name, date_day) VALUES (?1, ?2, ?3)",
-            (ms.id.0, &ms.name, ms.date as f64),
+            "INSERT INTO milestones (id, name, date_day) VALUES (?1, ?2, ?3)
+             ON CONFLICT(id) DO UPDATE SET name = excluded.name, date_day = excluded.date_day",
+            (ms.id.0 as i64, &ms.name, ms.date as f64),
         )?;
     }
 
-    // plans + child join tables
     for plan in model.plans.values() {
         tx.execute(
-            "INSERT INTO plans (id, name, world_id) VALUES (?1, ?2, ?3)",
-            (plan.id.0, &plan.name, plan.world_id.0),
+            "INSERT INTO plans (id, name, world_id) VALUES (?1, ?2, ?3)
+             ON CONFLICT(id) DO UPDATE SET name = excluded.name, world_id = excluded.world_id",
+            (plan.id.0 as i64, &plan.name, plan.world_id.0 as i64),
         )?;
+    }
 
+    tx.execute(
+        "INSERT INTO calendar_config (id, start_date, working_days_per_week) VALUES (1, ?1, ?2)
+         ON CONFLICT(id) DO UPDATE SET
+             start_date = excluded.start_date,
+             working_days_per_week = excluded.working_days_per_week",
+        (
+            model.calendar.start_date.format("%Y-%m-%d").to_string(),
+            model.calendar.working_days_per_week as i64,
+        ),
+    )?;
+
+    // ── Phase 3: delete stale entity rows ─────────────────────────────────────
+    // Processed in reverse FK order: child-referencing tables are deleted
+    // before the tables they reference, so no FK constraint fires.
+    // Join tables are already empty (cleared in phase 1), so entity rows
+    // have no remaining FK children at this point.
+    delete_stale(&tx, "plans",           &model.plans.keys().map(|k| k.0).collect::<Vec<_>>())?;
+    delete_stale(&tx, "dependencies",    &model.dependencies.keys().map(|k| k.0).collect::<Vec<_>>())?;
+    delete_stale(&tx, "variants",        &model.variants.keys().map(|k| k.0).collect::<Vec<_>>())?;
+    delete_stale(&tx, "milestones",      &model.milestones.keys().map(|k| k.0).collect::<Vec<_>>())?;
+    delete_stale(&tx, "resource_blocks", &model.resource_blocks.keys().map(|k| k.0).collect::<Vec<_>>())?;
+    delete_stale(&tx, "work_blocks",     &model.work_blocks.keys().map(|k| k.0).collect::<Vec<_>>())?;
+    delete_stale(&tx, "worlds",          &model.worlds.keys().map(|k| k.0).collect::<Vec<_>>())?;
+
+    // ── Phase 4: reinsert join table rows for current entities ────────────────
+
+    for rb in model.resource_blocks.values() {
+        for (order, seg) in rb.availability.segments.iter().enumerate() {
+            tx.execute(
+                "INSERT INTO availability_segments
+                     (resource_block_id, start_day, end_day, factor, sort_order)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                (rb.id.0 as i64, seg.start as f64, seg.end as f64, seg.factor as f64, order as i64),
+            )?;
+        }
+    }
+
+    for v in model.variants.values() {
+        for (order, &child_id) in v.children.iter().enumerate() {
+            tx.execute(
+                "INSERT INTO variant_children (variant_id, child_work_block_id, sort_order)
+                 VALUES (?1, ?2, ?3)",
+                (v.id.0 as i64, child_id.0 as i64, order as i64),
+            )?;
+        }
+    }
+
+    for plan in model.plans.values() {
         for (order, &wb_id) in plan.root_blocks.iter().enumerate() {
             tx.execute(
                 "INSERT INTO plan_root_blocks (plan_id, work_block_id, sort_order)
                  VALUES (?1, ?2, ?3)",
-                (plan.id.0, wb_id.0, order as i64),
+                (plan.id.0 as i64, wb_id.0 as i64, order as i64),
             )?;
         }
-
         for (&wb_id, &var_id) in &plan.selected_variants {
             tx.execute(
                 "INSERT INTO plan_variant_selections (plan_id, work_block_id, variant_id)
                  VALUES (?1, ?2, ?3)",
-                (plan.id.0, wb_id.0, var_id.0),
+                (plan.id.0 as i64, wb_id.0 as i64, var_id.0 as i64),
             )?;
         }
-
         for alloc in &plan.allocations {
             tx.execute(
                 "INSERT INTO resource_allocations
                      (plan_id, resource_block_id, work_block_id, allocation_factor)
                  VALUES (?1, ?2, ?3, ?4)",
                 (
-                    plan.id.0,
-                    alloc.resource_id.0,
-                    alloc.work_block_id.0,
+                    plan.id.0 as i64,
+                    alloc.resource_id.0 as i64,
+                    alloc.work_block_id.0 as i64,
                     alloc.allocation_factor as f64,
                 ),
             )?;
         }
     }
 
-    // calendar_config (singleton)
-    tx.execute(
-        "INSERT INTO calendar_config (id, start_date, working_days_per_week) VALUES (1, ?1, ?2)",
-        (
-            model.calendar.start_date.format("%Y-%m-%d").to_string(),
-            model.calendar.working_days_per_week as i64,
-        ),
-    )?;
     for date in &model.calendar.non_working_dates {
         tx.execute(
             "INSERT INTO calendar_non_working_dates (date) VALUES (?1)",
@@ -288,6 +329,30 @@ pub fn save_model(conn: &Connection, model: &Model) -> Result<()> {
     }
 
     tx.commit()
+}
+
+/// Deletes rows from `table` whose `id` column is not in `current_ids`.
+/// If `current_ids` is empty the entire table is cleared (every row is stale).
+/// Table names come from hardcoded call-sites so there is no injection risk.
+fn delete_stale(
+    tx: &rusqlite::Transaction<'_>,
+    table: &str,
+    current_ids: &[u64],
+) -> Result<()> {
+    if current_ids.is_empty() {
+        tx.execute_batch(&format!("DELETE FROM {table}"))?;
+        return Ok(());
+    }
+    let placeholders = std::iter::repeat("?")
+        .take(current_ids.len())
+        .collect::<Vec<_>>()
+        .join(",");
+    let sql = format!("DELETE FROM {table} WHERE id NOT IN ({placeholders})");
+    tx.execute(
+        &sql,
+        rusqlite::params_from_iter(current_ids.iter().map(|&id| id as i64)),
+    )?;
+    Ok(())
 }
 
 /// Reconstructs a complete Model from SQLite.
@@ -1184,6 +1249,109 @@ mod tests {
             err.contains("parent"),
             "expected parent mismatch message in: {err}"
         );
+    }
+
+    // ── Incremental / stale-deletion tests ───────────────────────────────────
+
+    #[test]
+    fn stale_work_block_deleted_on_second_save() {
+        // Exercises the WHERE id NOT IN (…) path in delete_stale for work_blocks.
+        // Save with block A, then remove it, save again, and verify it is gone.
+        let conn = open_in_memory();
+        let mut m = Model::default();
+        let wb_id = m.create_work_block("to-be-removed", est(3.0, 2.0, 5.0, 0.9));
+
+        save_model(&conn, &m).unwrap();
+        // Confirm it is present after the first save.
+        let after_first = load_model(&conn).unwrap();
+        assert!(after_first.work_blocks.contains_key(&wb_id));
+
+        // Remove the block and save again.
+        m.work_blocks.remove(&wb_id);
+        save_model(&conn, &m).unwrap();
+
+        let after_second = load_model(&conn).unwrap();
+        assert!(
+            !after_second.work_blocks.contains_key(&wb_id),
+            "stale work_block should have been deleted by Phase 3"
+        );
+    }
+
+    #[test]
+    fn incremental_save_updates_existing_entity() {
+        // Verifies that an in-place upsert (ON CONFLICT DO UPDATE) actually
+        // reflects the new field values on the second load.
+        let conn = open_in_memory();
+        let mut m = Model::default();
+        let wb_id = m.create_work_block("original", est(5.0, 3.0, 8.0, 0.8));
+
+        save_model(&conn, &m).unwrap();
+
+        // Mutate the block in-place.
+        m.work_blocks.get_mut(&wb_id).unwrap().name = "renamed".to_string();
+        save_model(&conn, &m).unwrap();
+
+        let loaded = load_model(&conn).unwrap();
+        let wb = loaded.work_blocks.get(&wb_id).expect("block must still exist");
+        assert_eq!(wb.name, "renamed", "upsert must have written the new name");
+    }
+
+    #[test]
+    fn stale_deletion_with_empty_current_set() {
+        // Exercises the `current_ids.is_empty()` branch of delete_stale, which
+        // clears the table entirely with `DELETE FROM <table>` rather than
+        // `DELETE FROM <table> WHERE id NOT IN (…)`.
+        let conn = open_in_memory();
+        let mut m = Model::default();
+        m.create_work_block("block-a", est(2.0, 1.0, 4.0, 1.0));
+        m.create_work_block("block-b", est(3.0, 2.0, 5.0, 0.9));
+
+        save_model(&conn, &m).unwrap();
+        assert_eq!(load_model(&conn).unwrap().work_blocks.len(), 2);
+
+        // Remove all blocks — save_model will call delete_stale with empty ids.
+        m.work_blocks.clear();
+        save_model(&conn, &m).unwrap();
+
+        let loaded = load_model(&conn).unwrap();
+        assert!(
+            loaded.work_blocks.is_empty(),
+            "delete_stale empty-set path must clear the table"
+        );
+    }
+
+    #[test]
+    fn stale_entity_deletion_across_multiple_types() {
+        // One test exercising stale deletion for several entity types in one cycle.
+        let conn = open_in_memory();
+        let mut m = Model::default();
+        let world_id = m.create_world("w");
+        let rb_id = m.create_resource_block("Alice", ResourceType::Person);
+        m.worlds.get_mut(&world_id).unwrap().resource_ids.push(rb_id);
+        let wb_a = m.create_work_block("A", est(2.0, 1.0, 3.0, 1.0));
+        let wb_b = m.create_work_block("B", est(3.0, 2.0, 5.0, 0.9));
+        let dep = m.create_dependency(wb_a, wb_b, DependencyType::FinishToStart);
+        let ms_id = m.create_milestone("launch", 10.0);
+
+        save_model(&conn, &m).unwrap();
+
+        // Remove wb_b, the dependency referencing it, the resource block, and the milestone.
+        m.dependencies.remove(&dep);
+        m.work_blocks.remove(&wb_b);
+        // Remove rb from world.resource_ids before removing from resource_blocks,
+        // since save_model validates ResourceBlocks are in a World.resource_ids list.
+        m.worlds.get_mut(&world_id).unwrap().resource_ids.retain(|&id| id != rb_id);
+        m.resource_blocks.remove(&rb_id);
+        m.milestones.remove(&ms_id);
+        save_model(&conn, &m).unwrap();
+
+        let loaded = load_model(&conn).unwrap();
+        assert!(!loaded.work_blocks.contains_key(&wb_b), "wb_b should be deleted");
+        assert!(!loaded.dependencies.contains_key(&dep), "dependency should be deleted");
+        assert!(!loaded.resource_blocks.contains_key(&rb_id), "resource_block should be deleted");
+        assert!(!loaded.milestones.contains_key(&ms_id), "milestone should be deleted");
+        // Surviving entity stays.
+        assert!(loaded.work_blocks.contains_key(&wb_a), "wb_a must survive");
     }
 }
 
