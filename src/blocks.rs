@@ -7,7 +7,7 @@ use crate::{
     analysis::ScheduleAnalysis,
     constants::{PIXELS_PER_DAY, ROW_HEIGHT},
     db,
-    model::{self, WorkBlockId},
+    model::{self, DependencyId, DependencyType, WorkBlockId},
     schedule,
 };
 
@@ -353,5 +353,174 @@ pub fn sync_conflict_overlays(
             },
             Transform::from_xyz(x_center, y_center, -0.5),
         ));
+    }
+}
+
+// ── Dependency edges ──────────────────────────────────────────────────────────
+
+/// Persistent state for the right-click drag-to-create-dependency gesture.
+#[derive(Resource, Default)]
+pub struct DepDragState {
+    /// Source block the user started dragging from, `None` when idle.
+    pub from: Option<WorkBlockId>,
+}
+
+/// Screen-space geometry for one work block, computed once per frame.
+struct BlockGeom {
+    xl: f32,
+    xr: f32,
+    y: f32,
+}
+
+/// Draw all model dependency edges as arrows, plus the in-progress drag line.
+///
+/// Colors:
+///   Violated   — red/orange
+///   Satisfied  — dim cyan
+///   In-progress drag — white
+pub fn draw_dependency_edges(
+    mut gizmos: Gizmos,
+    model: Res<model::Model>,
+    sa: Res<ScheduleAnalysis>,
+    drag: Res<DepDragState>,
+    windows: Query<&Window>,
+    camera: Query<(&Camera, &GlobalTransform)>,
+) {
+    let ordered = schedule::sorted_blocks(&model);
+    let geom: HashMap<WorkBlockId, BlockGeom> = ordered
+        .iter()
+        .enumerate()
+        .map(|(row, wb)| {
+            (
+                wb.id,
+                BlockGeom {
+                    xl: wb.start_day * PIXELS_PER_DAY,
+                    xr: (wb.start_day + wb.duration_days) * PIXELS_PER_DAY,
+                    y: -(row as f32) * ROW_HEIGHT,
+                },
+            )
+        })
+        .collect();
+
+    let violated: std::collections::HashSet<DependencyId> =
+        sa.violations.iter().map(|v| v.dependency_id).collect();
+
+    for dep in model.dependencies.values() {
+        let (Some(pg), Some(sg)) = (geom.get(&dep.predecessor), geom.get(&dep.successor)) else {
+            continue;
+        };
+
+        let (src, dst) = match dep.dependency_type {
+            DependencyType::FinishToStart => (Vec2::new(pg.xr, pg.y), Vec2::new(sg.xl, sg.y)),
+            DependencyType::StartToStart => (Vec2::new(pg.xl, pg.y), Vec2::new(sg.xl, sg.y)),
+            DependencyType::FinishToFinish => (Vec2::new(pg.xr, pg.y), Vec2::new(sg.xr, sg.y)),
+            DependencyType::StartToFinish => (Vec2::new(pg.xl, pg.y), Vec2::new(sg.xr, sg.y)),
+        };
+
+        let color = if violated.contains(&dep.id) {
+            Color::srgba(1.0, 0.25, 0.1, 0.9)
+        } else {
+            Color::srgba(0.35, 0.85, 0.85, 0.65)
+        };
+
+        gizmos.line_2d(src, dst, color);
+        draw_arrowhead(&mut gizmos, src, dst, color);
+    }
+
+    // In-progress drag line.
+    if let Some(from_id) = drag.from {
+        if let Some(fg) = geom.get(&from_id) {
+            let Ok(window) = windows.single() else {
+                return;
+            };
+            let Ok((cam, cam_tr)) = camera.single() else {
+                return;
+            };
+            let Some(cursor) = window.cursor_position() else {
+                return;
+            };
+            let Ok(world_pos) = cam.viewport_to_world_2d(cam_tr, cursor) else {
+                return;
+            };
+            let src = Vec2::new(fg.xr, fg.y);
+            gizmos.line_2d(src, world_pos, Color::WHITE);
+            draw_arrowhead(&mut gizmos, src, world_pos, Color::WHITE);
+        }
+    }
+}
+
+fn draw_arrowhead(gizmos: &mut Gizmos, src: Vec2, dst: Vec2, color: Color) {
+    let dir = (dst - src).normalize_or_zero();
+    if dir == Vec2::ZERO {
+        return;
+    }
+    let perp = Vec2::new(-dir.y, dir.x);
+    gizmos.line_2d(dst, dst - dir * 8.0 + perp * 4.0, color);
+    gizmos.line_2d(dst, dst - dir * 8.0 - perp * 4.0, color);
+}
+
+/// Right-click drag from one block to another to create a `FinishToStart`
+/// dependency. Press right button on source, release on target.
+/// Self-loops and duplicate FS edges in the same direction are silently ignored.
+pub fn handle_dep_drag(
+    mut egui_ctx: EguiContexts,
+    windows: Query<&Window>,
+    camera: Query<(&Camera, &GlobalTransform)>,
+    mouse: Res<ButtonInput<MouseButton>>,
+    mut drag: ResMut<DepDragState>,
+    mut model: ResMut<model::Model>,
+    block_query: Query<(&BlockSprite, &Transform, &Sprite)>,
+    conn: NonSend<rusqlite::Connection>,
+) {
+    if let Ok(ctx) = egui_ctx.ctx_mut() {
+        if ctx.is_pointer_over_area() {
+            drag.from = None;
+            return;
+        }
+    }
+
+    let Ok(window) = windows.single() else { return };
+    let Ok((cam, cam_tr)) = camera.single() else { return };
+    let Some(cursor) = window.cursor_position() else { return };
+    let Ok(world_pos) = cam.viewport_to_world_2d(cam_tr, cursor) else { return };
+
+    let block_at = |pos: Vec2| -> Option<WorkBlockId> {
+        for (bs, tr, sp) in &block_query {
+            let Some(size) = sp.custom_size else { continue };
+            let center = tr.translation.truncate();
+            let half = size * 0.5;
+            if pos.x >= center.x - half.x
+                && pos.x <= center.x + half.x
+                && pos.y >= center.y - half.y
+                && pos.y <= center.y + half.y
+            {
+                return Some(bs.work_block_id);
+            }
+        }
+        None
+    };
+
+    if mouse.just_pressed(MouseButton::Right) {
+        drag.from = block_at(world_pos);
+    }
+
+    if mouse.just_released(MouseButton::Right) {
+        if let Some(from_id) = drag.from.take() {
+            if let Some(to_id) = block_at(world_pos) {
+                if to_id != from_id {
+                    let already = model.dependencies.values().any(|d| {
+                        d.predecessor == from_id
+                            && d.successor == to_id
+                            && d.dependency_type == DependencyType::FinishToStart
+                    });
+                    if !already {
+                        model.create_dependency(from_id, to_id, DependencyType::FinishToStart);
+                        if let Err(e) = crate::db::save_model(&conn, &model) {
+                            error!("save_model failed: {e}");
+                        }
+                    }
+                }
+            }
+        }
     }
 }
