@@ -29,6 +29,29 @@ pub fn create_tables(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// Appends one row to `estimate_snapshots` recording the user's current
+/// duration and confidence for a block. Called every time either value
+/// changes in the inspector so the history accumulates over time.
+pub fn record_estimate_snapshot(
+    conn: &Connection,
+    work_block_id: u64,
+    duration_days: f32,
+    confidence: f32,
+) -> Result<()> {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+    conn.execute(
+        "INSERT INTO estimate_snapshots
+             (work_block_id, duration_days, confidence, recorded_at)
+         VALUES (?1, ?2, ?3, ?4)",
+        (work_block_id as i64, duration_days as f64, confidence as f64, ts),
+    )?;
+    Ok(())
+}
+
 /// Persists the complete Model to SQLite in a single transaction.
 ///
 /// All existing rows are deleted and reinserted, so the DB reflects
@@ -1160,5 +1183,13 @@ CREATE TABLE IF NOT EXISTS plan_milestone_targets (
     milestone_id INTEGER NOT NULL REFERENCES milestones(id),
     target_day   REAL    NOT NULL,
     PRIMARY KEY (plan_id, milestone_id)
+);
+
+CREATE TABLE IF NOT EXISTS estimate_snapshots (
+    id             INTEGER PRIMARY KEY,
+    work_block_id  INTEGER NOT NULL REFERENCES work_blocks(id),
+    duration_days  REAL    NOT NULL,
+    confidence     REAL    NOT NULL,
+    recorded_at    INTEGER NOT NULL
 );
 ";

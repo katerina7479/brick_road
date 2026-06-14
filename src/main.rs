@@ -264,6 +264,7 @@ fn logo_ui(
     mut contexts: EguiContexts,
     mut target: ResMut<CameraTarget>,
     model: Res<model::Model>,
+    scope: Res<schedule::ViewScope>,
     windows: Query<&Window>,
 ) {
     let Ok(ctx) = contexts.ctx_mut() else { return };
@@ -278,11 +279,23 @@ fn logo_ui(
                 .fill(egui::Color32::from_rgba_unmultiplied(22, 14, 4, 215))
                 .stroke(egui::Stroke::new(1.5, egui::Color32::from_rgb(180, 105, 25)));
             if ui.add(btn).on_hover_text("Fit to view [F]").clicked() {
-                if let Some(new_target) = camera::fit_to_blocks(&model, &windows) {
+                if let Some(new_target) = camera::fit_to_blocks(&model, &scope, &windows) {
                     *target = new_target;
                 }
             }
         });
+}
+
+/// Maps a confidence level to (optimistic_factor, pessimistic_factor).
+/// Factors multiply `duration_days` to derive the uncertainty spread.
+fn confidence_to_factors(confidence: f32) -> (f32, f32) {
+    if confidence >= 1.0 {
+        (1.0, 1.0) // Actual — no uncertainty
+    } else if confidence >= 0.75 {
+        (0.7, 1.4) // 75% — confident, modest spread
+    } else {
+        (0.5, 2.0) // 50% — rough guess, wide spread
+    }
 }
 
 fn side_panel_ui(
@@ -384,9 +397,6 @@ fn side_panel_ui(
             };
             let name = wb.name.clone();
             let mut duration_days = wb.duration_days;
-            let mut most_likely = wb.estimate.most_likely;
-            let mut optimistic = wb.estimate.optimistic;
-            let mut pessimistic = wb.estimate.pessimistic;
             let confidence = wb.estimate.confidence;
             let color = wb.color;
 
@@ -412,53 +422,47 @@ fn side_panel_ui(
             }).inner;
 
             if dur_changed {
+                let (opt_f, pes_f) = confidence_to_factors(confidence);
                 if let Some(wb) = model.work_blocks.get_mut(&sel_id) {
                     wb.duration_days = duration_days;
+                    wb.estimate.most_likely = duration_days;
+                    wb.estimate.optimistic = duration_days * opt_f;
+                    wb.estimate.pessimistic = duration_days * pes_f;
                 }
                 schedule::cascade_dependencies(&mut model, sel_id);
+                if let Err(e) = db::record_estimate_snapshot(&conn, sel_id.0, duration_days, confidence) {
+                    error!("record_estimate_snapshot failed: {e}");
+                }
                 if let Err(e) = db::save_model(&conn, &model) {
                     error!("save_model failed: {e}");
                 }
             }
 
             ui.separator();
-            ui.label("Estimate");
-            // DragValues are ordered best→expected→worst. Each range is bounded
-            // by its neighbours so optimistic ≤ most_likely ≤ pessimistic holds.
-            let opt_changed = ui.horizontal(|ui| {
-                ui.label("Optimistic:");
-                ui.add(
-                    egui::DragValue::new(&mut optimistic)
-                        .speed(0.5)
-                        .range(0.5f32..=most_likely)
-                        .suffix(" days"),
-                ).changed()
-            }).inner;
-            let ml_changed = ui.horizontal(|ui| {
-                ui.label("Most likely:");
-                ui.add(
-                    egui::DragValue::new(&mut most_likely)
-                        .speed(0.5)
-                        .range(optimistic..=pessimistic)
-                        .suffix(" days"),
-                ).changed()
-            }).inner;
-            let pes_changed = ui.horizontal(|ui| {
-                ui.label("Pessimistic:");
-                ui.add(
-                    egui::DragValue::new(&mut pessimistic)
-                        .speed(0.5)
-                        .range(most_likely..=200.0f32)
-                        .suffix(" days"),
-                ).changed()
-            }).inner;
-            ui.label(format!("Confidence: {:.0}%", confidence * 100.0));
+            ui.label("Confidence");
+            let mut new_confidence = confidence;
+            ui.horizontal(|ui| {
+                if ui.radio((confidence - 0.5).abs() < 0.01, "50%").clicked() {
+                    new_confidence = 0.5;
+                }
+                if ui.radio((confidence - 0.75).abs() < 0.01, "75%").clicked() {
+                    new_confidence = 0.75;
+                }
+                if ui.radio((confidence - 1.0).abs() < 0.01, "Actual").clicked() {
+                    new_confidence = 1.0;
+                }
+            });
 
-            if opt_changed || ml_changed || pes_changed {
+            if (new_confidence - confidence).abs() > 0.001 {
+                let (opt_f, pes_f) = confidence_to_factors(new_confidence);
                 if let Some(wb) = model.work_blocks.get_mut(&sel_id) {
-                    wb.estimate.most_likely = most_likely;
-                    wb.estimate.optimistic = optimistic;
-                    wb.estimate.pessimistic = pessimistic;
+                    wb.estimate.confidence = new_confidence;
+                    wb.estimate.most_likely = duration_days;
+                    wb.estimate.optimistic = duration_days * opt_f;
+                    wb.estimate.pessimistic = duration_days * pes_f;
+                }
+                if let Err(e) = db::record_estimate_snapshot(&conn, sel_id.0, duration_days, new_confidence) {
+                    error!("record_estimate_snapshot failed: {e}");
                 }
                 if let Err(e) = db::save_model(&conn, &model) {
                     error!("save_model failed: {e}");
