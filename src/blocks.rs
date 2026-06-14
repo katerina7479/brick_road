@@ -2,9 +2,10 @@ use bevy::prelude::*;
 use bevy_egui::EguiContexts;
 
 use crate::{
+    analysis::ScheduleAnalysis,
     constants::{PIXELS_PER_DAY, ROW_HEIGHT},
     model::{self, WorkBlockId},
-    schedule::{self, Schedule},
+    schedule,
 };
 
 const BLOCK_HEIGHT: f32 = 28.0;
@@ -39,7 +40,7 @@ pub struct BlockSprite {
 /// again whenever the schedule changes.
 pub fn spawn_block_sprites(
     mut commands: Commands,
-    schedule: Res<Schedule>,
+    sa: Res<ScheduleAnalysis>,
     model: Res<model::Model>,
     existing: Query<Entity, With<BlockSprite>>,
 ) {
@@ -50,7 +51,7 @@ pub fn spawn_block_sprites(
     let ordered = schedule::sorted_blocks(&model);
 
     let on_critical_path: std::collections::HashSet<WorkBlockId> =
-        schedule.critical_path.iter().copied().collect();
+        sa.critical_path.iter().copied().collect();
 
     for (row, wb) in ordered.iter().enumerate() {
         let width = wb.duration_days * PIXELS_PER_DAY;
@@ -87,13 +88,13 @@ pub fn spawn_block_sprites(
 ///   2. Selection 2× — block is the currently selected block
 ///   3. Palette default
 pub fn sync_block_sprites(
-    schedule: Res<Schedule>,
+    sa: Res<ScheduleAnalysis>,
     model: Res<model::Model>,
     selected: Res<SelectedBlock>,
     mut query: Query<(&BlockSprite, &mut Transform, &mut Sprite)>,
 ) {
     let on_critical: std::collections::HashSet<WorkBlockId> =
-        schedule.critical_path.iter().copied().collect();
+        sa.critical_path.iter().copied().collect();
 
     for (block_sprite, mut transform, mut sprite) in &mut query {
         let Some(wb) = model.work_blocks.get(&block_sprite.work_block_id) else {

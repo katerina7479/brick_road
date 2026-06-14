@@ -31,8 +31,10 @@ fn main() {
         .insert_resource(ClearColor(Color::srgb(0.02, 0.02, 0.05)))
         .insert_resource(CameraTarget::default())
         .insert_resource(blocks::SelectedBlock::default())
+        .insert_resource(analysis::ScheduleAnalysis::default())
         .add_systems(Startup, (setup_db, setup_camera))
         .add_systems(Startup, setup_demo_schedule.after(setup_db))
+        .add_systems(PostStartup, update_analysis.before(blocks::spawn_block_sprites))
         .add_systems(PostStartup, blocks::spawn_block_sprites)
         .add_systems(
             PostStartup,
@@ -40,6 +42,7 @@ fn main() {
         )
         .add_systems(Update, (update_camera_target, smooth_camera).chain())
         .add_systems(Update, draw_grid)
+        .add_systems(Update, update_analysis)
         .add_systems(Update, blocks::handle_block_selection)
         .add_systems(
             Update,
@@ -120,6 +123,37 @@ fn setup_demo_schedule(mut model: ResMut<model::Model>, mut commands: Commands) 
         }
         commands.insert_resource(sched);
     }
+}
+
+fn update_analysis(
+    model: Res<model::Model>,
+    mut sa: ResMut<analysis::ScheduleAnalysis>,
+) {
+    let dep = analysis::analyze_dependencies(&model);
+    let (critical_path, float) = model
+        .plans
+        .values()
+        .next()
+        .and_then(|plan| {
+            let graph = graph::build_graph(&model, plan);
+            schedule::analyze_user_placement(&model, &graph).ok()
+        })
+        .map(|cpa| (cpa.critical_path, cpa.float))
+        .unwrap_or_default();
+
+    let resource_conflicts = model
+        .plans
+        .values()
+        .next()
+        .map(|plan| analysis::analyze_resources(&model, plan))
+        .unwrap_or_default();
+
+    *sa = analysis::ScheduleAnalysis {
+        violations: dep.violations,
+        resource_conflicts,
+        critical_path,
+        float,
+    };
 }
 
 fn side_panel_ui(
