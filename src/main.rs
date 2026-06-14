@@ -1,4 +1,9 @@
-use bevy::prelude::*;
+use bevy::{
+    core_pipeline::tonemapping::Tonemapping,
+    post_process::bloom::Bloom,
+    prelude::*,
+    render::view::Hdr,
+};
 use bevy_egui::{egui, EguiContexts, EguiPlugin, EguiPrimaryContextPass};
 
 fn main() {
@@ -12,8 +17,19 @@ fn main() {
             ..default()
         }))
         .add_plugins(EguiPlugin::default())
+        .insert_resource(ClearColor(Color::srgb(0.02, 0.02, 0.05)))
+        .add_systems(Startup, setup_camera)
         .add_systems(EguiPrimaryContextPass, side_panel_ui)
         .run();
+}
+
+fn setup_camera(mut commands: Commands) {
+    commands.spawn((
+        Camera2d,
+        Hdr,
+        Tonemapping::TonyMcMapface,
+        Bloom::default(),
+    ));
 }
 
 fn side_panel_ui(mut contexts: EguiContexts) {
