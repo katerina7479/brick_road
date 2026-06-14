@@ -49,6 +49,7 @@ fn main() {
             blocks::sync_block_sprites.after(blocks::handle_block_selection),
         )
         .add_systems(Update, labels::draw_nesting_indicators)
+        .add_systems(Update, labels::draw_violation_indicators)
         .add_systems(EguiPrimaryContextPass, side_panel_ui)
         .run();
 }
