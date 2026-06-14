@@ -43,9 +43,14 @@ fn main() {
         .insert_resource(schedule::TimelineViewMode::default())
         .insert_resource(schedule::VisibleBlocks::default())
         .insert_resource(analysis::ScheduleAnalysis::default())
+        .insert_resource(labels::NestingDepthMap::default())
         .add_systems(Startup, (setup_db, setup_camera))
         .add_systems(Startup, setup_demo_schedule.after(setup_db))
         .add_systems(PostStartup, update_analysis.before(blocks::spawn_block_sprites))
+        .add_systems(
+            PostStartup,
+            labels::compute_nesting_depths.before(blocks::spawn_block_sprites),
+        )
         .add_systems(
             PostStartup,
             schedule::update_visible_blocks.before(blocks::spawn_block_sprites),
@@ -149,6 +154,10 @@ fn main() {
             labels::spawn_day_labels
                 .after(update_camera_target)
                 .after(smooth_camera),
+        )
+        .add_systems(
+            Update,
+            labels::compute_nesting_depths.before(labels::draw_nesting_indicators),
         )
         .add_systems(Update, labels::draw_nesting_indicators.run_if(task_view_active))
         .add_systems(Update, labels::draw_violation_indicators.run_if(task_view_active))
