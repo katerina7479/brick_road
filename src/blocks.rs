@@ -1446,6 +1446,70 @@ pub fn handle_block_delete(
 /// Shows a confirmation dialog while `DeleteConfirmState::pending` is set.
 /// On confirm: removes the block and all references from the model, persists to
 /// DB, and clears the selection. On cancel: dismisses without deleting.
+/// Returns true if `id` has any variant with at least one child work block.
+fn has_variant_children(model: &model::Model, id: WorkBlockId) -> bool {
+    model
+        .work_blocks
+        .get(&id)
+        .is_some_and(|wb| {
+            wb.variants
+                .iter()
+                .any(|&vid| model.variants.get(&vid).is_some_and(|v| !v.children.is_empty()))
+        })
+}
+
+/// Remove a work block and all of its descendants (variants' children,
+/// recursively) from the model, cleaning up all cross-references.
+///
+/// Deleted:
+/// - The work block itself and every descendant `WorkBlock`
+/// - All `Dependency` edges that touch any deleted block
+/// - Entries in `plan.root_blocks`, `plan.selected_variants`, and
+///   `plan.allocations` for every deleted block
+/// - All `Variant` records whose parent is any deleted block
+/// - References to deleted blocks in the `children` lists of surviving variants
+pub fn delete_work_block(model: &mut model::Model, id: WorkBlockId) {
+    // BFS to collect the block and all of its variant descendants.
+    let mut to_delete: Vec<WorkBlockId> = vec![id];
+    let mut i = 0;
+    while i < to_delete.len() {
+        let cur = to_delete[i];
+        if let Some(wb) = model.work_blocks.get(&cur) {
+            for &var_id in &wb.variants.clone() {
+                if let Some(var) = model.variants.get(&var_id) {
+                    for &child_id in &var.children.clone() {
+                        if !to_delete.contains(&child_id) {
+                            to_delete.push(child_id);
+                        }
+                    }
+                }
+            }
+        }
+        i += 1;
+    }
+    let delete_set: HashSet<WorkBlockId> = to_delete.iter().copied().collect();
+
+    for &del_id in &to_delete {
+        model.work_blocks.remove(&del_id);
+    }
+    model.dependencies.retain(|_, dep| {
+        !delete_set.contains(&dep.predecessor) && !delete_set.contains(&dep.successor)
+    });
+    for plan in model.plans.values_mut() {
+        plan.root_blocks.retain(|bid| !delete_set.contains(bid));
+        for &del_id in &to_delete {
+            plan.selected_variants.remove(&del_id);
+        }
+        plan.allocations.retain(|a| !delete_set.contains(&a.work_block_id));
+    }
+    // Remove deleted IDs from surviving variants' children lists before
+    // removing the variants themselves, so the retain below is consistent.
+    for variant in model.variants.values_mut() {
+        variant.children.retain(|bid| !delete_set.contains(bid));
+    }
+    model.variants.retain(|_, v| !delete_set.contains(&v.parent));
+}
+
 pub fn draw_delete_confirm_overlay(
     mut contexts: EguiContexts,
     mut delete_confirm: ResMut<DeleteConfirmState>,
@@ -1460,6 +1524,7 @@ pub fn draw_delete_confirm_overlay(
         .get(&pending_id)
         .map(|wb| wb.name.clone())
         .unwrap_or_else(|| "Unknown".to_string());
+    let has_children = has_variant_children(&model, pending_id);
 
     let Ok(ctx) = contexts.ctx_mut() else { return };
 
@@ -1473,6 +1538,9 @@ pub fn draw_delete_confirm_overlay(
         .show(ctx, |ui| {
             ui.label(format!("Delete \"{}\"?", block_name));
             ui.label("This will also remove all its dependencies.");
+            if has_children {
+                ui.label("All variant child blocks will be deleted too.");
+            }
             ui.separator();
             ui.horizontal(|ui| {
                 if ui.button("Delete").clicked() {
@@ -1485,21 +1553,7 @@ pub fn draw_delete_confirm_overlay(
         });
 
     if confirmed {
-        model.work_blocks.remove(&pending_id);
-        model
-            .dependencies
-            .retain(|_, dep| dep.predecessor != pending_id && dep.successor != pending_id);
-        for plan in model.plans.values_mut() {
-            plan.root_blocks.retain(|&bid| bid != pending_id);
-            plan.selected_variants.remove(&pending_id);
-            plan.allocations.retain(|a| a.work_block_id != pending_id);
-        }
-        for variant in model.variants.values_mut() {
-            variant.children.retain(|&bid| bid != pending_id);
-        }
-        // Remove variants owned by the deleted block to avoid orphans.
-        model.variants.retain(|_, v| v.parent != pending_id);
-
+        delete_work_block(&mut model, pending_id);
         if let Err(e) = db::save_model(&conn, &model) {
             error!("save_model failed: {e}");
         }
@@ -1507,6 +1561,106 @@ pub fn draw_delete_confirm_overlay(
         delete_confirm.pending = None;
     } else if cancelled {
         delete_confirm.pending = None;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{Estimate, Model};
+
+    fn est() -> Estimate {
+        Estimate { most_likely: 5.0, optimistic: 3.0, pessimistic: 8.0, confidence: 0.8 }
+    }
+
+    #[test]
+    fn delete_simple_block_removes_it() {
+        let mut m = Model::default();
+        let a = m.create_work_block("A", est());
+        delete_work_block(&mut m, a);
+        assert!(!m.work_blocks.contains_key(&a));
+    }
+
+    #[test]
+    fn delete_block_with_variants_removes_children() {
+        let mut m = Model::default();
+        let parent = m.create_work_block("P", est());
+        let var = m.create_variant("V", parent);
+        let child = m.create_work_block("C", est());
+        m.work_blocks.get_mut(&parent).unwrap().variants.push(var);
+        m.variants.get_mut(&var).unwrap().children.push(child);
+
+        delete_work_block(&mut m, parent);
+
+        assert!(!m.work_blocks.contains_key(&parent), "parent removed");
+        assert!(!m.work_blocks.contains_key(&child), "child removed");
+        assert!(!m.variants.contains_key(&var), "variant removed");
+    }
+
+    #[test]
+    fn delete_block_cleans_plan_root_and_allocations() {
+        let mut m = Model::default();
+        let wid = m.create_world("w");
+        let pid = m.create_plan("p", wid);
+        let a = m.create_work_block("A", est());
+        m.plans.get_mut(&pid).unwrap().root_blocks.push(a);
+
+        delete_work_block(&mut m, a);
+
+        assert!(!m.plans[&pid].root_blocks.contains(&a));
+    }
+
+    #[test]
+    fn delete_block_removes_its_dependencies() {
+        use crate::model::DependencyType;
+        let mut m = Model::default();
+        let a = m.create_work_block("A", est());
+        let b = m.create_work_block("B", est());
+        let dep = m.create_dependency(a, b, DependencyType::FinishToStart);
+
+        delete_work_block(&mut m, a);
+
+        assert!(!m.dependencies.contains_key(&dep));
+        assert!(m.work_blocks.contains_key(&b), "B survives");
+    }
+
+    #[test]
+    fn delete_recursive_two_levels() {
+        let mut m = Model::default();
+        let parent = m.create_work_block("P", est());
+        let var = m.create_variant("V", parent);
+        let child = m.create_work_block("C", est());
+        let var2 = m.create_variant("V2", child);
+        let grandchild = m.create_work_block("GC", est());
+        m.work_blocks.get_mut(&parent).unwrap().variants.push(var);
+        m.variants.get_mut(&var).unwrap().children.push(child);
+        m.work_blocks.get_mut(&child).unwrap().variants.push(var2);
+        m.variants.get_mut(&var2).unwrap().children.push(grandchild);
+
+        delete_work_block(&mut m, parent);
+
+        assert!(!m.work_blocks.contains_key(&parent));
+        assert!(!m.work_blocks.contains_key(&child));
+        assert!(!m.work_blocks.contains_key(&grandchild));
+        assert!(m.variants.is_empty());
+    }
+
+    #[test]
+    fn has_variant_children_false_when_no_variants() {
+        let mut m = Model::default();
+        let a = m.create_work_block("A", est());
+        assert!(!has_variant_children(&m, a));
+    }
+
+    #[test]
+    fn has_variant_children_true_when_has_children() {
+        let mut m = Model::default();
+        let parent = m.create_work_block("P", est());
+        let var = m.create_variant("V", parent);
+        let child = m.create_work_block("C", est());
+        m.work_blocks.get_mut(&parent).unwrap().variants.push(var);
+        m.variants.get_mut(&var).unwrap().children.push(child);
+        assert!(has_variant_children(&m, parent));
     }
 }
 
