@@ -97,6 +97,7 @@ fn main() {
         .add_systems(Update, labels::scale_labels_to_zoom)
         .add_systems(EguiPrimaryContextPass, side_panel_ui)
         .add_systems(EguiPrimaryContextPass, camera_nav_ui)
+        .add_systems(EguiPrimaryContextPass, logo_ui)
         .add_systems(EguiPrimaryContextPass, blocks::draw_name_edit_overlay)
         .run();
 }
@@ -229,6 +230,38 @@ fn camera_nav_ui(
                     }
                 }
             });
+        });
+}
+
+/// Renders the brick_road logo as a floating button anchored to the upper-left
+/// corner of the window. The logo renders on top of the side panel and serves
+/// as a persistent home/brand button — clicking it triggers fit-to-view,
+/// identical to the keyboard shortcut `F`.
+///
+/// The amber warm-glow styling complements the HDR bloom aesthetic of the
+/// main timeline canvas.
+fn logo_ui(
+    mut contexts: EguiContexts,
+    mut target: ResMut<CameraTarget>,
+    model: Res<model::Model>,
+    windows: Query<&Window>,
+) {
+    let Ok(ctx) = contexts.ctx_mut() else { return };
+    egui::Area::new(egui::Id::new("brick_road_logo"))
+        .anchor(egui::Align2::LEFT_TOP, egui::Vec2::new(8.0, 8.0))
+        .interactable(true)
+        .show(ctx, |ui| {
+            let text = egui::RichText::new("brick_road")
+                .size(18.0)
+                .color(egui::Color32::from_rgb(250, 165, 40));
+            let btn = egui::Button::new(text)
+                .fill(egui::Color32::from_rgba_unmultiplied(22, 14, 4, 215))
+                .stroke(egui::Stroke::new(1.5, egui::Color32::from_rgb(180, 105, 25)));
+            if ui.add(btn).on_hover_text("Fit to view [F]").clicked() {
+                if let Some(new_target) = camera::fit_to_blocks(&model, &windows) {
+                    *target = new_target;
+                }
+            }
         });
 }
 
