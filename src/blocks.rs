@@ -82,22 +82,21 @@ pub fn spawn_block_sprites(
     mut commands: Commands,
     sa: Res<ScheduleAnalysis>,
     model: Res<model::Model>,
-    scope: Res<ViewScope>,
+    visible_blocks: Res<schedule::VisibleBlocks>,
     existing: Query<Entity, With<BlockSprite>>,
 ) {
-    if !model.is_changed() && !scope.is_changed() {
+    if !model.is_changed() && !visible_blocks.is_changed() {
         return;
     }
     for entity in &existing {
         commands.entity(entity).despawn();
     }
 
-    let ordered = schedule::visible_blocks(&model, &scope);
-
     let on_critical_path: std::collections::HashSet<WorkBlockId> =
         sa.critical_path.iter().copied().collect();
 
-    for (row, wb) in ordered.iter().enumerate() {
+    for (row, &id) in visible_blocks.ids.iter().enumerate() {
+        let Some(wb) = model.work_blocks.get(&id) else { continue };
         let width = wb.duration_days * PIXELS_PER_DAY;
         // Sprite origin is at its center in Bevy 2D.
         let x = wb.start_day * PIXELS_PER_DAY + width * 0.5;
@@ -606,8 +605,7 @@ const CONFLICT_PADDING: f32 = 5.0;
 pub fn sync_conflict_overlays(
     mut commands: Commands,
     sa: Res<ScheduleAnalysis>,
-    model: Res<model::Model>,
-    scope: Res<ViewScope>,
+    visible_blocks: Res<schedule::VisibleBlocks>,
     existing: Query<Entity, With<ConflictOverlay>>,
 ) {
     for entity in &existing {
@@ -619,10 +617,13 @@ pub fn sync_conflict_overlays(
     }
 
     // Row lookup: WorkBlockId → row index (same ordering as block sprites).
-    let ordered = schedule::visible_blocks(&model, &scope);
-    let row_of: HashMap<WorkBlockId, usize> =
-        ordered.iter().enumerate().map(|(i, wb)| (wb.id, i)).collect();
-    let total_rows = ordered.len().max(1);
+    let row_of: HashMap<WorkBlockId, usize> = visible_blocks
+        .ids
+        .iter()
+        .enumerate()
+        .map(|(i, &id)| (id, i))
+        .collect();
+    let total_rows = visible_blocks.ids.len().max(1);
 
     for conflict in &sa.resource_conflicts {
         let width = (conflict.window_end - conflict.window_start) * PIXELS_PER_DAY;
@@ -685,19 +686,18 @@ pub struct UncertaintyOverlay;
 pub fn sync_uncertainty_overlays(
     mut commands: Commands,
     model: Res<model::Model>,
-    scope: Res<ViewScope>,
+    visible_blocks: Res<schedule::VisibleBlocks>,
     existing: Query<Entity, With<UncertaintyOverlay>>,
 ) {
-    if !model.is_changed() && !scope.is_changed() {
+    if !model.is_changed() && !visible_blocks.is_changed() {
         return;
     }
     for entity in &existing {
         commands.entity(entity).despawn();
     }
 
-    let ordered = schedule::visible_blocks(&model, &scope);
-
-    for (row, wb) in ordered.iter().enumerate() {
+    for (row, &id) in visible_blocks.ids.iter().enumerate() {
+        let Some(wb) = model.work_blocks.get(&id) else { continue };
         let y = -(row as f32) * ROW_HEIGHT;
         let confidence = wb.estimate.confidence.clamp(0.0, 1.0);
         let tail_alpha = (1.0 - confidence) * 0.55;
@@ -818,23 +818,24 @@ pub fn draw_dependency_edges(
     model: Res<model::Model>,
     sa: Res<ScheduleAnalysis>,
     drag: Res<DepDragState>,
-    scope: Res<ViewScope>,
+    visible_blocks: Res<schedule::VisibleBlocks>,
     windows: Query<&Window>,
     camera: Query<(&Camera, &GlobalTransform)>,
 ) {
-    let ordered = schedule::visible_blocks(&model, &scope);
-    let geom: HashMap<WorkBlockId, BlockGeom> = ordered
+    let geom: HashMap<WorkBlockId, BlockGeom> = visible_blocks
+        .ids
         .iter()
         .enumerate()
-        .map(|(row, wb)| {
-            (
+        .filter_map(|(row, &id)| {
+            let wb = model.work_blocks.get(&id)?;
+            Some((
                 wb.id,
                 BlockGeom {
                     xl: wb.start_day * PIXELS_PER_DAY,
                     xr: (wb.start_day + wb.duration_days) * PIXELS_PER_DAY,
                     y: -(row as f32) * ROW_HEIGHT,
                 },
-            )
+            ))
         })
         .collect();
 
@@ -917,7 +918,7 @@ fn dep_type_from_modifiers(keys: &ButtonInput<KeyCode>) -> DependencyType {
 pub fn draw_block_handles(
     mut gizmos: Gizmos,
     model: Res<model::Model>,
-    scope: Res<ViewScope>,
+    visible_blocks: Res<schedule::VisibleBlocks>,
     drag: Res<DepDragState>,
     windows: Query<&Window>,
     camera: Query<(&Camera, &GlobalTransform)>,
@@ -927,13 +928,12 @@ pub fn draw_block_handles(
     let Some(cursor) = window.cursor_position() else { return };
     let Ok(world_pos) = cam.viewport_to_world_2d(cam_tr, cursor) else { return };
 
-    let ordered = schedule::visible_blocks(&model, &scope);
-
     let cyan = Color::srgba(0.3, 0.9, 1.0, 0.9);   // left handle (incoming)
     let amber = Color::srgba(1.0, 0.75, 0.2, 0.9);  // right handle (outgoing)
     let white = Color::WHITE;
 
-    for (row, wb) in ordered.iter().enumerate() {
+    for (row, &id) in visible_blocks.ids.iter().enumerate() {
+        let Some(wb) = model.work_blocks.get(&id) else { continue };
         if wb.duration_days <= 0.0 {
             continue;
         }
