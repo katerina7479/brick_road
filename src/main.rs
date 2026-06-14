@@ -494,7 +494,8 @@ fn side_panel_ui(
     egui::SidePanel::left("side_panel")
         .min_width(SIDE_PANEL_WIDTH)
         .show(ctx, |ui| {
-            ui.heading("brick_road");
+            // Space reserved for the floating logo button (logo_ui anchored at LEFT_TOP+(8,8)).
+            ui.add_space(28.0);
 
             // Plan selector — tabs across the top of the panel.
             {
