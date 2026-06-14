@@ -3,7 +3,7 @@ use bevy_egui::EguiContexts;
 
 use crate::{
     constants::{PIXELS_PER_DAY, ROW_HEIGHT},
-    model::WorkBlockId,
+    model::{self, WorkBlockId},
     schedule::{self, Schedule},
 };
 
@@ -40,25 +40,26 @@ pub struct BlockSprite {
 pub fn spawn_block_sprites(
     mut commands: Commands,
     schedule: Res<Schedule>,
+    model: Res<model::Model>,
     existing: Query<Entity, With<BlockSprite>>,
 ) {
     for entity in &existing {
         commands.entity(entity).despawn();
     }
 
-    let ordered = schedule::sorted_blocks(&schedule);
+    let ordered = schedule::sorted_blocks(&model);
 
     let on_critical_path: std::collections::HashSet<WorkBlockId> =
         schedule.critical_path.iter().copied().collect();
 
-    for (row, block) in ordered.iter().enumerate() {
-        let width = block.duration_days * PIXELS_PER_DAY;
+    for (row, wb) in ordered.iter().enumerate() {
+        let width = wb.duration_days * PIXELS_PER_DAY;
         // Sprite origin is at its center in Bevy 2D.
-        let x = block.start_day * PIXELS_PER_DAY + width * 0.5;
+        let x = wb.start_day * PIXELS_PER_DAY + width * 0.5;
         let y = -(row as f32) * ROW_HEIGHT;
 
         // Critical-path blocks glow gold; others cycle through the palette.
-        let color = if on_critical_path.contains(&block.work_block_id) {
+        let color = if on_critical_path.contains(&wb.id) {
             Color::from(LinearRgba::new(3.0, 2.2, 0.1, 1.0))
         } else {
             Color::from(PALETTE[row % PALETTE.len()])
@@ -66,7 +67,7 @@ pub fn spawn_block_sprites(
 
         commands.spawn((
             BlockSprite {
-                work_block_id: block.work_block_id,
+                work_block_id: wb.id,
                 row,
             },
             Sprite {
@@ -87,6 +88,7 @@ pub fn spawn_block_sprites(
 ///   3. Palette default
 pub fn sync_block_sprites(
     schedule: Res<Schedule>,
+    model: Res<model::Model>,
     selected: Res<SelectedBlock>,
     mut query: Query<(&BlockSprite, &mut Transform, &mut Sprite)>,
 ) {
@@ -94,11 +96,11 @@ pub fn sync_block_sprites(
         schedule.critical_path.iter().copied().collect();
 
     for (block_sprite, mut transform, mut sprite) in &mut query {
-        let Some(block) = schedule.blocks.get(&block_sprite.work_block_id) else {
+        let Some(wb) = model.work_blocks.get(&block_sprite.work_block_id) else {
             continue;
         };
-        let width = block.duration_days * PIXELS_PER_DAY;
-        let x = block.start_day * PIXELS_PER_DAY + width * 0.5;
+        let width = wb.duration_days * PIXELS_PER_DAY;
+        let x = wb.start_day * PIXELS_PER_DAY + width * 0.5;
         let y = -(block_sprite.row as f32) * ROW_HEIGHT;
         transform.translation.x = x;
         transform.translation.y = y;
