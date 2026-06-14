@@ -30,12 +30,14 @@ fn main() {
         .add_plugins(EguiPlugin::default())
         .insert_resource(ClearColor(Color::srgb(0.02, 0.02, 0.05)))
         .insert_resource(CameraTarget::default())
+        .insert_resource(blocks::SelectedBlock::default())
         .add_systems(Startup, (setup_db, setup_camera))
         .add_systems(Startup, setup_demo_schedule.after(setup_db))
         .add_systems(PostStartup, blocks::spawn_block_sprites)
         .add_systems(Update, (update_camera_target, smooth_camera).chain())
         .add_systems(Update, draw_grid)
-        .add_systems(Update, blocks::sync_block_sprites)
+        .add_systems(Update, blocks::handle_block_selection)
+        .add_systems(Update, blocks::sync_block_sprites.after(blocks::handle_block_selection))
         .add_systems(EguiPrimaryContextPass, side_panel_ui)
         .run();
 }
