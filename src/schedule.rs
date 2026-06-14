@@ -36,6 +36,16 @@ impl Schedule {
     }
 }
 
+/// Output of a backward-pass critical-path analysis over a forward-pass Schedule.
+#[derive(Debug, Clone)]
+pub struct CriticalPathAnalysis {
+    /// Active blocks with zero total float, in topological order.
+    pub critical_path: Vec<WorkBlockId>,
+    /// Total float (slack) for every active block: `latest_finish − earliest_finish`.
+    /// Non-negative in a valid schedule; zero marks a critical block.
+    pub float: HashMap<WorkBlockId, f32>,
+}
+
 /// Compute unconstrained earliest start/end for every active block (Demand
 /// Planning mode, PRD §6.1). Uses most-likely estimates; no resource
 /// constraints are applied.
@@ -60,10 +70,6 @@ pub fn forward_pass(
     // Lower bound on end day from FF/SF edges.
     let mut min_end: HashMap<WorkBlockId, Option<f32>> =
         graph.nodes.iter().map(|&id| (id, None)).collect();
-    // Which predecessor drove the tightest constraint for each block
-    // (used to reconstruct the critical path).
-    let mut driver: HashMap<WorkBlockId, Option<WorkBlockId>> =
-        graph.nodes.iter().map(|&id| (id, None)).collect();
 
     let mut sched = Schedule::new(plan.id);
 
@@ -84,8 +90,7 @@ pub fn forward_pass(
         let earliest_start = f32::max(0.0, f32::max(es_from_start, es_from_end));
         let earliest_end = earliest_start + dur;
 
-        // Propagate constraints to successors, tracking which predecessor
-        // produced each tightest constraint.
+        // Propagate constraints to successors.
         if let Some(edges) = graph.edges.get(&id) {
             for edge in edges {
                 let s = edge.successor;
@@ -95,7 +100,6 @@ pub fn forward_pass(
                         let v = min_start.entry(s).or_insert(0.0);
                         if new > *v {
                             *v = new;
-                            *driver.entry(s).or_insert(None) = Some(id);
                         }
                     }
                     DependencyType::StartToStart => {
@@ -103,25 +107,20 @@ pub fn forward_pass(
                         let v = min_start.entry(s).or_insert(0.0);
                         if new > *v {
                             *v = new;
-                            *driver.entry(s).or_insert(None) = Some(id);
                         }
                     }
                     DependencyType::FinishToFinish => {
                         let new = earliest_end + edge.lag;
                         let v = min_end.entry(s).or_insert(None);
-                        let update = v.map_or(true, |cur| new > cur);
-                        if update {
+                        if v.is_none_or(|cur| new > cur) {
                             *v = Some(new);
-                            *driver.entry(s).or_insert(None) = Some(id);
                         }
                     }
                     DependencyType::StartToFinish => {
                         let new = earliest_start + edge.lag;
                         let v = min_end.entry(s).or_insert(None);
-                        let update = v.map_or(true, |cur| new > cur);
-                        if update {
+                        if v.is_none_or(|cur| new > cur) {
                             *v = Some(new);
-                            *driver.entry(s).or_insert(None) = Some(id);
                         }
                     }
                 }
@@ -142,34 +141,92 @@ pub fn forward_pass(
         .map(|b| b.end_day)
         .fold(0.0_f32, f32::max);
 
-    sched.critical_path = build_critical_path(&sched.blocks, &driver, sched.total_duration_days);
+    sched.critical_path = backward_pass(graph, &sched).critical_path;
 
     Ok(sched)
 }
 
-/// Trace the critical path backward from the block(s) that end at
-/// `total_duration`, following driver links, then reverse for topo order.
-fn build_critical_path(
-    blocks: &HashMap<WorkBlockId, ScheduledBlock>,
-    driver: &HashMap<WorkBlockId, Option<WorkBlockId>>,
-    total_duration: f32,
-) -> Vec<WorkBlockId> {
-    // Find the terminal block on the critical path (latest end; lowest id breaks ties).
-    let terminal = blocks
-        .values()
-        .filter(|b| (b.end_day - total_duration).abs() < f32::EPSILON)
-        .min_by_key(|b| b.work_block_id.0)
-        .map(|b| b.work_block_id);
+/// Compute latest start/finish and total float for every block in `schedule`.
+///
+/// Backward-pass semantics (P = predecessor, S = successor, lag in days).
+/// Each edge type gives an upper bound on LF(P):
+///   FS:  LF(P) ≤ LS(S) − lag          where LS(S) = LF(S) − dur(S)
+///   SS:  LF(P) ≤ LS(S) − lag + dur(P)
+///   FF:  LF(P) ≤ LF(S) − lag
+///   SF:  LF(P) ≤ LF(S) − lag + dur(P)
+///
+/// Float (total slack) = LF − EF.  Blocks with zero float are critical.
+pub fn backward_pass(
+    graph: &DependencyGraph,
+    schedule: &Schedule,
+) -> CriticalPathAnalysis {
+    let order = match crate::graph::topological_sort(graph) {
+        Ok(o) => o,
+        Err(_) => return CriticalPathAnalysis { critical_path: vec![], float: HashMap::new() },
+    };
 
-    let Some(mut cur) = terminal else { return vec![] };
-
-    let mut path = vec![cur];
-    while let Some(&Some(pred)) = driver.get(&cur) {
-        path.push(pred);
-        cur = pred;
+    // Build reverse edge map: successor → [(predecessor, dependency_type, lag)].
+    let mut reverse: HashMap<WorkBlockId, Vec<(WorkBlockId, DependencyType, f32)>> =
+        graph.nodes.iter().map(|&id| (id, Vec::new())).collect();
+    for (&pred, edges) in &graph.edges {
+        for edge in edges {
+            reverse
+                .entry(edge.successor)
+                .or_default()
+                .push((pred, edge.dependency_type, edge.lag));
+        }
     }
-    path.reverse();
-    path
+
+    let total = schedule.total_duration_days;
+
+    // Initialise LF to project end for every block (unconstrained).
+    let mut latest_finish: HashMap<WorkBlockId, f32> =
+        graph.nodes.iter().map(|&id| (id, total)).collect();
+
+    // Process in reverse topological order (successors before predecessors).
+    for &s_id in order.iter().rev() {
+        let lf_s = *latest_finish.get(&s_id).unwrap_or(&total);
+        let dur_s = schedule.blocks.get(&s_id).map(|b| b.duration_days).unwrap_or(0.0);
+        let ls_s = lf_s - dur_s;
+
+        if let Some(preds) = reverse.get(&s_id) {
+            for &(pred_id, dep_type, lag) in preds {
+                let dur_p =
+                    schedule.blocks.get(&pred_id).map(|b| b.duration_days).unwrap_or(0.0);
+                let bound = match dep_type {
+                    DependencyType::FinishToStart  => ls_s - lag,
+                    DependencyType::StartToStart   => ls_s - lag + dur_p,
+                    DependencyType::FinishToFinish => lf_s - lag,
+                    DependencyType::StartToFinish  => lf_s - lag + dur_p,
+                };
+                let v = latest_finish.entry(pred_id).or_insert(total);
+                if bound < *v {
+                    *v = bound;
+                }
+            }
+        }
+    }
+
+    // Float = LF − EF for each block.
+    const CRITICAL_EPS: f32 = 1e-4;
+    let float: HashMap<WorkBlockId, f32> = graph
+        .nodes
+        .iter()
+        .map(|&id| {
+            let ef = schedule.blocks.get(&id).map(|b| b.end_day).unwrap_or(0.0);
+            let lf = *latest_finish.get(&id).unwrap_or(&total);
+            (id, lf - ef)
+        })
+        .collect();
+
+    // Critical path: zero-float blocks in topological order.
+    let critical_path = order
+        .iter()
+        .filter(|&&id| float.get(&id).is_some_and(|&f| f.abs() < CRITICAL_EPS))
+        .copied()
+        .collect();
+
+    CriticalPathAnalysis { critical_path, float }
 }
 
 #[cfg(test)]
@@ -341,5 +398,116 @@ mod tests {
         assert!(s.critical_path.contains(&b));
         assert!(s.critical_path.contains(&c));
         assert!(!s.critical_path.contains(&a));
+    }
+
+    // --- backward_pass / float tests ---
+
+    fn analyze(model: &Model, roots: Vec<WorkBlockId>) -> (Schedule, CriticalPathAnalysis) {
+        use crate::graph::build_graph;
+        let plan = model.plans.values().next().cloned().unwrap();
+        let mut p = plan.clone();
+        p.root_blocks = roots;
+        let graph = build_graph(model, &p);
+        let sched = forward_pass(model, &p, &graph).expect("no cycle");
+        let analysis = backward_pass(&graph, &sched);
+        (sched, analysis)
+    }
+
+    #[test]
+    fn float_single_block_is_zero() {
+        let (mut m, _) = base();
+        let a = m.create_work_block("A", est(5.0));
+        let (_, ana) = analyze(&m, vec![a]);
+        assert_eq!(*ana.float.get(&a).unwrap(), 0.0);
+        assert_eq!(ana.critical_path, vec![a]);
+    }
+
+    #[test]
+    fn float_linear_chain_all_zero() {
+        // A(3) --FS--> B(2) --FS--> C(1): all float = 0
+        let (mut m, _) = base();
+        let a = m.create_work_block("A", est(3.0));
+        let b = m.create_work_block("B", est(2.0));
+        let c = m.create_work_block("C", est(1.0));
+        m.create_dependency(a, b, DependencyType::FinishToStart);
+        m.create_dependency(b, c, DependencyType::FinishToStart);
+        let (_, ana) = analyze(&m, vec![a, b, c]);
+        assert_eq!(*ana.float.get(&a).unwrap(), 0.0);
+        assert_eq!(*ana.float.get(&b).unwrap(), 0.0);
+        assert_eq!(*ana.float.get(&c).unwrap(), 0.0);
+        assert_eq!(ana.critical_path, vec![a, b, c]);
+    }
+
+    #[test]
+    fn float_parallel_branch_has_positive_float() {
+        // A(5) --FS--> C(1)   total = 6
+        // B(3) --FS--> C(1)
+        // B.float = LF_B − EF_B = 5 − 3 = 2
+        let (mut m, _) = base();
+        let a = m.create_work_block("A", est(5.0));
+        let b = m.create_work_block("B", est(3.0));
+        let c = m.create_work_block("C", est(1.0));
+        m.create_dependency(a, c, DependencyType::FinishToStart);
+        m.create_dependency(b, c, DependencyType::FinishToStart);
+        let (_, ana) = analyze(&m, vec![a, b, c]);
+        assert_eq!(*ana.float.get(&a).unwrap(), 0.0);
+        assert_eq!(*ana.float.get(&c).unwrap(), 0.0);
+        assert!((*ana.float.get(&b).unwrap() - 2.0).abs() < 1e-4);
+        assert!(ana.critical_path.contains(&a));
+        assert!(ana.critical_path.contains(&c));
+        assert!(!ana.critical_path.contains(&b));
+    }
+
+    #[test]
+    fn float_ff_dependency() {
+        // A(3) --FF--> B(2): EF_A=3, ES_B=1, EF_B=3, total=3
+        // Backward: LF_B=3, LF_A ≤ LF_B − 0 = 3 → float_A = 3−3 = 0
+        let (mut m, _) = base();
+        let a = m.create_work_block("A", est(3.0));
+        let b = m.create_work_block("B", est(2.0));
+        m.create_dependency(a, b, DependencyType::FinishToFinish);
+        let (_, ana) = analyze(&m, vec![a, b]);
+        assert!(ana.float.get(&a).unwrap().abs() < 1e-4);
+        assert!(ana.float.get(&b).unwrap().abs() < 1e-4);
+        assert!(ana.critical_path.contains(&a));
+        assert!(ana.critical_path.contains(&b));
+    }
+
+    #[test]
+    fn float_ff_mixed_with_fs_correct_attribution() {
+        // B(10) --FF--> C(5)   and   A(3) --FS--> C(5)
+        // B created first → lower ID → processed first in topo order.
+        // es_from_end = 10−5 = 5 > es_from_start = 3 → C.start = 5, C.end = 10.
+        // total = 10.  Backward: LF_B ≤ LF_C − 0 = 10; LF_A ≤ LS_C − 0 = 5.
+        // float_B = 10−10 = 0, float_A = 5−3 = 2, float_C = 10−10 = 0.
+        // Critical path: B and C only.
+        let (mut m, _) = base();
+        let b = m.create_work_block("B", est(10.0));
+        let a = m.create_work_block("A", est(3.0));
+        let c = m.create_work_block("C", est(5.0));
+        m.create_dependency(b, c, DependencyType::FinishToFinish);
+        m.create_dependency(a, c, DependencyType::FinishToStart);
+        let (_, ana) = analyze(&m, vec![a, b, c]);
+        assert!(ana.float.get(&b).unwrap().abs() < 1e-4, "B float should be 0");
+        assert!(ana.float.get(&c).unwrap().abs() < 1e-4, "C float should be 0");
+        assert!((*ana.float.get(&a).unwrap() - 2.0).abs() < 1e-4, "A float should be 2");
+        assert!(ana.critical_path.contains(&b), "B on critical path");
+        assert!(ana.critical_path.contains(&c), "C on critical path");
+        assert!(!ana.critical_path.contains(&a), "A not on critical path");
+    }
+
+    #[test]
+    fn float_with_lag() {
+        // A(3) --FS+2--> B(2): EF_A=3, ES_B=5, EF_B=7, total=7
+        // Backward: LF_B=7, LS_B=5, LF_A ≤ LS_B − 2 = 3 → float_A=3−3=0
+        let (mut m, _) = base();
+        let a = m.create_work_block("A", est(3.0));
+        let b = m.create_work_block("B", est(2.0));
+        let dep = m.create_dependency(a, b, DependencyType::FinishToStart);
+        m.dependencies.get_mut(&dep).unwrap().lag = 2.0;
+        let (_, ana) = analyze(&m, vec![a, b]);
+        assert!(ana.float.get(&a).unwrap().abs() < 1e-4);
+        assert!(ana.float.get(&b).unwrap().abs() < 1e-4);
+        assert_eq!(ana.critical_path, vec![a, b]);
     }
 }
