@@ -111,6 +111,12 @@ fn setup_demo_schedule(mut model: ResMut<model::Model>, mut commands: Commands) 
 
     let dep_graph = graph::build_graph(&model, &plan);
     if let Ok(sched) = schedule::forward_pass(&model, &plan, &dep_graph) {
+        for sb in sched.blocks.values() {
+            if let Some(wb) = model.work_blocks.get_mut(&sb.work_block_id) {
+                wb.start_day = sb.start_day;
+                wb.duration_days = sb.duration_days;
+            }
+        }
         commands.insert_resource(sched);
     }
 }
