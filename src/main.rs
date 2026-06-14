@@ -120,6 +120,7 @@ fn side_panel_ui(
     selected: Res<blocks::SelectedBlock>,
     mut model: ResMut<model::Model>,
     mut schedule: ResMut<schedule::Schedule>,
+    conn: NonSend<rusqlite::Connection>,
 ) {
     let Ok(ctx) = contexts.ctx_mut() else { return };
     egui::SidePanel::left("side_panel")
@@ -133,17 +134,10 @@ fn side_panel_ui(
                 return;
             };
 
-            // Compute row index using the same sort order as block sprites.
-            let row = {
-                let mut ordered: Vec<_> = schedule.blocks.values().collect();
-                ordered.sort_by(|a, b| {
-                    a.start_day
-                        .partial_cmp(&b.start_day)
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                        .then(a.work_block_id.0.cmp(&b.work_block_id.0))
-                });
-                ordered.iter().position(|b| b.work_block_id == sel_id)
-            };
+            // Compute row index using the canonical sort order shared with block sprites.
+            let row = schedule::sorted_blocks(&schedule)
+                .iter()
+                .position(|b| b.work_block_id == sel_id);
 
             // Clone display values before any mutable borrow of model.
             let Some(wb) = model.work_blocks.get(&sel_id) else {
@@ -193,6 +187,9 @@ fn side_panel_ui(
                         *schedule = new_sched;
                     }
                 }
+            }
+            if let Err(e) = db::save_model(&conn, &model) {
+                error!("save_model failed: {e}");
             }
         });
 }
