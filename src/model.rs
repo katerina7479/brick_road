@@ -48,6 +48,8 @@ pub struct WorkBlock {
     /// Optional user-defined HDR color [R, G, B] in linear space.
     /// Values > 1.0 trigger bloom. `None` falls back to the palette default.
     pub color: Option<[f32; 3]>,
+    /// Free-form notes displayed on hover; not shown in the block bar.
+    pub description: String,
 }
 
 /// One alternative decomposition of a parent WorkBlock into an ordered sequence
@@ -191,6 +193,7 @@ impl Model {
                 start_day: 0.0,
                 duration_days: 0.0,
                 color: None,
+                description: String::new(),
             },
         );
         id
