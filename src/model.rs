@@ -102,6 +102,8 @@ pub struct CalendarConfig {
     pub working_days_per_week: u8,
     /// Specific calendar dates excluded from working-day counting (holidays, shutdowns).
     pub non_working_dates: Vec<NaiveDate>,
+    /// RGBA fill colors for Q1–Q4 background bands. Low opacity — background context only.
+    pub quarter_colors: [[f32; 4]; 4],
 }
 
 impl Default for CalendarConfig {
@@ -110,6 +112,12 @@ impl Default for CalendarConfig {
             start_date: NaiveDate::from_ymd_opt(2025, 1, 1).unwrap(),
             working_days_per_week: 5,
             non_working_dates: vec![],
+            quarter_colors: [
+                [0.20, 0.30, 0.60, 0.07], // Q1 - blue
+                [0.20, 0.50, 0.25, 0.07], // Q2 - green
+                [0.60, 0.40, 0.15, 0.07], // Q3 - amber
+                [0.45, 0.20, 0.50, 0.07], // Q4 - purple
+            ],
         }
     }
 }

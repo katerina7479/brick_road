@@ -1802,6 +1802,7 @@ mod tests {
             start_date: NaiveDate::from_ymd_opt(2025, 1, 6).unwrap(), // Monday
             working_days_per_week: 5,
             non_working_dates: vec![],
+            quarter_colors: Default::default(),
         };
         // 5 working days from Monday Jan 6 = Monday Jan 13 (skips weekend).
         let date = working_day_to_date(5.0, &config);
@@ -1816,6 +1817,7 @@ mod tests {
             start_date: NaiveDate::from_ymd_opt(2025, 1, 6).unwrap(), // Monday
             working_days_per_week: 5,
             non_working_dates: vec![],
+            quarter_colors: Default::default(),
         };
         // 5 effort days starting Monday = 7 calendar days (Mon through next Mon).
         assert_eq!(calendar_span(0.0, 5.0, &config), 7);

@@ -79,6 +79,23 @@ pub fn date_to_day(date: NaiveDate, config: &CalendarConfig) -> i32 {
     count * sign
 }
 
+/// Returns the first calendar day in (year, month) that is a working day under `config`.
+/// Returns `None` if the month contains no working days.
+pub fn first_working_day_of_month(year: i32, month: u32, config: &CalendarConfig) -> Option<NaiveDate> {
+    let non_working: std::collections::HashSet<NaiveDate> =
+        config.non_working_dates.iter().copied().collect();
+    let mut day = NaiveDate::from_ymd_opt(year, month, 1)?;
+    loop {
+        if day.month() != month as u32 {
+            return None;
+        }
+        if is_working_day(day, config.working_days_per_week, &non_working) {
+            return Some(day);
+        }
+        day = day.checked_add_signed(Duration::days(1))?;
+    }
+}
+
 /// Converts effort in working days to a calendar duration in calendar days.
 ///
 /// Returns the number of calendar days from `start_date` to complete
@@ -101,6 +118,7 @@ mod tests {
             start_date: NaiveDate::from_ymd_opt(2025, 1, 6).unwrap(), // Monday
             working_days_per_week: 5,
             non_working_dates: vec![],
+            ..Default::default()
         }
     }
 
@@ -124,6 +142,7 @@ mod tests {
             start_date: NaiveDate::from_ymd_opt(2025, 1, 10).unwrap(), // Friday
             working_days_per_week: 5,
             non_working_dates: vec![],
+            ..Default::default()
         };
         let result = day_to_date(1.0, &cfg);
         assert_eq!(result, NaiveDate::from_ymd_opt(2025, 1, 13).unwrap()); // Monday
@@ -136,6 +155,7 @@ mod tests {
             start_date: NaiveDate::from_ymd_opt(2025, 1, 6).unwrap(), // Monday
             working_days_per_week: 5,
             non_working_dates: vec![holiday],
+            ..Default::default()
         };
         // 1 working day after Mon Jan 6, skipping Tue Jan 7 → Wed Jan 8
         assert_eq!(
@@ -150,6 +170,7 @@ mod tests {
             start_date: NaiveDate::from_ymd_opt(2025, 1, 10).unwrap(), // Friday
             working_days_per_week: 6,
             non_working_dates: vec![],
+            ..Default::default()
         };
         // 1 working day after Friday → Saturday (included in 6-day week)
         assert_eq!(
@@ -173,6 +194,7 @@ mod tests {
             start_date: NaiveDate::from_ymd_opt(2025, 1, 13).unwrap(), // Monday
             working_days_per_week: 5,
             non_working_dates: vec![],
+            ..Default::default()
         };
         // Mon Jan 6 is 5 working days before Mon Jan 13
         assert_eq!(
