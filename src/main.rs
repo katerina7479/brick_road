@@ -18,6 +18,7 @@ pub mod schedule;
 
 use camera::{camera_nav_keys, smooth_camera, update_camera_target, CameraTarget};
 use constants::{PIXELS_PER_DAY, SIDE_PANEL_WIDTH};
+use model::Day;
 
 fn main() {
     App::new()
@@ -290,7 +291,7 @@ fn sync_weekend_bands(
         commands.entity(e).despawn();
     }
 
-    let span = schedule.total_duration_days.ceil() as i32 + 10;
+    let span = schedule.total_duration_days + 10;
     let weekend_color = Color::srgba(0.35, 0.30, 0.50, 0.10);
     let holiday_color = Color::srgba(0.70, 0.25, 0.25, 0.15);
 
@@ -332,7 +333,7 @@ fn draw_resource_timeline(
     resources.sort_by_key(|r| r.id.0);
 
     // Pre-index conflict windows per resource.
-    let mut conflict_windows: std::collections::HashMap<model::ResourceBlockId, Vec<(f32, f32)>> =
+    let mut conflict_windows: std::collections::HashMap<model::ResourceBlockId, Vec<(Day, Day)>> =
         std::collections::HashMap::new();
     for c in &sa.resource_conflicts {
         conflict_windows
@@ -364,8 +365,8 @@ fn draw_resource_timeline(
             }
             let Some(wb) = model.work_blocks.get(&alloc.work_block_id) else { continue };
 
-            let x0 = wb.start_day * PIXELS_PER_DAY;
-            let x1 = (wb.start_day + wb.duration_days) * PIXELS_PER_DAY;
+            let x0 = wb.start_day as f32 * PIXELS_PER_DAY;
+            let x1 = (wb.start_day + wb.duration_days) as f32 * PIXELS_PER_DAY;
             let w  = (x1 - x0).max(4.0);
             let cx = x0 + w * 0.5;
 
@@ -391,7 +392,7 @@ fn draw_resource_timeline(
     let unassigned: Vec<_> = model
         .work_blocks
         .values()
-        .filter(|wb| wb.duration_days > 0.0 && !allocated.contains(&wb.id))
+        .filter(|wb| wb.duration_days > 0 && !allocated.contains(&wb.id))
         .collect();
 
     if !unassigned.is_empty() {
@@ -406,8 +407,8 @@ fn draw_resource_timeline(
 
         let unassigned_color = Color::srgba(0.55, 0.55, 0.55, 0.5);
         for wb in &unassigned {
-            let x0 = wb.start_day * PIXELS_PER_DAY;
-            let x1 = (wb.start_day + wb.duration_days) * PIXELS_PER_DAY;
+            let x0 = wb.start_day as f32 * PIXELS_PER_DAY;
+            let x1 = (wb.start_day + wb.duration_days) as f32 * PIXELS_PER_DAY;
             let w  = (x1 - x0).max(4.0);
             let cx = x0 + w * 0.5;
             let (x_lo, x_hi) = (cx - w * 0.5, cx + w * 0.5);
@@ -456,7 +457,7 @@ fn resource_row_labels_ui(
     let has_unassigned = model
         .work_blocks
         .values()
-        .any(|wb| wb.duration_days > 0.0 && !allocated.contains(&wb.id));
+        .any(|wb| wb.duration_days > 0 && !allocated.contains(&wb.id));
 
     egui::Area::new(egui::Id::new("resource_row_labels"))
         .fixed_pos(egui::Pos2::ZERO)
@@ -500,21 +501,21 @@ fn resource_row_labels_ui(
 fn setup_demo_schedule(mut model: ResMut<model::Model>, mut commands: Commands) {
     use model::{DependencyType, Estimate};
 
-    let est = |d: f32| Estimate {
+    let est = |d: Day| Estimate {
         most_likely: d,
-        optimistic: d * 0.7,
-        pessimistic: d * 1.5,
+        optimistic: (d as f32 * 0.7).round() as Day,
+        pessimistic: (d as f32 * 1.5).round() as Day,
         confidence: 0.8,
     };
 
     let world_id = model.create_world("Demo");
     let plan_id = model.create_plan("Demo Plan", world_id);
 
-    let design = model.create_work_block("Design", est(5.0));
-    let build = model.create_work_block("Build", est(8.0));
-    let test = model.create_work_block("Test", est(4.0));
-    let review = model.create_work_block("Review", est(2.0));
-    let deploy = model.create_work_block("Deploy", est(1.0));
+    let design = model.create_work_block("Design", est(5));
+    let build = model.create_work_block("Build", est(8));
+    let test = model.create_work_block("Test", est(4));
+    let review = model.create_work_block("Review", est(2));
+    let deploy = model.create_work_block("Deploy", est(1));
 
     model.create_dependency(design, build, DependencyType::FinishToStart);
     model.create_dependency(build, test, DependencyType::FinishToStart);
@@ -890,7 +891,7 @@ fn side_panel_ui(
                         } else if model.t_shirt_sizes.iter().any(|s| s.label == label) {
                             *new_size_error = Some(format!("'{label}' already exists"));
                         } else {
-                            model.t_shirt_sizes.push(model::TShirtSize { label, days: 1.0 });
+                            model.t_shirt_sizes.push(model::TShirtSize { label, days: 1 });
                             new_size_label.clear();
                             *new_size_error = None;
                             mapping_changed = true;
@@ -992,7 +993,7 @@ fn side_panel_ui(
             let (start_day, end_day) = (wb.start_day, wb.start_day + wb.duration_days);
 
             // Clone t-shirt sizes and variant names before any mutable model borrow.
-            let t_shirt_sizes: Vec<(String, f32)> = model
+            let t_shirt_sizes: Vec<(String, Day)> = model
                 .t_shirt_sizes
                 .iter()
                 .map(|s| (s.label.clone(), s.days))
@@ -1050,8 +1051,8 @@ fn side_panel_ui(
                             let children: Vec<_> = old_v.children.clone();
                             for child_id in children {
                                 if let Some(wb) = model.work_blocks.get_mut(&child_id) {
-                                    wb.start_day = 0.0;
-                                    wb.duration_days = 0.0;
+                                    wb.start_day = 0;
+                                    wb.duration_days = 0;
                                 }
                             }
                         }
@@ -1107,7 +1108,7 @@ fn side_panel_ui(
 
             ui.separator();
             ui.label("Size");
-            let mut size_chosen: Option<(String, f32)> = None;
+            let mut size_chosen: Option<(String, Day)> = None;
             ui.horizontal_wrapped(|ui| {
                 for (label, days) in &t_shirt_sizes {
                     let active = current_t_shirt_size.as_deref() == Some(label.as_str());
@@ -1130,8 +1131,8 @@ fn side_panel_ui(
                     wb.t_shirt_size = Some(label);
                     wb.duration_days = days;
                     wb.estimate.most_likely = days;
-                    wb.estimate.optimistic = days * opt_f;
-                    wb.estimate.pessimistic = days * pes_f;
+                    wb.estimate.optimistic = (days as f32 * opt_f).round() as Day;
+                    wb.estimate.pessimistic = (days as f32 * pes_f).round() as Day;
                 }
                 schedule::cascade_dependencies(&mut model, sel_id);
                 if let Err(e) = db::record_estimate_snapshot(&conn, sel_id.0, duration_days, confidence) {
@@ -1147,8 +1148,8 @@ fn side_panel_ui(
                 ui.label("Custom:");
                 ui.add(
                     egui::DragValue::new(&mut duration_days)
-                        .speed(0.5)
-                        .range(0.5f32..=60.0)
+                        .speed(1)
+                        .range(1..=60)
                         .suffix(" days"),
                 ).changed()
             }).inner;
@@ -1159,8 +1160,8 @@ fn side_panel_ui(
                     wb.t_shirt_size = None;
                     wb.duration_days = duration_days;
                     wb.estimate.most_likely = duration_days;
-                    wb.estimate.optimistic = duration_days * opt_f;
-                    wb.estimate.pessimistic = duration_days * pes_f;
+                    wb.estimate.optimistic = (duration_days as f32 * opt_f).round() as Day;
+                    wb.estimate.pessimistic = (duration_days as f32 * pes_f).round() as Day;
                 }
                 schedule::cascade_dependencies(&mut model, sel_id);
                 if let Err(e) = db::record_estimate_snapshot(&conn, sel_id.0, duration_days, confidence) {
@@ -1191,8 +1192,8 @@ fn side_panel_ui(
                 if let Some(wb) = model.work_blocks.get_mut(&sel_id) {
                     wb.estimate.confidence = new_confidence;
                     wb.estimate.most_likely = duration_days;
-                    wb.estimate.optimistic = duration_days * opt_f;
-                    wb.estimate.pessimistic = duration_days * pes_f;
+                    wb.estimate.optimistic = (duration_days as f32 * opt_f).round() as Day;
+                    wb.estimate.pessimistic = (duration_days as f32 * pes_f).round() as Day;
                 }
                 if let Err(e) = db::record_estimate_snapshot(&conn, sel_id.0, duration_days, new_confidence) {
                     error!("record_estimate_snapshot failed: {e}");
@@ -1376,10 +1377,10 @@ fn side_panel_ui(
                 selected.0 = Some(target_id);
                 // Pan the camera to centre the target block in the timeline.
                 if let Some(wb) = model.work_blocks.get(&target_id) {
-                    if wb.duration_days > 0.0 {
+                    if wb.duration_days > 0 {
                         let sorted = schedule::sorted_blocks(&model);
                         let row = sorted.iter().position(|b| b.id == target_id).unwrap_or(0);
-                        let cx = (wb.start_day + wb.duration_days * 0.5) * PIXELS_PER_DAY;
+                        let cx = (wb.start_day as f32 + wb.duration_days as f32 * 0.5) * PIXELS_PER_DAY;
                         let cy = -(row as f32) * constants::ROW_HEIGHT;
                         camera_target.pos = Vec2::new(cx, cy);
                     }
