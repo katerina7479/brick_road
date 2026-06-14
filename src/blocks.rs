@@ -899,9 +899,8 @@ pub fn sync_uncertainty_overlays(
     }
 
     // Despawn stale overlays (removed blocks, or tail/marker no longer warranted).
-    for (key, entity) in &existing {
+    for (_, entity) in &existing {
         if !live.contains(entity) {
-            let _ = key; // key unused here but makes the pattern clear
             commands.entity(*entity).despawn();
         }
     }
