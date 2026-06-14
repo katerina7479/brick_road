@@ -1641,9 +1641,10 @@ pub fn draw_create_mode_overlay(
     }
 }
 
-/// Shows a description tooltip when the pointer hovers over a block that has notes.
-/// Renders an egui Area near the cursor so it floats above all other UI.
-pub fn draw_description_tooltip(
+/// Shows a stats tooltip when the pointer hovers over a block sprite.
+/// Displays start day, end day, duration, estimate range, and (if set) the
+/// block's description. Renders an egui Area near the cursor.
+pub fn draw_block_tooltip(
     mut egui_ctx: EguiContexts,
     model: Res<model::Model>,
     windows: Query<&Window>,
@@ -1669,17 +1670,41 @@ pub fn draw_description_tooltip(
             && world_pos.y <= center.y + half.y
         {
             let Some(wb) = model.work_blocks.get(&block_sprite.work_block_id) else { continue };
-            if wb.description.is_empty() {
-                return;
-            }
             let Some(screen_pos) = ctx.pointer_hover_pos() else { return };
-            egui::Area::new(egui::Id::new("block_desc_tooltip"))
+            let end_day = wb.start_day + wb.duration_days;
+            let est = &wb.estimate;
+            egui::Area::new(egui::Id::new("block_stats_tooltip"))
                 .order(egui::Order::Tooltip)
                 .fixed_pos(screen_pos + egui::Vec2::new(14.0, 14.0))
                 .show(ctx, |ui| {
                     egui::Frame::popup(ui.style()).show(ui, |ui| {
-                        ui.set_max_width(300.0);
-                        ui.label(&wb.description);
+                        ui.set_max_width(320.0);
+                        ui.strong(&wb.name);
+                        ui.separator();
+                        egui::Grid::new("block_tooltip_grid")
+                            .num_columns(2)
+                            .spacing([8.0, 2.0])
+                            .show(ui, |ui| {
+                                ui.label("Start:");
+                                ui.label(format!("day {:.1}", wb.start_day));
+                                ui.end_row();
+                                ui.label("End:");
+                                ui.label(format!("day {:.1}", end_day));
+                                ui.end_row();
+                                ui.label("Duration:");
+                                ui.label(format!("{:.1} days", wb.duration_days));
+                                ui.end_row();
+                                ui.label("Estimate:");
+                                ui.label(format!(
+                                    "opt {:.1} / ml {:.1} / pess {:.1}",
+                                    est.optimistic, est.most_likely, est.pessimistic
+                                ));
+                                ui.end_row();
+                            });
+                        if !wb.description.is_empty() {
+                            ui.separator();
+                            ui.label(&wb.description);
+                        }
                     });
                 });
             return;

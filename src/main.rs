@@ -190,7 +190,7 @@ fn main() {
         .add_systems(EguiPrimaryContextPass, blocks::draw_name_edit_overlay)
         .add_systems(EguiPrimaryContextPass, blocks::draw_delete_confirm_overlay)
         .add_systems(EguiPrimaryContextPass, blocks::draw_create_mode_overlay)
-        .add_systems(EguiPrimaryContextPass, blocks::draw_description_tooltip)
+        .add_systems(EguiPrimaryContextPass, blocks::draw_block_tooltip)
         .run();
 }
 
