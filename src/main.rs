@@ -8,6 +8,7 @@ use bevy_egui::{egui, EguiContexts, EguiPlugin, EguiPrimaryContextPass};
 
 pub mod camera;
 pub mod constants;
+pub mod db;
 pub mod model;
 
 use camera::{smooth_camera, update_camera_target, CameraTarget};
