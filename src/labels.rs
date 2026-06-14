@@ -1,10 +1,12 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use bevy::prelude::*;
+use chrono::Datelike;
 
 use crate::{
     analysis::ScheduleAnalysis,
     blocks::BlockSprite,
+    calendar::day_to_date,
     constants::{PIXELS_PER_DAY, ROW_HEIGHT},
     model::{Model, WorkBlockId},
     schedule::Schedule,
@@ -77,17 +79,29 @@ pub fn compute_nesting_depths(model: Res<Model>, mut depth_map: ResMut<NestingDe
 /// Y position of day-number labels above the block rows.
 const DAY_LABEL_Y: f32 = 55.0;
 
-/// Maps orthographic zoom scale to the day-label stride.
-/// Returns the number of days between consecutive day labels.
-fn day_step_for_zoom(scale: f32) -> i32 {
+/// Maps orthographic zoom scale to (stride_days, use_month_format).
+/// `stride_days` is the gap between labels; `use_month_format` switches to
+/// "Mon YYYY" at far zoom where individual dates are too dense to read.
+fn day_step_for_zoom(scale: f32) -> (i32, bool) {
     if scale < 0.5 {
-        1
+        (1, false)
     } else if scale < 2.0 {
-        5
+        (5, false)
     } else if scale < 4.0 {
-        10
+        (10, false)
     } else {
-        30
+        (30, true)
+    }
+}
+
+/// Formats a timeline day number as a human-readable date label.
+/// `month_only` → "Jun '25";  otherwise → "Jun 16".
+fn format_day_label(day: i32, month_only: bool, model: &Model) -> String {
+    let date = day_to_date(day as f32, &model.calendar);
+    if month_only {
+        format!("{} '{:02}", date.format("%b"), date.year() % 100)
+    } else {
+        format!("{} {}", date.format("%b"), date.day())
     }
 }
 
@@ -128,7 +142,7 @@ pub fn spawn_day_labels(
         })
         .unwrap_or(1.0);
 
-    let step = day_step_for_zoom(scale);
+    let (step, month_only) = day_step_for_zoom(scale);
     let zoom_band_changed = step != *prev_step;
 
     if !zoom_band_changed && !schedule.is_changed() && !model.is_changed() {
@@ -143,9 +157,10 @@ pub fn spawn_day_labels(
     let span = schedule.total_duration_days.ceil() as i32 + step;
     for day in (0..=span).step_by(step as usize) {
         let x = day as f32 * PIXELS_PER_DAY;
+        let label = format_day_label(day, month_only, &model);
         commands.spawn((
             DayLabel,
-            Text2d::new(format!("D{day}")),
+            Text2d::new(label),
             TextFont {
                 font_size: 11.0,
                 ..default()
@@ -372,5 +387,49 @@ mod tests {
         assert_eq!(depths[&root], 0);
         // shared is reachable via v1 and v2 — both paths are depth 1.
         assert_eq!(depths[&shared], 1);
+    }
+
+    fn mon_config() -> crate::model::CalendarConfig {
+        crate::model::CalendarConfig {
+            start_date: chrono::NaiveDate::from_ymd_opt(2025, 6, 16).unwrap(), // Monday
+            working_days_per_week: 5,
+            non_working_dates: vec![],
+        }
+    }
+
+    #[test]
+    fn format_day_label_day_zero_shows_start_date() {
+        let mut model = Model::default();
+        model.calendar = mon_config();
+        assert_eq!(format_day_label(0, false, &model), "Jun 16");
+    }
+
+    #[test]
+    fn format_day_label_five_working_days_is_next_monday() {
+        let mut model = Model::default();
+        model.calendar = mon_config();
+        // 5 working days from Mon Jun 16 = Mon Jun 23
+        assert_eq!(format_day_label(5, false, &model), "Jun 23");
+    }
+
+    #[test]
+    fn format_day_label_month_only_shows_abbreviated_month_and_year() {
+        let mut model = Model::default();
+        model.calendar = mon_config();
+        assert_eq!(format_day_label(0, true, &model), "Jun '25");
+    }
+
+    #[test]
+    fn day_step_for_zoom_close_is_daily_no_month() {
+        let (step, month_only) = day_step_for_zoom(0.3);
+        assert_eq!(step, 1);
+        assert!(!month_only);
+    }
+
+    #[test]
+    fn day_step_for_zoom_far_is_monthly_with_month_format() {
+        let (step, month_only) = day_step_for_zoom(5.0);
+        assert_eq!(step, 30);
+        assert!(month_only);
     }
 }
