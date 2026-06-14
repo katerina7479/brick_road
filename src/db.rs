@@ -24,6 +24,7 @@ pub fn create_tables(conn: &Connection) -> Result<()> {
         "ALTER TABLE work_blocks ADD COLUMN description TEXT NOT NULL DEFAULT ''",
         "ALTER TABLE work_blocks ADD COLUMN priority INTEGER NOT NULL DEFAULT 1",
         "ALTER TABLE work_blocks ADD COLUMN t_shirt_size TEXT",
+        "ALTER TABLE plans ADD COLUMN branch_start_day REAL",
     ] {
         match conn.execute_batch(sql) {
             Ok(()) => {}
@@ -231,9 +232,17 @@ pub fn save_model(conn: &Connection, model: &Model) -> Result<()> {
 
     for plan in model.plans.values() {
         tx.execute(
-            "INSERT INTO plans (id, name, world_id) VALUES (?1, ?2, ?3)
-             ON CONFLICT(id) DO UPDATE SET name = excluded.name, world_id = excluded.world_id",
-            (plan.id.0 as i64, &plan.name, plan.world_id.0 as i64),
+            "INSERT INTO plans (id, name, world_id, branch_start_day) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(id) DO UPDATE SET
+                 name = excluded.name,
+                 world_id = excluded.world_id,
+                 branch_start_day = excluded.branch_start_day",
+            (
+                plan.id.0 as i64,
+                &plan.name,
+                plan.world_id.0 as i64,
+                plan.branch_start_day,
+            ),
         )?;
     }
 
@@ -668,16 +677,18 @@ pub fn load_model(conn: &Connection) -> Result<Model> {
 
     // plans
     {
-        let mut stmt = conn.prepare("SELECT id, name, world_id FROM plans")?;
+        let mut stmt =
+            conn.prepare("SELECT id, name, world_id, branch_start_day FROM plans")?;
         let rows = stmt.query_map([], |row| {
             Ok((
                 row.get::<_, i64>(0)?,
                 row.get::<_, String>(1)?,
                 row.get::<_, i64>(2)?,
+                row.get::<_, Option<f64>>(3)?,
             ))
         })?;
         for row in rows {
-            let (id, name, world_id) = row?;
+            let (id, name, world_id, branch_start_day) = row?;
             bump!(id);
             model.plans.insert(
                 PlanId(id as u64),
@@ -688,6 +699,7 @@ pub fn load_model(conn: &Connection) -> Result<Model> {
                     root_blocks: vec![],
                     selected_variants: HashMap::new(),
                     allocations: vec![],
+                    branch_start_day: branch_start_day.map(|d| d as f32),
                 },
             );
         }
@@ -1094,7 +1106,7 @@ mod tests {
 
         m.create_milestone("launch", 90.0);
 
-        let plan_id = m.create_plan("alpha", world_id);
+        let plan_id = m.create_plan("alpha", world_id, None);
         m.plans.get_mut(&plan_id).unwrap().root_blocks.push(wb_a);
         m.plans.get_mut(&plan_id).unwrap().root_blocks.push(wb_b);
         m.plans
@@ -1241,7 +1253,7 @@ mod tests {
         let v = m.create_variant("v", wb_a);
         m.work_blocks.get_mut(&wb_a).unwrap().variants.push(v);
         let _dep = m.create_dependency(wb_a, wb_b, DependencyType::FinishToStart);
-        let plan_id = m.create_plan("p", w);
+        let plan_id = m.create_plan("p", w, None);
         m.plans.get_mut(&plan_id).unwrap().root_blocks.push(wb_a);
         m.plans
             .get_mut(&plan_id)
@@ -1296,6 +1308,7 @@ mod tests {
                 root_blocks: vec![],
                 selected_variants: Default::default(),
                 allocations: vec![],
+                branch_start_day: None,
             },
         );
         let err = validate_model(&m).unwrap_err().to_string();
@@ -1313,7 +1326,7 @@ mod tests {
         let wb_b = m.create_work_block("b", est(1.0, 0.5, 2.0, 1.0));
         let v = m.create_variant("v", wb_a);
         m.work_blocks.get_mut(&wb_a).unwrap().variants.push(v);
-        let plan_id = m.create_plan("p", world_id);
+        let plan_id = m.create_plan("p", world_id, None);
         // Select variant v (parent = wb_a) for wb_b — wrong parent
         m.plans
             .get_mut(&plan_id)

@@ -1028,7 +1028,7 @@ mod tests {
     fn base() -> (Model, crate::model::PlanId) {
         let mut m = Model::default();
         let wid = m.create_world("w");
-        let pid = m.create_plan("p", wid);
+        let pid = m.create_plan("p", wid, None);
         (m, pid)
     }
 

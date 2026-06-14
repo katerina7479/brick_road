@@ -218,7 +218,7 @@ mod tests {
 
     fn make_plan(model: &mut Model, allocs: Vec<ResourceAllocation>) -> crate::model::PlanId {
         let wid = model.create_world("w");
-        let pid = model.create_plan("p", wid);
+        let pid = model.create_plan("p", wid, None);
         model.plans.get_mut(&pid).unwrap().allocations = allocs;
         pid
     }
