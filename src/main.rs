@@ -31,6 +31,7 @@ fn main() {
         .insert_resource(ClearColor(Color::srgb(0.02, 0.02, 0.05)))
         .insert_resource(CameraTarget::default())
         .insert_resource(blocks::SelectedBlock::default())
+        .insert_resource(blocks::DragState::default())
         .insert_resource(analysis::ScheduleAnalysis::default())
         .add_systems(Startup, (setup_db, setup_camera))
         .add_systems(Startup, setup_demo_schedule.after(setup_db))
@@ -46,7 +47,11 @@ fn main() {
         .add_systems(Update, blocks::handle_block_selection)
         .add_systems(
             Update,
-            blocks::sync_block_sprites.after(blocks::handle_block_selection),
+            blocks::handle_block_drag.after(blocks::handle_block_selection),
+        )
+        .add_systems(
+            Update,
+            blocks::sync_block_sprites.after(blocks::handle_block_drag),
         )
         .add_systems(
             Update,

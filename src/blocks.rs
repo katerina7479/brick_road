@@ -6,6 +6,7 @@ use bevy_egui::EguiContexts;
 use crate::{
     analysis::ScheduleAnalysis,
     constants::{PIXELS_PER_DAY, ROW_HEIGHT},
+    db,
     model::{self, WorkBlockId},
     schedule,
 };
@@ -185,6 +186,100 @@ pub fn handle_block_selection(
     } else {
         clicked
     };
+}
+
+/// Tracks an in-progress block drag initiated by the user.
+#[derive(Resource, Default)]
+pub struct DragState {
+    /// The block being dragged and the cursor's x-offset from the block's left edge (pixels).
+    dragging: Option<(WorkBlockId, f32)>,
+}
+
+/// Center-drag a block left or right to reposition its `start_day`.
+///
+/// - Press: hit-test blocks, record offset from left edge, set selection.
+/// - Held: slide `start_day` to follow the cursor (clamped to ≥ 0).
+/// - Release: cascade dependency constraints, persist to DB.
+///
+/// Clicks that land inside egui areas are ignored (same guard as selection).
+pub fn handle_block_drag(
+    mut egui_ctx: EguiContexts,
+    windows: Query<&Window>,
+    camera: Query<(&Camera, &GlobalTransform)>,
+    mouse: Res<ButtonInput<MouseButton>>,
+    mut drag: ResMut<DragState>,
+    mut selected: ResMut<SelectedBlock>,
+    mut model: ResMut<model::Model>,
+    conn: NonSend<rusqlite::Connection>,
+    block_query: Query<(&BlockSprite, &Transform, &Sprite)>,
+) {
+    // Guard: egui owns the pointer when the cursor is over any egui area.
+    if let Ok(ctx) = egui_ctx.ctx_mut() {
+        if ctx.is_pointer_over_area() {
+            drag.dragging = None;
+            return;
+        }
+    }
+
+    let Ok(window) = windows.single() else { return };
+    let Ok((camera, camera_transform)) = camera.single() else {
+        return;
+    };
+    let Some(cursor_pos) = window.cursor_position() else {
+        drag.dragging = None;
+        return;
+    };
+    let Ok(world_pos) = camera.viewport_to_world_2d(camera_transform, cursor_pos) else {
+        return;
+    };
+
+    // Press: hit-test and start drag.
+    if mouse.just_pressed(MouseButton::Left) {
+        drag.dragging = None;
+        for (block_sprite, transform, sprite) in &block_query {
+            let Some(size) = sprite.custom_size else { continue };
+            let center = transform.translation.truncate();
+            let half = size * 0.5;
+            if world_pos.x >= center.x - half.x
+                && world_pos.x <= center.x + half.x
+                && world_pos.y >= center.y - half.y
+                && world_pos.y <= center.y + half.y
+            {
+                let id = block_sprite.work_block_id;
+                let start_px = model
+                    .work_blocks
+                    .get(&id)
+                    .map(|wb| wb.start_day * PIXELS_PER_DAY)
+                    .unwrap_or(0.0);
+                // Offset preserves where within the block the user grabbed.
+                drag.dragging = Some((id, world_pos.x - start_px));
+                selected.0 = Some(id);
+                break;
+            }
+        }
+        return;
+    }
+
+    // Held: slide start_day to follow cursor.
+    if mouse.pressed(MouseButton::Left) {
+        if let Some((id, offset_px)) = drag.dragging {
+            let new_start = ((world_pos.x - offset_px) / PIXELS_PER_DAY).max(0.0);
+            if let Some(wb) = model.work_blocks.get_mut(&id) {
+                wb.start_day = new_start;
+            }
+        }
+        return;
+    }
+
+    // Release: cascade dependencies and persist.
+    if mouse.just_released(MouseButton::Left) {
+        if let Some((id, _)) = drag.dragging.take() {
+            schedule::cascade_dependencies(&mut model, id);
+            if let Err(e) = db::save_model(&conn, &model) {
+                error!("save_model failed: {e}");
+            }
+        }
+    }
 }
 
 /// Marker: this sprite visualises one `ResourceConflict` window.
