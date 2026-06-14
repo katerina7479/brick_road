@@ -260,6 +260,62 @@ mod tests {
     }
 
     #[test]
+    fn variant_selection_expands_correct_children() {
+        let mut model = Model::default();
+        let world_id = model.create_world("w");
+        let plan_id = model.create_plan("p", world_id);
+
+        let parent = model.create_work_block("parent", est());
+        let child_a = model.create_work_block("child_a", est());
+        let child_b = model.create_work_block("child_b", est());
+        let var_a = model.create_variant("fast", parent);
+        let var_b = model.create_variant("slow", parent);
+        model.variants.get_mut(&var_a).unwrap().children.push(child_a);
+        model.variants.get_mut(&var_b).unwrap().children.push(child_b);
+        model.work_blocks.get_mut(&parent).unwrap().variants = vec![var_a, var_b];
+
+        let plan = {
+            let p = model.plans.get_mut(&plan_id).unwrap();
+            p.root_blocks = vec![parent];
+            p.selected_variants.insert(parent, var_a);
+            p.clone()
+        };
+
+        let graph = build_graph(&model, &plan);
+        assert!(graph.nodes.contains(&parent));
+        assert!(graph.nodes.contains(&child_a));  // selected variant's child included
+        assert!(!graph.nodes.contains(&child_b)); // unselected variant's child excluded
+    }
+
+    #[test]
+    fn variant_with_no_selection_is_leaf() {
+        // A block with variants but no selection in plan.selected_variants
+        // must appear in the graph as a leaf — no children expanded.
+        let mut model = Model::default();
+        let world_id = model.create_world("w");
+        let plan_id = model.create_plan("p", world_id);
+
+        let parent = model.create_work_block("parent", est());
+        let child = model.create_work_block("child", est());
+        let var_a = model.create_variant("v", parent);
+        model.variants.get_mut(&var_a).unwrap().children.push(child);
+        model.work_blocks.get_mut(&parent).unwrap().variants = vec![var_a];
+
+        // No selected_variants entry for parent.
+        let plan = {
+            let p = model.plans.get_mut(&plan_id).unwrap();
+            p.root_blocks = vec![parent];
+            p.clone()
+        };
+
+        let graph = build_graph(&model, &plan);
+        assert!(graph.nodes.contains(&parent));
+        assert!(!graph.nodes.contains(&child)); // children not expanded without selection
+        let order = topological_sort(&graph).unwrap();
+        assert_eq!(order, vec![parent]);
+    }
+
+    #[test]
     fn inactive_blocks_excluded() {
         // Blocks not in plan.root_blocks and not reachable via variants
         // must not appear in the graph, even if dependencies reference them.
