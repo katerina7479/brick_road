@@ -1,6 +1,12 @@
+use std::collections::HashMap;
+
 use rusqlite::{Connection, Result};
 
-use crate::model::{DependencyType, Model, ResourceType};
+use crate::model::{
+    AvailabilitySegment, AvailabilityTimeline, Dependency, DependencyId, DependencyType,
+    Estimate, Milestone, MilestoneId, Model, Plan, PlanId, ResourceAllocation, ResourceBlock,
+    ResourceBlockId, ResourceType, Variant, VariantId, WorkBlock, WorkBlockId, World, WorldId,
+};
 
 pub fn create_tables(conn: &Connection) -> Result<()> {
     conn.execute_batch("PRAGMA foreign_keys = ON;")?;
@@ -168,6 +174,349 @@ pub fn save_model(conn: &Connection, model: &Model) -> Result<()> {
     }
 
     tx.commit()
+}
+
+/// Reconstructs a complete Model from SQLite.
+///
+/// Restores `next_id` to `max(all persisted IDs) + 1` so the first
+/// `create_*` call on the reloaded model cannot produce a duplicate ID.
+pub fn load_model(conn: &Connection) -> Result<Model> {
+    let mut model = Model::default();
+    let mut max_id: u64 = 0;
+
+    // Helper: track largest ID seen so far.
+    macro_rules! bump {
+        ($id:expr) => {
+            let id = $id as u64;
+            if id >= max_id {
+                max_id = id + 1;
+            }
+        };
+    }
+
+    // worlds
+    {
+        let mut stmt = conn.prepare("SELECT id, name FROM worlds")?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        })?;
+        for row in rows {
+            let (id, name) = row?;
+            bump!(id);
+            model.worlds.insert(
+                WorldId(id as u64),
+                World { id: WorldId(id as u64), name, resource_ids: vec![] },
+            );
+        }
+    }
+
+    // resource_blocks  (also populate world.resource_ids)
+    {
+        let mut stmt = conn.prepare(
+            "SELECT id, world_id, name, resource_type FROM resource_blocks",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })?;
+        for row in rows {
+            let (id, world_id, name, rt_str) = row?;
+            let resource_type = parse_resource_type(&rt_str)?;
+            bump!(id);
+            if let Some(world) = model.worlds.get_mut(&WorldId(world_id as u64)) {
+                world.resource_ids.push(ResourceBlockId(id as u64));
+            }
+            model.resource_blocks.insert(
+                ResourceBlockId(id as u64),
+                ResourceBlock {
+                    id: ResourceBlockId(id as u64),
+                    name,
+                    resource_type,
+                    availability: AvailabilityTimeline::default(),
+                },
+            );
+        }
+    }
+
+    // availability_segments  (ORDER BY guarantees segment ordering)
+    {
+        let mut stmt = conn.prepare(
+            "SELECT resource_block_id, start_day, end_day, factor
+             FROM availability_segments
+             ORDER BY resource_block_id, sort_order",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, f64>(1)?,
+                row.get::<_, f64>(2)?,
+                row.get::<_, f64>(3)?,
+            ))
+        })?;
+        for row in rows {
+            let (rb_id, start, end, factor) = row?;
+            if let Some(rb) = model.resource_blocks.get_mut(&ResourceBlockId(rb_id as u64)) {
+                rb.availability.segments.push(AvailabilitySegment {
+                    start: start as f32,
+                    end: end as f32,
+                    factor: factor as f32,
+                });
+            }
+        }
+    }
+
+    // work_blocks
+    {
+        let mut stmt = conn.prepare(
+            "SELECT id, name, estimate_most_likely, estimate_optimistic,
+                    estimate_pessimistic, estimate_confidence
+             FROM work_blocks",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, f64>(2)?,
+                row.get::<_, f64>(3)?,
+                row.get::<_, f64>(4)?,
+                row.get::<_, f64>(5)?,
+            ))
+        })?;
+        for row in rows {
+            let (id, name, ml, opt, pes, conf) = row?;
+            bump!(id);
+            model.work_blocks.insert(
+                WorkBlockId(id as u64),
+                WorkBlock {
+                    id: WorkBlockId(id as u64),
+                    name,
+                    estimate: Estimate {
+                        most_likely: ml as f32,
+                        optimistic: opt as f32,
+                        pessimistic: pes as f32,
+                        confidence: conf as f32,
+                    },
+                    variants: vec![],
+                },
+            );
+        }
+    }
+
+    // variants  (children populated below)
+    {
+        let mut stmt = conn.prepare(
+            "SELECT id, name, parent_work_block_id FROM variants",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)?))
+        })?;
+        for row in rows {
+            let (id, name, parent_id) = row?;
+            bump!(id);
+            model.variants.insert(
+                VariantId(id as u64),
+                Variant {
+                    id: VariantId(id as u64),
+                    name,
+                    parent: WorkBlockId(parent_id as u64),
+                    children: vec![],
+                },
+            );
+        }
+    }
+
+    // variant_children → populate variant.children (order preserved)
+    {
+        let mut stmt = conn.prepare(
+            "SELECT variant_id, child_work_block_id
+             FROM variant_children
+             ORDER BY variant_id, sort_order",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+        })?;
+        for row in rows {
+            let (var_id, child_id) = row?;
+            if let Some(v) = model.variants.get_mut(&VariantId(var_id as u64)) {
+                v.children.push(WorkBlockId(child_id as u64));
+            }
+        }
+    }
+
+    // Rebuild work_block.variants from each variant's parent field.
+    let parent_links: Vec<(WorkBlockId, VariantId)> = model
+        .variants
+        .values()
+        .map(|v| (v.parent, v.id))
+        .collect();
+    for (wb_id, var_id) in parent_links {
+        if let Some(wb) = model.work_blocks.get_mut(&wb_id) {
+            wb.variants.push(var_id);
+        }
+    }
+
+    // dependencies
+    {
+        let mut stmt = conn.prepare(
+            "SELECT id, predecessor_id, successor_id, dependency_type, lag_days
+             FROM dependencies",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, f64>(4)?,
+            ))
+        })?;
+        for row in rows {
+            let (id, pred, succ, dt_str, lag) = row?;
+            let dependency_type = parse_dependency_type(&dt_str)?;
+            bump!(id);
+            model.dependencies.insert(
+                DependencyId(id as u64),
+                Dependency {
+                    id: DependencyId(id as u64),
+                    predecessor: WorkBlockId(pred as u64),
+                    successor: WorkBlockId(succ as u64),
+                    dependency_type,
+                    lag: lag as f32,
+                },
+            );
+        }
+    }
+
+    // milestones
+    {
+        let mut stmt = conn.prepare("SELECT id, name, date_day FROM milestones")?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, f64>(2)?))
+        })?;
+        for row in rows {
+            let (id, name, date) = row?;
+            bump!(id);
+            model.milestones.insert(
+                MilestoneId(id as u64),
+                Milestone { id: MilestoneId(id as u64), name, date: date as f32 },
+            );
+        }
+    }
+
+    // plans
+    {
+        let mut stmt = conn.prepare("SELECT id, name, world_id FROM plans")?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)?))
+        })?;
+        for row in rows {
+            let (id, name, world_id) = row?;
+            bump!(id);
+            model.plans.insert(
+                PlanId(id as u64),
+                Plan {
+                    id: PlanId(id as u64),
+                    name,
+                    world_id: WorldId(world_id as u64),
+                    root_blocks: vec![],
+                    selected_variants: HashMap::new(),
+                    allocations: vec![],
+                },
+            );
+        }
+    }
+
+    // plan_root_blocks (order preserved)
+    {
+        let mut stmt = conn.prepare(
+            "SELECT plan_id, work_block_id
+             FROM plan_root_blocks
+             ORDER BY plan_id, sort_order",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+        })?;
+        for row in rows {
+            let (plan_id, wb_id) = row?;
+            if let Some(plan) = model.plans.get_mut(&PlanId(plan_id as u64)) {
+                plan.root_blocks.push(WorkBlockId(wb_id as u64));
+            }
+        }
+    }
+
+    // plan_variant_selections
+    {
+        let mut stmt = conn.prepare(
+            "SELECT plan_id, work_block_id, variant_id FROM plan_variant_selections",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?))
+        })?;
+        for row in rows {
+            let (plan_id, wb_id, var_id) = row?;
+            if let Some(plan) = model.plans.get_mut(&PlanId(plan_id as u64)) {
+                plan.selected_variants
+                    .insert(WorkBlockId(wb_id as u64), VariantId(var_id as u64));
+            }
+        }
+    }
+
+    // resource_allocations
+    {
+        let mut stmt = conn.prepare(
+            "SELECT plan_id, resource_block_id, work_block_id, allocation_factor
+             FROM resource_allocations",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, f64>(3)?,
+            ))
+        })?;
+        for row in rows {
+            let (plan_id, rb_id, wb_id, factor) = row?;
+            if let Some(plan) = model.plans.get_mut(&PlanId(plan_id as u64)) {
+                plan.allocations.push(ResourceAllocation {
+                    resource_id: ResourceBlockId(rb_id as u64),
+                    work_block_id: WorkBlockId(wb_id as u64),
+                    allocation_factor: factor as f32,
+                });
+            }
+        }
+    }
+
+    model.set_next_id(max_id);
+    Ok(model)
+}
+
+fn parse_resource_type(s: &str) -> Result<ResourceType> {
+    match s {
+        "Person" => Ok(ResourceType::Person),
+        "Team" => Ok(ResourceType::Team),
+        "Equipment" => Ok(ResourceType::Equipment),
+        "Budget" => Ok(ResourceType::Budget),
+        other => Err(rusqlite::Error::InvalidParameterName(format!(
+            "Unknown resource_type: {other}"
+        ))),
+    }
+}
+
+fn parse_dependency_type(s: &str) -> Result<DependencyType> {
+    match s {
+        "FinishToStart" => Ok(DependencyType::FinishToStart),
+        "StartToStart" => Ok(DependencyType::StartToStart),
+        "FinishToFinish" => Ok(DependencyType::FinishToFinish),
+        "StartToFinish" => Ok(DependencyType::StartToFinish),
+        other => Err(rusqlite::Error::InvalidParameterName(format!(
+            "Unknown dependency_type: {other}"
+        ))),
+    }
 }
 
 fn resource_type_str(rt: ResourceType) -> &'static str {
