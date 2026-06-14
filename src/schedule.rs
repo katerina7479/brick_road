@@ -50,11 +50,16 @@ pub struct CriticalPathAnalysis {
     pub float: HashMap<WorkBlockId, f32>,
 }
 
-/// Returns every work block sorted by ascending `start_day`, with
-/// `id` as a stable tie-breaker. This is the canonical row ordering
-/// shared by block sprites and row labels.
+/// Returns placed work blocks (duration_days > 0) sorted by ascending
+/// `start_day`, with `id` as a stable tie-breaker. Blocks with
+/// `duration_days == 0.0` are omitted to avoid phantom zero-width rows
+/// for blocks not yet reachable from any plan.
 pub fn sorted_blocks(model: &Model) -> Vec<&WorkBlock> {
-    let mut blocks: Vec<&WorkBlock> = model.work_blocks.values().collect();
+    let mut blocks: Vec<&WorkBlock> = model
+        .work_blocks
+        .values()
+        .filter(|wb| wb.duration_days > 0.0)
+        .collect();
     blocks.sort_by(|a, b| {
         a.start_day
             .partial_cmp(&b.start_day)
@@ -1214,5 +1219,20 @@ mod tests {
         let ana = analyze_placed(&m, vec![a, b]);
         assert!(ana.float[&a].abs() < 1e-4);
         assert!(ana.float[&b].abs() < 1e-4);
+    }
+
+    #[test]
+    fn sorted_blocks_skips_unplaced() {
+        let mut m = Model::default();
+        let placed_id = m.create_work_block("placed", est(3.0));
+        let unplaced_id = m.create_work_block("unplaced", est(2.0));
+        m.work_blocks.get_mut(&placed_id).unwrap().start_day = 1.0;
+        m.work_blocks.get_mut(&placed_id).unwrap().duration_days = 3.0;
+        // unplaced block has start_day=0.0, duration_days=0.0 (defaults)
+
+        let result = sorted_blocks(&m);
+        let ids: Vec<WorkBlockId> = result.iter().map(|wb| wb.id).collect();
+        assert!(ids.contains(&placed_id), "placed block should appear");
+        assert!(!ids.contains(&unplaced_id), "unplaced block should be filtered out");
     }
 }
