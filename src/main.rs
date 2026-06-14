@@ -95,6 +95,10 @@ fn main() {
         .add_systems(Update, labels::draw_nesting_indicators)
         .add_systems(Update, labels::draw_violation_indicators)
         .add_systems(Update, labels::scale_labels_to_zoom)
+        .add_systems(
+            Update,
+            blocks::sync_block_labels.after(blocks::spawn_block_sprites),
+        )
         .add_systems(EguiPrimaryContextPass, side_panel_ui)
         .add_systems(EguiPrimaryContextPass, camera_nav_ui)
         .add_systems(EguiPrimaryContextPass, blocks::draw_name_edit_overlay)
