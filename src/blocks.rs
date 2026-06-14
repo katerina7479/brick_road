@@ -128,13 +128,14 @@ pub fn sync_block_sprites(
             continue;
         };
         let width = wb.duration_days * PIXELS_PER_DAY;
-        let x = wb.start_day * PIXELS_PER_DAY + width * 0.5;
+        // Expand to min_width before computing x so the sprite is always
+        // left-anchored at start_day, not centered on the model midpoint.
+        let visual_width = width.max(min_width);
+        let x = wb.start_day * PIXELS_PER_DAY + visual_width * 0.5;
         let y = -(block_sprite.row as f32) * ROW_HEIGHT;
         transform.translation.x = x;
         transform.translation.y = y;
-        // Clamp to minimum screen-space size so blocks stay visible and clickable
-        // at extreme zoom-out. The model's logical width is unchanged.
-        sprite.custom_size = Some(Vec2::new(width.max(min_width), BLOCK_HEIGHT));
+        sprite.custom_size = Some(Vec2::new(visual_width, BLOCK_HEIGHT));
 
         let base = PALETTE[block_sprite.row % PALETTE.len()];
         let id = block_sprite.work_block_id;
