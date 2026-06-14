@@ -444,10 +444,20 @@ fn draw_resource_timeline(
     sa: Res<analysis::ScheduleAnalysis>,
     drag: Res<ResourceDragState>,
     mut gizmos: Gizmos,
+    cam_q: Query<(&Transform, &Projection), With<Camera2d>>,
+    windows: Query<&Window>,
 ) {
     if *mode != schedule::TimelineViewMode::Resource {
         return;
     }
+
+    let Ok((cam_t, proj)) = cam_q.single() else { return };
+    let Projection::Orthographic(ortho) = proj else { return };
+    let Ok(window) = windows.single() else { return };
+
+    let half_w = (window.width() * 0.5 + PIXELS_PER_DAY) * ortho.scale;
+    let x_left  = cam_t.translation.x - half_w;
+    let x_right = cam_t.translation.x + half_w;
 
     let Some(plan) = model.plans.get(&schedule.plan_id) else { return };
 
@@ -474,8 +484,8 @@ fn draw_resource_timeline(
 
         // Row separator.
         gizmos.line_2d(
-            Vec2::new(-50_000.0, y - constants::ROW_HEIGHT * 0.5),
-            Vec2::new(50_000.0,  y - constants::ROW_HEIGHT * 0.5),
+            Vec2::new(x_left,  y - constants::ROW_HEIGHT * 0.5),
+            Vec2::new(x_right, y - constants::ROW_HEIGHT * 0.5),
             row_sep,
         );
 
@@ -534,8 +544,8 @@ fn draw_resource_timeline(
         let y = -(row as f32) * constants::ROW_HEIGHT;
 
         gizmos.line_2d(
-            Vec2::new(-50_000.0, y - constants::ROW_HEIGHT * 0.5),
-            Vec2::new(50_000.0,  y - constants::ROW_HEIGHT * 0.5),
+            Vec2::new(x_left,  y - constants::ROW_HEIGHT * 0.5),
+            Vec2::new(x_right, y - constants::ROW_HEIGHT * 0.5),
             row_sep,
         );
 
