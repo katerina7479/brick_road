@@ -32,6 +32,7 @@ const LOD_ABBREV_CHARS: usize = 3;
 #[derive(Component)]
 pub struct BlockLabel {
     pub full_name: String,
+    pub work_block_id: WorkBlockId,
 }
 
 /// Dark shadow layer rendered behind `BlockLabel` to ensure legibility on any
@@ -39,6 +40,15 @@ pub struct BlockLabel {
 #[derive(Component)]
 pub struct BlockLabelShadow {
     pub full_name: String,
+    pub work_block_id: WorkBlockId,
+}
+
+/// Marker for the description-dot indicator at a block's top-right corner.
+/// Carries `work_block_id` so `sync_description_dots` can locate and manage it
+/// without traversing the parent–child hierarchy.
+#[derive(Component)]
+pub struct DescriptionDot {
+    pub work_block_id: WorkBlockId,
 }
 
 /// HDR linear palette — one or more channels > 1.0 so the Bloom post-process fires.
@@ -58,6 +68,15 @@ const CRITICAL_PATH_COLOR: LinearRgba = LinearRgba::new(3.0, 2.5, 0.0, 1.0);
 #[derive(Resource, Default)]
 pub struct SelectedBlock(pub Option<WorkBlockId>);
 
+/// Maps each currently-visible `WorkBlockId` to its `BlockSprite` entity.
+///
+/// Maintained by `reconcile_block_sprites` to allow incremental ECS updates:
+/// only newly visible blocks are spawned; only removed blocks are despawned.
+#[derive(Resource, Default)]
+pub struct BlockSpriteMap {
+    pub entities: HashMap<WorkBlockId, Entity>,
+}
+
 /// Tracks inline name-edit state: which block is being renamed and the live text buffer.
 #[derive(Resource, Default)]
 pub struct NameEditState {
@@ -74,99 +93,206 @@ pub struct BlockSprite {
     pub row: usize,
 }
 
-/// Spawns (or re-spawns) one `Sprite` per `ScheduledBlock`.
-/// Row is assigned by ascending `start_day`, then `WorkBlockId` for stability.
-/// Should run once after the `Schedule` resource is first available, and
-/// again whenever the schedule changes.
-pub fn spawn_block_sprites(
+/// Reconciles `BlockSprite` entities against the current `VisibleBlocks` cache.
+///
+/// Fires only when the visible block set or order actually changes (not on every
+/// model mutation such as drag or resize). Despawns entities for blocks that left
+/// the visible set, spawns entities for newly visible blocks, and updates
+/// `BlockSprite.row` in place for blocks that stayed but changed row position.
+///
+/// Transform, size, and color are kept current every frame by `sync_block_sprites`;
+/// this system only manages entity lifetime and row order. Label `full_name` is
+/// kept current by `sync_block_label_names`; description-dot presence is kept
+/// current by `sync_description_dots`.
+pub fn reconcile_block_sprites(
     mut commands: Commands,
     sa: Res<ScheduleAnalysis>,
     model: Res<model::Model>,
     visible_blocks: Res<schedule::VisibleBlocks>,
-    existing: Query<Entity, With<BlockSprite>>,
+    mut sprite_map: ResMut<BlockSpriteMap>,
+    mut sprite_q: Query<&mut BlockSprite>,
 ) {
-    if !model.is_changed() && !visible_blocks.is_changed() {
+    if !visible_blocks.is_changed() {
         return;
-    }
-    for entity in &existing {
-        commands.entity(entity).despawn();
     }
 
     let on_critical_path: std::collections::HashSet<WorkBlockId> =
         sa.critical_path.iter().copied().collect();
+    let new_id_set: std::collections::HashSet<WorkBlockId> =
+        visible_blocks.ids.iter().copied().collect();
 
+    // Despawn entities for blocks no longer in the visible set.
+    let removed: Vec<WorkBlockId> = sprite_map
+        .entities
+        .keys()
+        .filter(|id| !new_id_set.contains(id))
+        .copied()
+        .collect();
+    for id in removed {
+        if let Some(entity) = sprite_map.entities.remove(&id) {
+            commands.entity(entity).despawn();
+        }
+    }
+
+    // Reconcile each visible block in row order.
     for (row, &id) in visible_blocks.ids.iter().enumerate() {
-        let Some(wb) = model.work_blocks.get(&id) else { continue };
-        let width = wb.duration_days * PIXELS_PER_DAY;
-        // Sprite origin is at its center in Bevy 2D.
-        let x = wb.start_day * PIXELS_PER_DAY + width * 0.5;
-        let y = -(row as f32) * ROW_HEIGHT;
-
-        // Color hierarchy: user color > critical-path gold > palette default.
-        let color = if let Some([r, g, b]) = wb.color {
-            Color::from(LinearRgba::new(r, g, b, 1.0))
-        } else if on_critical_path.contains(&wb.id) {
-            Color::from(LinearRgba::new(3.0, 2.2, 0.1, 1.0))
-        } else {
-            Color::from(PALETTE[row % PALETTE.len()])
+        let Some(wb) = model.work_blocks.get(&id) else {
+            continue;
         };
 
-        let mut block_cmd = commands.spawn((
-            BlockSprite {
-                work_block_id: wb.id,
-                row,
-            },
-            Sprite {
-                color,
-                custom_size: Some(Vec2::new(width, BLOCK_HEIGHT)),
-                ..default()
-            },
-            Transform::from_xyz(x, y, 0.0),
-        ));
+        if let Some(&entity) = sprite_map.entities.get(&id) {
+            // Existing entity: update row in place. Transform and color are
+            // handled every frame by `sync_block_sprites`.
+            if let Ok(mut block_sprite) = sprite_q.get_mut(entity) {
+                block_sprite.row = row;
+            }
+        } else {
+            // New entity: spawn parent sprite + label and dot children.
+            let width = wb.duration_days * PIXELS_PER_DAY;
+            let x = wb.start_day * PIXELS_PER_DAY + width * 0.5;
+            let y = -(row as f32) * ROW_HEIGHT;
 
-        // Inline name label — only when the bar is wide enough to be readable.
-        if width >= MIN_LABEL_WIDTH {
-            let available_chars = ((width - 8.0) / LABEL_CHAR_WIDTH) as usize;
-            let display = if wb.name.chars().count() > available_chars && available_chars > 0 {
-                let truncated: String =
-                    wb.name.chars().take(available_chars.saturating_sub(1)).collect();
-                format!("{truncated}…")
+            let color = if let Some([r, g, b]) = wb.color {
+                Color::from(LinearRgba::new(r, g, b, 1.0))
+            } else if on_critical_path.contains(&id) {
+                Color::from(LinearRgba::new(3.0, 2.2, 0.1, 1.0))
             } else {
-                wb.name.clone()
+                Color::from(PALETTE[row % PALETTE.len()])
             };
-            block_cmd.with_children(|parent| {
-                // Dark shadow for contrast — 1 screen-pixel offset (updated by sync_block_labels).
-                parent.spawn((
-                    BlockLabelShadow { full_name: wb.name.clone() },
-                    Text2d::new(display.clone()),
-                    TextFont { font_size: 13.0, ..default() },
-                    TextColor(Color::srgba(0.0, 0.0, 0.0, 0.6)),
-                    Anchor::CENTER,
-                    Transform::from_xyz(0.0, 0.0, 0.08),
-                ));
-                // White main label centered in the block.
-                parent.spawn((
-                    BlockLabel { full_name: wb.name.clone() },
-                    Text2d::new(display),
-                    TextFont { font_size: 13.0, ..default() },
-                    TextColor(Color::srgba(1.0, 1.0, 1.0, 1.0)),
-                    Anchor::CENTER,
-                    Transform::from_xyz(0.0, 0.0, 0.15),
-                ));
-            });
-        }
 
-        // Small dot indicator at top-right corner when the block has notes.
-        if !wb.description.is_empty() && width >= 12.0 {
-            block_cmd.with_children(|parent| {
-                parent.spawn((
-                    Text2d::new("·"),
-                    TextFont { font_size: 14.0, ..default() },
-                    TextColor(Color::srgba(1.0, 1.0, 1.0, 0.7)),
-                    Anchor::TOP_RIGHT,
-                    Transform::from_xyz(width * 0.5 - 2.0, BLOCK_HEIGHT * 0.5 - 1.0, 0.2),
-                ));
-            });
+            let mut block_cmd = commands.spawn((
+                BlockSprite { work_block_id: id, row },
+                Sprite {
+                    color,
+                    custom_size: Some(Vec2::new(width, BLOCK_HEIGHT)),
+                    ..default()
+                },
+                Transform::from_xyz(x, y, 0.0),
+            ));
+
+            // Inline name label — only when the bar is wide enough to be readable.
+            if width >= MIN_LABEL_WIDTH {
+                let available_chars = ((width - 8.0) / LABEL_CHAR_WIDTH) as usize;
+                let display = if wb.name.chars().count() > available_chars && available_chars > 0 {
+                    let truncated: String =
+                        wb.name.chars().take(available_chars.saturating_sub(1)).collect();
+                    format!("{truncated}…")
+                } else {
+                    wb.name.clone()
+                };
+                let name = wb.name.clone();
+                block_cmd.with_children(|parent| {
+                    // Dark shadow for contrast — 1 screen-pixel offset (updated by sync_block_labels).
+                    parent.spawn((
+                        BlockLabelShadow { full_name: name.clone(), work_block_id: id },
+                        Text2d::new(display.clone()),
+                        TextFont { font_size: 13.0, ..default() },
+                        TextColor(Color::srgba(0.0, 0.0, 0.0, 0.6)),
+                        Anchor::CENTER,
+                        Transform::from_xyz(0.0, 0.0, 0.08),
+                    ));
+                    // White main label centered in the block.
+                    parent.spawn((
+                        BlockLabel { full_name: name, work_block_id: id },
+                        Text2d::new(display),
+                        TextFont { font_size: 13.0, ..default() },
+                        TextColor(Color::srgba(1.0, 1.0, 1.0, 1.0)),
+                        Anchor::CENTER,
+                        Transform::from_xyz(0.0, 0.0, 0.15),
+                    ));
+                });
+            }
+
+            // Small dot indicator at top-right corner when the block has notes.
+            if !wb.description.is_empty() && width >= 12.0 {
+                block_cmd.with_children(|parent| {
+                    parent.spawn((
+                        DescriptionDot { work_block_id: id },
+                        Text2d::new("·"),
+                        TextFont { font_size: 14.0, ..default() },
+                        TextColor(Color::srgba(1.0, 1.0, 1.0, 0.7)),
+                        Anchor::TOP_RIGHT,
+                        Transform::from_xyz(width * 0.5 - 2.0, BLOCK_HEIGHT * 0.5 - 1.0, 0.2),
+                    ));
+                });
+            }
+
+            sprite_map.entities.insert(id, block_cmd.id());
+        }
+    }
+}
+
+/// Keeps `BlockLabel::full_name` and `BlockLabelShadow::full_name` current when
+/// a block is renamed in the model. `sync_block_labels` drives displayed text
+/// from `full_name`; without this system a rename would not reflect until the
+/// next `reconcile_block_sprites` fires (only on visible-set/order changes).
+pub fn sync_block_label_names(
+    model: Res<model::Model>,
+    mut label_q: Query<&mut BlockLabel>,
+    mut shadow_q: Query<&mut BlockLabelShadow>,
+) {
+    if !model.is_changed() {
+        return;
+    }
+    for mut label in &mut label_q {
+        if let Some(wb) = model.work_blocks.get(&label.work_block_id) {
+            if label.full_name != wb.name {
+                label.full_name = wb.name.clone();
+            }
+        }
+    }
+    for mut shadow in &mut shadow_q {
+        if let Some(wb) = model.work_blocks.get(&shadow.work_block_id) {
+            if shadow.full_name != wb.name {
+                shadow.full_name = wb.name.clone();
+            }
+        }
+    }
+}
+
+/// Adds or removes the `DescriptionDot` child entity when a block's description
+/// changes from empty to non-empty (or vice versa).
+///
+/// `reconcile_block_sprites` only fires on visible-set changes, so description
+/// edits between re-orders would otherwise leave the dot out of sync without
+/// this system.
+pub fn sync_description_dots(
+    mut commands: Commands,
+    model: Res<model::Model>,
+    sprite_map: Res<BlockSpriteMap>,
+    dot_q: Query<(Entity, &DescriptionDot)>,
+) {
+    if !model.is_changed() {
+        return;
+    }
+
+    let existing_dots: HashMap<WorkBlockId, Entity> =
+        dot_q.iter().map(|(e, dot)| (dot.work_block_id, e)).collect();
+
+    for (&id, &sprite_entity) in &sprite_map.entities {
+        let Some(wb) = model.work_blocks.get(&id) else {
+            continue;
+        };
+        let width = wb.duration_days * PIXELS_PER_DAY;
+        let should_have_dot = !wb.description.is_empty() && width >= 12.0;
+
+        match (should_have_dot, existing_dots.get(&id)) {
+            (true, None) => {
+                commands.entity(sprite_entity).with_children(|parent| {
+                    parent.spawn((
+                        DescriptionDot { work_block_id: id },
+                        Text2d::new("·"),
+                        TextFont { font_size: 14.0, ..default() },
+                        TextColor(Color::srgba(1.0, 1.0, 1.0, 0.7)),
+                        Anchor::TOP_RIGHT,
+                        Transform::from_xyz(width * 0.5 - 2.0, BLOCK_HEIGHT * 0.5 - 1.0, 0.2),
+                    ));
+                });
+            }
+            (false, Some(&dot_entity)) => {
+                commands.entity(dot_entity).despawn();
+            }
+            _ => {}
         }
     }
 }
@@ -1175,8 +1301,8 @@ pub fn handle_name_edit(
 /// Renders an egui `TextEdit` overlay anchored to the editing block's screen
 /// position while `NameEditState::editing` is `Some`. Commits on Enter or
 /// focus-loss; cancels on Escape. On commit, persists to model + DB; the model
-/// change triggers `spawn_block_sprites` which re-creates the `BlockLabel` with
-/// the updated name automatically.
+/// change triggers `sync_block_label_names` which updates `BlockLabel::full_name`
+/// so the display text reflects the new name on the next frame.
 pub fn draw_name_edit_overlay(
     mut contexts: EguiContexts,
     mut name_edit: ResMut<NameEditState>,

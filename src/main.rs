@@ -41,17 +41,18 @@ fn main() {
         .insert_resource(schedule::ViewScope::default())
         .insert_resource(schedule::VisibleBlocks::default())
         .insert_resource(analysis::ScheduleAnalysis::default())
+        .insert_resource(blocks::BlockSpriteMap::default())
         .add_systems(Startup, (setup_db, setup_camera))
         .add_systems(Startup, setup_demo_schedule.after(setup_db))
-        .add_systems(PostStartup, update_analysis.before(blocks::spawn_block_sprites))
+        .add_systems(PostStartup, update_analysis.before(blocks::reconcile_block_sprites))
         .add_systems(
             PostStartup,
-            schedule::update_visible_blocks.before(blocks::spawn_block_sprites),
+            schedule::update_visible_blocks.before(blocks::reconcile_block_sprites),
         )
-        .add_systems(PostStartup, blocks::spawn_block_sprites)
+        .add_systems(PostStartup, blocks::reconcile_block_sprites)
         .add_systems(
             PostStartup,
-            labels::spawn_labels.after(blocks::spawn_block_sprites),
+            labels::spawn_labels.after(blocks::reconcile_block_sprites),
         )
         .add_systems(
             PostStartup,
@@ -63,7 +64,7 @@ fn main() {
         .add_systems(
             Update,
             schedule::update_visible_blocks
-                .before(blocks::spawn_block_sprites)
+                .before(blocks::reconcile_block_sprites)
                 .before(blocks::sync_conflict_overlays)
                 .before(blocks::sync_uncertainty_overlays)
                 .before(blocks::draw_dependency_edges)
@@ -95,13 +96,13 @@ fn main() {
         )
         .add_systems(
             Update,
-            blocks::spawn_block_sprites.after(blocks::handle_block_selection),
+            blocks::reconcile_block_sprites.after(blocks::handle_block_selection),
         )
         .add_systems(
             Update,
             blocks::sync_block_sprites
                 .after(blocks::handle_block_drag)
-                .after(blocks::spawn_block_sprites),
+                .after(blocks::reconcile_block_sprites),
         )
         .add_systems(
             Update,
@@ -113,7 +114,7 @@ fn main() {
         )
         .add_systems(
             Update,
-            blocks::sync_uncertainty_overlays.after(blocks::spawn_block_sprites),
+            blocks::sync_uncertainty_overlays.after(blocks::reconcile_block_sprites),
         )
         .add_systems(
             Update,
@@ -131,7 +132,7 @@ fn main() {
             Update,
             labels::spawn_labels
                 .after(blocks::handle_block_selection)
-                .after(blocks::spawn_block_sprites),
+                .after(blocks::reconcile_block_sprites),
         )
         .add_systems(
             Update,
@@ -144,7 +145,17 @@ fn main() {
         .add_systems(Update, labels::scale_labels_to_zoom)
         .add_systems(
             Update,
-            blocks::sync_block_labels.after(blocks::spawn_block_sprites),
+            blocks::sync_block_labels.after(blocks::reconcile_block_sprites),
+        )
+        .add_systems(
+            Update,
+            blocks::sync_block_label_names
+                .after(blocks::reconcile_block_sprites)
+                .before(blocks::sync_block_labels),
+        )
+        .add_systems(
+            Update,
+            blocks::sync_description_dots.after(blocks::reconcile_block_sprites),
         )
         .add_systems(EguiPrimaryContextPass, side_panel_ui)
         .add_systems(EguiPrimaryContextPass, camera_nav_ui)
