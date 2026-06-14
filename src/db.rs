@@ -4,10 +4,10 @@ use chrono::NaiveDate;
 use rusqlite::{Connection, Result};
 
 use crate::model::{
-    AvailabilitySegment, AvailabilityTimeline, Dependency, DependencyId, DependencyType, Estimate,
-    Milestone, MilestoneId, Model, Plan, PlanId, ResourceAllocation, ResourceBlock,
-    ResourceBlockId, ResourceType, TShirtSize, Variant, VariantId, WorkBlock, WorkBlockId, World,
-    WorldId,
+    AvailabilitySegment, AvailabilityTimeline, ConfidenceFactors, Dependency, DependencyId,
+    DependencyType, Estimate, Milestone, MilestoneId, Model, Plan, PlanId, ResourceAllocation,
+    ResourceBlock, ResourceBlockId, ResourceType, TShirtSize, Variant, VariantId, WorkBlock,
+    WorkBlockId, World, WorldId,
 };
 
 pub fn create_tables(conn: &Connection) -> Result<()> {
@@ -244,6 +244,22 @@ pub fn save_model(conn: &Connection, model: &Model) -> Result<()> {
         (
             model.calendar.start_date.format("%Y-%m-%d").to_string(),
             model.calendar.working_days_per_week as i64,
+        ),
+    )?;
+
+    tx.execute(
+        "INSERT INTO confidence_factors (id, opt_50, pes_50, opt_75, pes_75)
+             VALUES (1, ?1, ?2, ?3, ?4)
+         ON CONFLICT(id) DO UPDATE SET
+             opt_50 = excluded.opt_50,
+             pes_50 = excluded.pes_50,
+             opt_75 = excluded.opt_75,
+             pes_75 = excluded.pes_75",
+        (
+            model.confidence_factors.opt_50 as f64,
+            model.confidence_factors.pes_50 as f64,
+            model.confidence_factors.opt_75 as f64,
+            model.confidence_factors.pes_75 as f64,
         ),
     )?;
 
@@ -719,6 +735,32 @@ pub fn load_model(conn: &Connection) -> Result<Model> {
                     model.calendar.start_date = date;
                 }
                 model.calendar.working_days_per_week = wdpw.clamp(1, 7) as u8;
+            }
+            Err(rusqlite::Error::QueryReturnedNoRows) => {}
+            Err(e) => return Err(e),
+        }
+    }
+
+    // confidence_factors
+    {
+        let mut stmt = conn.prepare(
+            "SELECT opt_50, pes_50, opt_75, pes_75 FROM confidence_factors WHERE id = 1",
+        )?;
+        match stmt.query_row([], |row| {
+            Ok((
+                row.get::<_, f64>(0)?,
+                row.get::<_, f64>(1)?,
+                row.get::<_, f64>(2)?,
+                row.get::<_, f64>(3)?,
+            ))
+        }) {
+            Ok((opt_50, pes_50, opt_75, pes_75)) => {
+                model.confidence_factors = ConfidenceFactors {
+                    opt_50: opt_50 as f32,
+                    pes_50: pes_50 as f32,
+                    opt_75: opt_75 as f32,
+                    pes_75: pes_75 as f32,
+                };
             }
             Err(rusqlite::Error::QueryReturnedNoRows) => {}
             Err(e) => return Err(e),
@@ -1353,6 +1395,24 @@ mod tests {
         // Surviving entity stays.
         assert!(loaded.work_blocks.contains_key(&wb_a), "wb_a must survive");
     }
+
+    #[test]
+    fn confidence_factors_round_trip() {
+        let conn = open_in_memory();
+        let mut m = Model::default();
+        m.confidence_factors = ConfidenceFactors { opt_50: 0.4, pes_50: 3.0, opt_75: 0.6, pes_75: 1.8 };
+        save_model(&conn, &m).unwrap();
+        let loaded = load_model(&conn).unwrap();
+        assert_eq!(loaded.confidence_factors, m.confidence_factors);
+    }
+
+    #[test]
+    fn confidence_factors_default_when_row_absent() {
+        let conn = open_in_memory();
+        // load_model on a fresh DB with no saved confidence_factors row returns defaults.
+        let m = load_model(&conn).unwrap();
+        assert_eq!(m.confidence_factors, ConfidenceFactors::default());
+    }
 }
 
 const CREATE_TABLES_SQL: &str = "
@@ -1477,5 +1537,13 @@ CREATE TABLE IF NOT EXISTS t_shirt_sizes (
     label      TEXT    PRIMARY KEY,
     days       REAL    NOT NULL,
     sort_order INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS confidence_factors (
+    id     INTEGER PRIMARY KEY CHECK (id = 1),
+    opt_50 REAL    NOT NULL DEFAULT 0.5,
+    pes_50 REAL    NOT NULL DEFAULT 2.0,
+    opt_75 REAL    NOT NULL DEFAULT 0.7,
+    pes_75 REAL    NOT NULL DEFAULT 1.4
 );
 ";

@@ -579,15 +579,15 @@ fn logo_ui(
         });
 }
 
-/// Maps a confidence level to (optimistic_factor, pessimistic_factor).
-/// Factors multiply `duration_days` to derive the uncertainty spread.
-fn confidence_to_factors(confidence: f32) -> (f32, f32) {
+/// Maps a confidence level to (optimistic_factor, pessimistic_factor) using
+/// the project's configured multipliers.
+fn confidence_to_factors(confidence: f32, cf: &model::ConfidenceFactors) -> (f32, f32) {
     if confidence >= 1.0 {
-        (1.0, 1.0) // Actual — no uncertainty
+        (1.0, 1.0)
     } else if confidence >= 0.75 {
-        (0.7, 1.4) // 75% — confident, modest spread
+        (cf.opt_75, cf.pes_75)
     } else {
-        (0.5, 2.0) // 50% — rough guess, wide spread
+        (cf.opt_50, cf.pes_50)
     }
 }
 
@@ -853,6 +853,53 @@ fn side_panel_ui(
                 }
             });
 
+            ui.collapsing("Confidence Spread", |ui| {
+                let mut cf = model.confidence_factors.clone();
+                let mut changed = false;
+                ui.label("50% confidence");
+                changed |= ui.horizontal(|ui| {
+                    let a = ui.add(
+                        egui::DragValue::new(&mut cf.opt_50)
+                            .speed(0.01)
+                            .range(0.1f32..=1.0)
+                            .prefix("opt ×")
+                            .max_decimals(2),
+                    ).changed();
+                    let b = ui.add(
+                        egui::DragValue::new(&mut cf.pes_50)
+                            .speed(0.05)
+                            .range(1.0f32..=10.0)
+                            .prefix("pes ×")
+                            .max_decimals(2),
+                    ).changed();
+                    a || b
+                }).inner;
+                ui.label("75% confidence");
+                changed |= ui.horizontal(|ui| {
+                    let a = ui.add(
+                        egui::DragValue::new(&mut cf.opt_75)
+                            .speed(0.01)
+                            .range(0.1f32..=1.0)
+                            .prefix("opt ×")
+                            .max_decimals(2),
+                    ).changed();
+                    let b = ui.add(
+                        egui::DragValue::new(&mut cf.pes_75)
+                            .speed(0.05)
+                            .range(1.0f32..=10.0)
+                            .prefix("pes ×")
+                            .max_decimals(2),
+                    ).changed();
+                    a || b
+                }).inner;
+                if changed {
+                    model.confidence_factors = cf;
+                    if let Err(e) = db::save_model(&conn, &model) {
+                        error!("save_model failed: {e}");
+                    }
+                }
+            });
+
             ui.separator();
 
             let Some(sel_id) = selected.0 else {
@@ -1014,7 +1061,7 @@ fn side_panel_ui(
 
             if let Some((label, days)) = size_chosen {
                 duration_days = days;
-                let (opt_f, pes_f) = confidence_to_factors(confidence);
+                let (opt_f, pes_f) = confidence_to_factors(confidence, &model.confidence_factors);
                 if let Some(wb) = model.work_blocks.get_mut(&sel_id) {
                     wb.t_shirt_size = Some(label);
                     wb.duration_days = days;
@@ -1043,7 +1090,7 @@ fn side_panel_ui(
             }).inner;
 
             if dur_changed {
-                let (opt_f, pes_f) = confidence_to_factors(confidence);
+                let (opt_f, pes_f) = confidence_to_factors(confidence, &model.confidence_factors);
                 if let Some(wb) = model.work_blocks.get_mut(&sel_id) {
                     wb.t_shirt_size = None;
                     wb.duration_days = duration_days;
@@ -1076,7 +1123,7 @@ fn side_panel_ui(
             });
 
             if (new_confidence - confidence).abs() > 0.001 {
-                let (opt_f, pes_f) = confidence_to_factors(new_confidence);
+                let (opt_f, pes_f) = confidence_to_factors(new_confidence, &model.confidence_factors);
                 if let Some(wb) = model.work_blocks.get_mut(&sel_id) {
                     wb.estimate.confidence = new_confidence;
                     wb.estimate.most_likely = duration_days;

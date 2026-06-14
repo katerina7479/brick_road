@@ -66,6 +66,27 @@ pub struct TShirtSize {
     pub days: f32,
 }
 
+/// Per-confidence-level multipliers that control how wide the uncertainty spread
+/// is relative to the most-likely duration.
+/// Applied as: optimistic = duration × opt_factor, pessimistic = duration × pes_factor.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConfidenceFactors {
+    /// Optimistic factor at 50% confidence (default 0.5).
+    pub opt_50: f32,
+    /// Pessimistic factor at 50% confidence (default 2.0).
+    pub pes_50: f32,
+    /// Optimistic factor at 75% confidence (default 0.7).
+    pub opt_75: f32,
+    /// Pessimistic factor at 75% confidence (default 1.4).
+    pub pes_75: f32,
+}
+
+impl Default for ConfidenceFactors {
+    fn default() -> Self {
+        Self { opt_50: 0.5, pes_50: 2.0, opt_75: 0.7, pes_75: 1.4 }
+    }
+}
+
 /// Calendar settings for the plan: anchors "day 0" to a real date and defines
 /// which days count as working days.
 #[derive(Debug, Clone, PartialEq)]
@@ -207,6 +228,8 @@ pub struct Model {
     pub calendar: CalendarConfig,
     /// Ordered list of t-shirt sizes for estimation. Loaded from DB at startup.
     pub t_shirt_sizes: Vec<TShirtSize>,
+    /// User-configurable uncertainty spread factors per confidence level.
+    pub confidence_factors: ConfidenceFactors,
 }
 
 impl Model {
