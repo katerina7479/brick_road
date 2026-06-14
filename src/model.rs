@@ -18,12 +18,16 @@ id_newtype!(MilestoneId);
 id_newtype!(WorldId);
 id_newtype!(PlanId);
 
+/// Timeline position or duration in whole working days from the plan origin.
+/// Rendering boundaries must cast: `day as f32 * PIXELS_PER_DAY`.
+pub type Day = i32;
+
 /// Three-point effort estimate in workdays.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Estimate {
-    pub most_likely: f32,
-    pub optimistic: f32,
-    pub pessimistic: f32,
+    pub most_likely: Day,
+    pub optimistic: Day,
+    pub pessimistic: Day,
     /// Subjective confidence that the true value falls in the given range (0.0–1.0).
     pub confidence: f32,
 }
@@ -42,10 +46,10 @@ pub struct WorkBlock {
     pub variants: Vec<VariantId>,
     /// User-defined placement: start offset in days from the plan origin.
     /// 0.0 until the user manually positions the block.
-    pub start_day: f32,
+    pub start_day: Day,
     /// User-defined placement: duration in days.
     /// 0.0 until the user manually sizes the block.
-    pub duration_days: f32,
+    pub duration_days: Day,
     /// Optional user-defined HDR color [R, G, B] in linear space.
     /// Values > 1.0 trigger bloom. `None` falls back to the palette default.
     pub color: Option<[f32; 3]>,
@@ -63,7 +67,7 @@ pub struct WorkBlock {
 #[derive(Debug, Clone, PartialEq)]
 pub struct TShirtSize {
     pub label: String,
-    pub days: f32,
+    pub days: Day,
 }
 
 /// Per-confidence-level multipliers that control how wide the uncertainty spread
@@ -141,8 +145,8 @@ pub struct ResourceBlock {
 /// Start and end are in days relative to the plan origin.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AvailabilitySegment {
-    pub start: f32,
-    pub end: f32,
+    pub start: Day,
+    pub end: Day,
     /// Fraction of full capacity available in this segment (0.0–1.0).
     pub factor: f32,
 }
@@ -168,7 +172,7 @@ pub struct Dependency {
     pub successor: WorkBlockId,
     pub dependency_type: DependencyType,
     /// Optional lag in days (positive = delay, negative = lead).
-    pub lag: f32,
+    pub lag: Day,
 }
 
 /// A significant named date in the plan timeline.
@@ -177,7 +181,7 @@ pub struct Dependency {
 pub struct Milestone {
     pub id: MilestoneId,
     pub name: String,
-    pub date: f32,
+    pub date: Day,
 }
 
 /// Assignment of a fraction of a resource's capacity to a work block.
@@ -252,8 +256,8 @@ impl Model {
                 name: name.into(),
                 estimate,
                 variants: vec![],
-                start_day: 0.0,
-                duration_days: 0.0,
+                start_day: 0,
+                duration_days: 0,
                 color: None,
                 description: String::new(),
                 priority: 1,
@@ -309,13 +313,13 @@ impl Model {
                 predecessor,
                 successor,
                 dependency_type,
-                lag: 0.0,
+                lag: 0,
             },
         );
         id
     }
 
-    pub fn create_milestone(&mut self, name: impl Into<String>, date: f32) -> MilestoneId {
+    pub fn create_milestone(&mut self, name: impl Into<String>, date: Day) -> MilestoneId {
         let id = MilestoneId(self.alloc_id());
         self.milestones.insert(
             id,
@@ -400,9 +404,9 @@ mod tests {
 
     fn est() -> Estimate {
         Estimate {
-            most_likely: 3.0,
-            optimistic: 1.0,
-            pessimistic: 7.0,
+            most_likely: 3,
+            optimistic: 1,
+            pessimistic: 7,
             confidence: 0.8,
         }
     }
@@ -477,7 +481,7 @@ mod tests {
         let world_id = m.create_world("baseline");
         let plan_id = m.create_plan("plan A", world_id);
         let res_id = m.create_resource_block("Alice", ResourceType::Person);
-        let ms_id = m.create_milestone("launch", 90.0);
+        let ms_id = m.create_milestone("launch", 90);
         let block_a = m.create_work_block("a", est());
         let block_b = m.create_work_block("b", est());
         let dep_id = m.create_dependency(block_a, block_b, DependencyType::FinishToStart);
@@ -485,7 +489,7 @@ mod tests {
         assert_eq!(m.get_world(world_id).unwrap().name, "baseline");
         assert_eq!(m.get_plan(plan_id).unwrap().world_id, world_id);
         assert_eq!(m.get_resource_block(res_id).unwrap().name, "Alice");
-        assert_eq!(m.get_milestone(ms_id).unwrap().date, 90.0);
+        assert_eq!(m.get_milestone(ms_id).unwrap().date, 90);
         let dep = m.get_dependency(dep_id).unwrap();
         assert_eq!(dep.predecessor, block_a);
         assert_eq!(dep.successor, block_b);
