@@ -16,6 +16,9 @@ const PALETTE: &[LinearRgba] = &[
     LinearRgba::new(0.5, 0.5, 3.0, 1.0), // blue
 ];
 
+/// HDR gold applied to every block on the critical path.
+const CRITICAL_PATH_COLOR: LinearRgba = LinearRgba::new(3.0, 2.5, 0.0, 1.0);
+
 /// Tracks the currently selected work block (if any).
 #[derive(Resource, Default)]
 pub struct SelectedBlock(pub Option<WorkBlockId>);
@@ -67,7 +70,11 @@ pub fn spawn_block_sprites(
 }
 
 /// Recomputes `Transform`, `Sprite::custom_size`, and color every frame.
-/// Selected blocks are drawn at 2× palette intensity for a bright HDR bloom.
+///
+/// Color priority (highest wins):
+///   1. Critical-path gold — block is on `schedule.critical_path`
+///   2. Selection 2× — block is the currently selected block
+///   3. Palette default
 pub fn sync_block_sprites(
     schedule: Res<Schedule>,
     selected: Res<SelectedBlock>,
@@ -85,7 +92,10 @@ pub fn sync_block_sprites(
         sprite.custom_size = Some(Vec2::new(width, BLOCK_HEIGHT));
 
         let base = PALETTE[block_sprite.row % PALETTE.len()];
-        sprite.color = if selected.0 == Some(block_sprite.work_block_id) {
+        let id = block_sprite.work_block_id;
+        sprite.color = if schedule.critical_path.contains(&id) {
+            Color::from(CRITICAL_PATH_COLOR)
+        } else if selected.0 == Some(id) {
             Color::from(LinearRgba::new(
                 base.red * 2.0,
                 base.green * 2.0,
