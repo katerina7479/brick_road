@@ -698,6 +698,42 @@ fn side_panel_ui(
             if let Some(target_id) = jump_to {
                 selected.0 = Some(target_id);
             }
+
+            ui.separator();
+            ui.label("Variants");
+
+            let variant_ids: Vec<_> = model
+                .work_blocks
+                .get(&sel_id)
+                .map(|wb| wb.variants.clone())
+                .unwrap_or_default();
+
+            let mut drill_in = false;
+
+            for vid in &variant_ids {
+                if let Some(v) = model.variants.get(vid) {
+                    let label = format!("{} ({} blocks)", v.name, v.children.len());
+                    if ui.link(label).on_hover_text("Drill in to edit").clicked() {
+                        drill_in = true;
+                    }
+                }
+            }
+
+            if ui.button("+ New Variant").clicked() {
+                let variant_name = format!("Variant {}", variant_ids.len() + 1);
+                let vid = model.create_variant(&variant_name, sel_id);
+                if let Some(wb) = model.work_blocks.get_mut(&sel_id) {
+                    wb.variants.push(vid);
+                }
+                drill_in = true;
+                if let Err(e) = db::save_model(&conn, &model) {
+                    error!("save_model failed: {e}");
+                }
+            }
+
+            if drill_in && !scope.scope_stack.contains(&sel_id) {
+                scope.scope_stack.push(sel_id);
+            }
         });
 }
 
