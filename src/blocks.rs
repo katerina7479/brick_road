@@ -19,9 +19,20 @@ const MIN_LABEL_WIDTH: f32 = 20.0;
 /// Approximate pixel width per character at font_size 11 (used for truncation).
 const LABEL_CHAR_WIDTH: f32 = 7.0;
 
-/// Marker for the inline name label rendered inside a block bar.
+/// ortho.scale below this → show full block name.
+const LOD_CLOSE_MAX: f32 = 1.0;
+/// ortho.scale above this → hide block name entirely.
+const LOD_FAR_MIN: f32 = 3.0;
+/// Characters shown in the medium-zoom abbreviated label.
+const LOD_ABBREV_CHARS: usize = 3;
+
+/// Inline name label rendered inside a block bar.
+/// Stores the untruncated model name so `sync_block_labels` can recompute
+/// the display string at any zoom level without querying the model.
 #[derive(Component)]
-pub struct BlockLabel;
+pub struct BlockLabel {
+    pub full_name: String,
+}
 
 /// HDR linear palette — one or more channels > 1.0 so the Bloom post-process fires.
 const PALETTE: &[LinearRgba] = &[
@@ -119,7 +130,7 @@ pub fn spawn_block_sprites(
             };
             block_cmd.with_children(|parent| {
                 parent.spawn((
-                    BlockLabel,
+                    BlockLabel { full_name: wb.name.clone() },
                     Text2d::new(display),
                     TextFont { font_size: 11.0, ..default() },
                     TextColor(Color::srgba(1.0, 1.0, 1.0, 0.9)),
@@ -186,6 +197,35 @@ pub fn sync_block_sprites(
         } else {
             Color::from(base)
         };
+    }
+}
+
+/// Updates `BlockLabel` children each frame: counter-scales the transform so
+/// labels stay at constant screen-space size, and applies LOD-based text:
+/// - ortho.scale < 1.0 (close): full block name
+/// - 1.0 ≤ scale ≤ 3.0 (medium): first 3 characters
+/// - scale > 3.0 (far): hidden
+pub fn sync_block_labels(
+    cam_q: Query<&Projection, With<Camera2d>>,
+    mut label_q: Query<(&BlockLabel, &mut Text2d, &mut Visibility, &mut Transform)>,
+) {
+    let Ok(proj) = cam_q.single() else { return };
+    let Projection::Orthographic(ortho) = proj else { return };
+    let scale = ortho.scale;
+
+    for (label, mut text2d, mut vis, mut transform) in &mut label_q {
+        transform.scale = Vec3::splat(scale);
+        if scale > LOD_FAR_MIN {
+            *vis = Visibility::Hidden;
+        } else {
+            *vis = Visibility::Inherited;
+            let display: String = if scale < LOD_CLOSE_MAX {
+                label.full_name.clone()
+            } else {
+                label.full_name.chars().take(LOD_ABBREV_CHARS).collect()
+            };
+            *text2d = Text2d::new(display);
+        }
     }
 }
 
