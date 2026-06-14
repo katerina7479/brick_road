@@ -140,6 +140,19 @@ pub fn spawn_block_sprites(
                 ));
             });
         }
+
+        // Small dot indicator at top-right corner when the block has notes.
+        if !wb.description.is_empty() && width >= 12.0 {
+            block_cmd.with_children(|parent| {
+                parent.spawn((
+                    Text2d::new("·"),
+                    TextFont { font_size: 14.0, ..default() },
+                    TextColor(Color::srgba(1.0, 1.0, 1.0, 0.7)),
+                    Anchor::TOP_RIGHT,
+                    Transform::from_xyz(width * 0.5 - 2.0, BLOCK_HEIGHT * 0.5 - 1.0, 0.2),
+                ));
+            });
+        }
     }
 }
 
@@ -1243,5 +1256,51 @@ pub fn draw_delete_confirm_overlay(
         delete_confirm.pending = None;
     } else if cancelled {
         delete_confirm.pending = None;
+    }
+}
+
+/// Shows a description tooltip when the pointer hovers over a block that has notes.
+/// Renders an egui Area near the cursor so it floats above all other UI.
+pub fn draw_description_tooltip(
+    mut egui_ctx: EguiContexts,
+    model: Res<model::Model>,
+    windows: Query<&Window>,
+    camera: Query<(&Camera, &GlobalTransform), With<Camera2d>>,
+    block_q: Query<(&BlockSprite, &Transform, &Sprite)>,
+) {
+    let Ok(ctx) = egui_ctx.ctx_mut() else { return };
+    if ctx.is_pointer_over_area() {
+        return;
+    }
+    let Ok(window) = windows.single() else { return };
+    let Ok((cam, cam_transform)) = camera.single() else { return };
+    let Some(cursor_pos) = window.cursor_position() else { return };
+    let Ok(world_pos) = cam.viewport_to_world_2d(cam_transform, cursor_pos) else { return };
+
+    for (block_sprite, transform, sprite) in &block_q {
+        let Some(size) = sprite.custom_size else { continue };
+        let center = transform.translation.truncate();
+        let half = size * 0.5;
+        if world_pos.x >= center.x - half.x
+            && world_pos.x <= center.x + half.x
+            && world_pos.y >= center.y - half.y
+            && world_pos.y <= center.y + half.y
+        {
+            let Some(wb) = model.work_blocks.get(&block_sprite.work_block_id) else { continue };
+            if wb.description.is_empty() {
+                return;
+            }
+            let Some(screen_pos) = ctx.pointer_hover_pos() else { return };
+            egui::Area::new(egui::Id::new("block_desc_tooltip"))
+                .order(egui::Order::Tooltip)
+                .fixed_pos(screen_pos + egui::Vec2::new(14.0, 14.0))
+                .show(ctx, |ui| {
+                    egui::Frame::popup(ui.style()).show(ui, |ui| {
+                        ui.set_max_width(300.0);
+                        ui.label(&wb.description);
+                    });
+                });
+            return;
+        }
     }
 }

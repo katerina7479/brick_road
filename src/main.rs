@@ -126,6 +126,7 @@ fn main() {
         .add_systems(EguiPrimaryContextPass, logo_ui)
         .add_systems(EguiPrimaryContextPass, blocks::draw_name_edit_overlay)
         .add_systems(EguiPrimaryContextPass, blocks::draw_delete_confirm_overlay)
+        .add_systems(EguiPrimaryContextPass, blocks::draw_description_tooltip)
         .run();
 }
 
@@ -403,6 +404,7 @@ fn side_panel_ui(
                 return;
             };
             let mut name = wb.name.clone();
+            let mut description = wb.description.clone();
             let mut duration_days = wb.duration_days;
             let confidence = wb.estimate.confidence;
             let color = wb.color;
@@ -413,6 +415,19 @@ fn side_panel_ui(
             if name_changed && !name.trim().is_empty() {
                 if let Some(wb) = model.work_blocks.get_mut(&sel_id) {
                     wb.name = name.trim().to_string();
+                }
+                if let Err(e) = db::save_model(&conn, &model) {
+                    error!("save_model failed: {e}");
+                }
+            }
+
+            ui.label("Notes");
+            let desc_changed = ui
+                .add(egui::TextEdit::multiline(&mut description).desired_rows(3))
+                .changed();
+            if desc_changed {
+                if let Some(wb) = model.work_blocks.get_mut(&sel_id) {
+                    wb.description = description;
                 }
                 if let Err(e) = db::save_model(&conn, &model) {
                     error!("save_model failed: {e}");
