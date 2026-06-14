@@ -43,6 +43,7 @@ fn main() {
         .insert_resource(schedule::TimelineViewMode::default())
         .insert_resource(schedule::VisibleBlocks::default())
         .insert_resource(analysis::ScheduleAnalysis::default())
+        .insert_resource(schedule::TodayMarker::default())
         .insert_resource(blocks::BlockSpriteMap::default())
         .insert_resource(labels::NestingDepthMap::default())
         .insert_resource(ResourceDragState::default())
@@ -69,6 +70,7 @@ fn main() {
         )
         .add_systems(Update, (camera_nav_keys, update_camera_target, smooth_camera).chain())
         .add_systems(Update, draw_grid)
+        .add_systems(Update, schedule::update_today_marker)
         .add_systems(Update, sync_weekend_bands)
         .add_systems(Update, update_analysis)
         .add_systems(
@@ -131,6 +133,13 @@ fn main() {
             Update,
             blocks::sync_uncertainty_overlays
                 .after(blocks::reconcile_block_sprites)
+                .run_if(task_view_active),
+        )
+        .add_systems(
+            Update,
+            blocks::sync_past_overlays
+                .after(blocks::reconcile_block_sprites)
+                .after(schedule::update_today_marker)
                 .run_if(task_view_active),
         )
         .add_systems(
@@ -212,11 +221,14 @@ fn setup_camera(mut commands: Commands) {
 
 fn draw_grid(
     mut gizmos: Gizmos,
+    today: Res<schedule::TodayMarker>,
     cam_q: Query<(&Transform, &Projection), With<Camera2d>>,
     windows: Query<&Window>,
 ) {
-    let line_color = Color::srgba(0.3, 0.3, 0.5, 0.15);
-    let baseline_color = Color::srgba(0.4, 0.4, 0.6, 0.35);
+    let line_color       = Color::srgba(0.3, 0.3, 0.5, 0.15);
+    let past_line_color  = Color::srgba(0.3, 0.3, 0.5, 0.05);
+    let baseline_color   = Color::srgba(0.4, 0.4, 0.6, 0.35);
+    let today_line_color = Color::from(LinearRgba::new(4.0, 2.0, 0.5, 1.0)); // HDR → Bloom
 
     let Ok((cam_t, proj)) = cam_q.single() else { return };
     let Projection::Orthographic(ortho) = proj else { return };
@@ -240,10 +252,15 @@ fn draw_grid(
 
     for day in day_min..=day_max {
         let x = day as f32 * PIXELS_PER_DAY;
-        gizmos.line_2d(Vec2::new(x, y_bottom), Vec2::new(x, y_top), line_color);
+        let color = if (day as f32) < today.day { past_line_color } else { line_color };
+        gizmos.line_2d(Vec2::new(x, y_bottom), Vec2::new(x, y_top), color);
     }
 
     gizmos.line_2d(Vec2::new(x_left, 0.0), Vec2::new(x_right, 0.0), baseline_color);
+
+    // Prominent today marker — HDR color triggers Bloom.
+    let x_today = today.day * PIXELS_PER_DAY;
+    gizmos.line_2d(Vec2::new(x_today, y_bottom), Vec2::new(x_today, y_top), today_line_color);
 }
 
 /// Marker for weekend and holiday band sprites behind the timeline grid.

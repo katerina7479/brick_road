@@ -312,6 +312,7 @@ pub fn sync_block_sprites(
     sa: Res<ScheduleAnalysis>,
     model: Res<model::Model>,
     selected: Res<SelectedBlock>,
+    today: Res<schedule::TodayMarker>,
     camera_q: Query<&Projection, With<Camera2d>>,
     mut query: Query<(&BlockSprite, &mut Transform, &mut Sprite)>,
 ) {
@@ -356,6 +357,13 @@ pub fn sync_block_sprites(
         } else {
             Color::from(base)
         };
+
+        // Desaturate and dim blocks that are entirely in the past.
+        if wb.start_day + wb.duration_days <= today.day {
+            let c = sprite.color.to_linear();
+            let lum = 0.2126 * c.red + 0.7152 * c.green + 0.0722 * c.blue;
+            sprite.color = Color::from(LinearRgba::new(lum * 0.35, lum * 0.35, lum * 0.35, 0.4));
+        }
     }
 }
 
@@ -896,6 +904,80 @@ pub fn sync_uncertainty_overlays(
             let _ = key; // key unused here but makes the pattern clear
             commands.entity(*entity).despawn();
         }
+    }
+}
+
+// ── Past-portion overlay ──────────────────────────────────────────────────────
+
+/// Reconciliation key for the dark overlay covering the past portion of a block
+/// that straddles the today line.
+#[derive(Component, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct PastPortionOverlay(pub WorkBlockId);
+
+/// Reconciles past-portion overlays with the current visible-block state.
+///
+/// For each block straddling today (start_day < today < end_day), a
+/// semi-transparent dark sprite covers the elapsed portion. Blocks entirely
+/// in the past are desaturated in `sync_block_sprites`.
+pub fn sync_past_overlays(
+    mut commands: Commands,
+    model: Res<model::Model>,
+    today: Res<schedule::TodayMarker>,
+    visible_blocks: Res<schedule::VisibleBlocks>,
+    mut overlay_q: Query<(Entity, &PastPortionOverlay, &mut Transform, &mut Sprite)>,
+) {
+    if !model.is_changed() && !visible_blocks.is_changed() && !today.is_changed() {
+        return;
+    }
+
+    let existing: HashMap<PastPortionOverlay, Entity> = overlay_q
+        .iter()
+        .map(|(e, k, _, _)| (*k, e))
+        .collect();
+
+    struct Overlay {
+        key: PastPortionOverlay,
+        pos: Vec3,
+        size: Vec2,
+    }
+    let mut desired: Vec<Overlay> = Vec::new();
+
+    for (row, &id) in visible_blocks.ids.iter().enumerate() {
+        let Some(wb) = model.work_blocks.get(&id) else { continue };
+        let end_day = wb.start_day + wb.duration_days;
+        if wb.start_day >= today.day || end_day <= today.day {
+            continue;
+        }
+        let past_width = (today.day - wb.start_day) * PIXELS_PER_DAY;
+        let x_left = wb.start_day * PIXELS_PER_DAY;
+        let y = -(row as f32) * ROW_HEIGHT;
+        desired.push(Overlay {
+            key: PastPortionOverlay(id),
+            pos: Vec3::new(x_left + past_width * 0.5, y, 0.2),
+            size: Vec2::new(past_width, BLOCK_HEIGHT),
+        });
+    }
+
+    let overlay_color = Color::from(LinearRgba::new(0.0, 0.0, 0.0, 0.5));
+    let mut live: HashSet<Entity> = HashSet::with_capacity(desired.len());
+    for ov in &desired {
+        if let Some(&entity) = existing.get(&ov.key) {
+            if let Ok((_, _, mut t, mut s)) = overlay_q.get_mut(entity) {
+                t.translation = ov.pos;
+                s.custom_size = Some(ov.size);
+            }
+            live.insert(entity);
+        } else {
+            commands.spawn((
+                ov.key,
+                Sprite { color: overlay_color, custom_size: Some(ov.size), ..default() },
+                Transform::from_translation(ov.pos),
+            ));
+        }
+    }
+
+    for (&_key, &entity) in existing.iter().filter(|(_, e)| !live.contains(e)) {
+        commands.entity(entity).despawn();
     }
 }
 

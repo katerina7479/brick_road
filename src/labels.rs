@@ -126,6 +126,7 @@ pub fn spawn_day_labels(
     mut commands: Commands,
     schedule: Res<Schedule>,
     model: Res<Model>,
+    today: Res<crate::schedule::TodayMarker>,
     cam_q: Query<&Projection, With<Camera2d>>,
     day_q: Query<Entity, With<DayLabel>>,
     mut prev_step: Local<i32>,
@@ -145,7 +146,7 @@ pub fn spawn_day_labels(
     let (step, month_only) = day_step_for_zoom(scale);
     let zoom_band_changed = step != *prev_step;
 
-    if !zoom_band_changed && !schedule.is_changed() && !model.is_changed() {
+    if !zoom_band_changed && !schedule.is_changed() && !model.is_changed() && !today.is_changed() {
         return;
     }
     *prev_step = step;
@@ -157,6 +158,7 @@ pub fn spawn_day_labels(
     let span = schedule.total_duration_days.ceil() as i32 + step;
     for day in (0..=span).step_by(step as usize) {
         let x = day as f32 * PIXELS_PER_DAY;
+        let alpha = if (day as f32) < today.day { 0.3 } else { 0.75 };
         let label = format_day_label(day, month_only, &model);
         commands.spawn((
             DayLabel,
@@ -165,7 +167,7 @@ pub fn spawn_day_labels(
                 font_size: 11.0,
                 ..default()
             },
-            TextColor(Color::srgba(0.6, 0.6, 0.9, 0.75)),
+            TextColor(Color::srgba(0.6, 0.6, 0.9, alpha)),
             Transform::from_xyz(x, DAY_LABEL_Y, 1.0),
         ));
     }
