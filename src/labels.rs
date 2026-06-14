@@ -7,37 +7,77 @@ use crate::{
     blocks::BlockSprite,
     constants::{PIXELS_PER_DAY, ROW_HEIGHT},
     model::{Model, WorkBlockId},
-    schedule::{Schedule, ViewScope},
+    schedule::Schedule,
 };
 
 /// Y position of day-number labels above the block rows.
 const DAY_LABEL_Y: f32 = 55.0;
-/// Draw a day label every this many days.
-const DAY_STEP: i32 = 5;
+
+/// Maps orthographic zoom scale to the day-label stride.
+/// Returns the number of days between consecutive day labels.
+fn day_step_for_zoom(scale: f32) -> i32 {
+    if scale < 0.5 {
+        1
+    } else if scale < 2.0 {
+        5
+    } else if scale < 4.0 {
+        10
+    } else {
+        30
+    }
+}
 
 /// Marker for day-number `Text2d` entities.
 #[derive(Component)]
 pub struct DayLabel;
 
+/// Stub — row labels removed by br-57 (names inside blocks), day labels
+/// handled by `spawn_day_labels`. Kept as a no-op because main.rs
+/// registrations reference it; safe to remove in a cleanup pass.
+pub fn spawn_labels() {}
+
 /// Spawns (or re-spawns) day-number labels along the top of the timeline.
-/// Row name labels are now rendered inline inside block bars (see `blocks::BlockLabel`).
-pub fn spawn_labels(
+///
+/// Respawns when:
+/// - The zoom band changes (scale crosses one of the 0.5 / 2.0 / 4.0 thresholds).
+/// - `model` or `schedule` changes (timeline span may have shifted).
+///
+/// Uses a `Local<i32>` to track the previously-active stride so that smooth
+/// zooming within a band incurs no per-frame entity churn.
+pub fn spawn_day_labels(
     mut commands: Commands,
     schedule: Res<Schedule>,
     model: Res<Model>,
-    scope: Res<ViewScope>,
+    cam_q: Query<&Projection, With<Camera2d>>,
     day_q: Query<Entity, With<DayLabel>>,
+    mut prev_step: Local<i32>,
 ) {
-    if !model.is_changed() && !scope.is_changed() {
+    let scale = cam_q
+        .single()
+        .ok()
+        .and_then(|proj| {
+            if let Projection::Orthographic(o) = proj {
+                Some(o.scale)
+            } else {
+                None
+            }
+        })
+        .unwrap_or(1.0);
+
+    let step = day_step_for_zoom(scale);
+    let zoom_band_changed = step != *prev_step;
+
+    if !zoom_band_changed && !schedule.is_changed() && !model.is_changed() {
         return;
     }
+    *prev_step = step;
+
     for e in &day_q {
         commands.entity(e).despawn();
     }
 
-    // Day number labels along the top of the grid.
-    let span = schedule.total_duration_days.ceil() as i32 + DAY_STEP;
-    for day in (0..=span).step_by(DAY_STEP as usize) {
+    let span = schedule.total_duration_days.ceil() as i32 + step;
+    for day in (0..=span).step_by(step as usize) {
         let x = day as f32 * PIXELS_PER_DAY;
         commands.spawn((
             DayLabel,

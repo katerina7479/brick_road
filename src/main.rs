@@ -46,6 +46,10 @@ fn main() {
             PostStartup,
             labels::spawn_labels.after(blocks::spawn_block_sprites),
         )
+        .add_systems(
+            PostStartup,
+            labels::spawn_day_labels.after(labels::spawn_labels),
+        )
         .add_systems(Update, (camera_nav_keys, update_camera_target, smooth_camera).chain())
         .add_systems(Update, draw_grid)
         .add_systems(Update, update_analysis)
@@ -96,6 +100,12 @@ fn main() {
             labels::spawn_labels
                 .after(blocks::handle_block_selection)
                 .after(blocks::spawn_block_sprites),
+        )
+        .add_systems(
+            Update,
+            labels::spawn_day_labels
+                .after(update_camera_target)
+                .after(smooth_camera),
         )
         .add_systems(Update, labels::draw_nesting_indicators)
         .add_systems(Update, labels::draw_violation_indicators)
