@@ -16,8 +16,8 @@ use crate::{
 const BLOCK_HEIGHT: f32 = 44.0;
 /// Minimum logical block width (px) below which the inline name label is hidden.
 const MIN_LABEL_WIDTH: f32 = 20.0;
-/// Approximate pixel width per character at font_size 11 (used for truncation).
-const LABEL_CHAR_WIDTH: f32 = 7.0;
+/// Approximate pixel width per character at font_size 13 (used for truncation).
+const LABEL_CHAR_WIDTH: f32 = 8.0;
 
 /// ortho.scale below this → show full block name.
 const LOD_CLOSE_MAX: f32 = 1.0;
@@ -31,6 +31,13 @@ const LOD_ABBREV_CHARS: usize = 3;
 /// the display string at any zoom level without querying the model.
 #[derive(Component)]
 pub struct BlockLabel {
+    pub full_name: String,
+}
+
+/// Dark shadow layer rendered behind `BlockLabel` to ensure legibility on any
+/// block color. Offset by 1 screen pixel (updated each frame to match zoom).
+#[derive(Component)]
+pub struct BlockLabelShadow {
     pub full_name: String,
 }
 
@@ -120,7 +127,7 @@ pub fn spawn_block_sprites(
 
         // Inline name label — only when the bar is wide enough to be readable.
         if width >= MIN_LABEL_WIDTH {
-            let available_chars = ((width - 4.0) / LABEL_CHAR_WIDTH) as usize;
+            let available_chars = ((width - 8.0) / LABEL_CHAR_WIDTH) as usize;
             let display = if wb.name.chars().count() > available_chars && available_chars > 0 {
                 let truncated: String =
                     wb.name.chars().take(available_chars.saturating_sub(1)).collect();
@@ -129,14 +136,23 @@ pub fn spawn_block_sprites(
                 wb.name.clone()
             };
             block_cmd.with_children(|parent| {
+                // Dark shadow for contrast — 1 screen-pixel offset (updated by sync_block_labels).
+                parent.spawn((
+                    BlockLabelShadow { full_name: wb.name.clone() },
+                    Text2d::new(display.clone()),
+                    TextFont { font_size: 13.0, ..default() },
+                    TextColor(Color::srgba(0.0, 0.0, 0.0, 0.6)),
+                    Anchor::CENTER,
+                    Transform::from_xyz(0.0, 0.0, 0.08),
+                ));
+                // White main label centered in the block.
                 parent.spawn((
                     BlockLabel { full_name: wb.name.clone() },
                     Text2d::new(display),
                     TextFont { font_size: 13.0, ..default() },
-                    TextColor(Color::srgba(1.0, 1.0, 1.0, 0.9)),
-                    Anchor::CENTER_LEFT,
-                    // Position from the parent center: 2px padding from the left edge.
-                    Transform::from_xyz(-(width * 0.5) + 2.0, 0.0, 0.1),
+                    TextColor(Color::srgba(1.0, 1.0, 1.0, 1.0)),
+                    Anchor::CENTER,
+                    Transform::from_xyz(0.0, 0.0, 0.15),
                 ));
             });
         }
@@ -213,14 +229,15 @@ pub fn sync_block_sprites(
     }
 }
 
-/// Updates `BlockLabel` children each frame: counter-scales the transform so
-/// labels stay at constant screen-space size, and applies LOD-based text:
-/// - ortho.scale < 1.0 (close): full block name
-/// - 1.0 ≤ scale ≤ 3.0 (medium): first 3 characters
-/// - scale > 3.0 (far): hidden
+/// Updates `BlockLabel` and `BlockLabelShadow` children each frame.
+///
+/// Counter-scales both so labels remain at constant screen-space size.
+/// Applies LOD-based text and moves the shadow 1 screen-pixel down-right
+/// (shadow offset = scale world units, which equals 1 screen pixel at all zooms).
 pub fn sync_block_labels(
     cam_q: Query<&Projection, With<Camera2d>>,
-    mut label_q: Query<(&BlockLabel, &mut Text2d, &mut Visibility, &mut Transform)>,
+    mut label_q: Query<(&BlockLabel, &mut Text2d, &mut Visibility, &mut Transform), Without<BlockLabelShadow>>,
+    mut shadow_q: Query<(&BlockLabelShadow, &mut Text2d, &mut Visibility, &mut Transform), Without<BlockLabel>>,
 ) {
     let Ok(proj) = cam_q.single() else { return };
     let Projection::Orthographic(ortho) = proj else { return };
@@ -228,6 +245,7 @@ pub fn sync_block_labels(
 
     for (label, mut text2d, mut vis, mut transform) in &mut label_q {
         transform.scale = Vec3::splat(scale);
+        transform.translation = Vec3::new(0.0, 0.0, 0.15);
         if scale > LOD_FAR_MIN {
             *vis = Visibility::Hidden;
         } else {
@@ -236,6 +254,23 @@ pub fn sync_block_labels(
                 label.full_name.clone()
             } else {
                 label.full_name.chars().take(LOD_ABBREV_CHARS).collect()
+            };
+            *text2d = Text2d::new(display);
+        }
+    }
+
+    for (shadow, mut text2d, mut vis, mut transform) in &mut shadow_q {
+        transform.scale = Vec3::splat(scale);
+        // Shift by 1 screen pixel — in local space that's `scale` world units.
+        transform.translation = Vec3::new(scale, -scale, 0.08);
+        if scale > LOD_FAR_MIN {
+            *vis = Visibility::Hidden;
+        } else {
+            *vis = Visibility::Inherited;
+            let display: String = if scale < LOD_CLOSE_MAX {
+                shadow.full_name.clone()
+            } else {
+                shadow.full_name.chars().take(LOD_ABBREV_CHARS).collect()
             };
             *text2d = Text2d::new(display);
         }
