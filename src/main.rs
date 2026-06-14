@@ -347,16 +347,17 @@ fn side_panel_ui(
             }
 
             ui.separator();
-            ui.label("Duration");
-            let changed = ui
-                .add(
-                    egui::Slider::new(&mut duration_days, 0.5f32..=60.0)
-                        .text("days")
-                        .step_by(0.5),
-                )
-                .changed();
+            let dur_changed = ui.horizontal(|ui| {
+                ui.label("Duration:");
+                ui.add(
+                    egui::DragValue::new(&mut duration_days)
+                        .speed(0.5)
+                        .range(0.5f32..=60.0)
+                        .suffix(" days"),
+                ).changed()
+            }).inner;
 
-            if changed {
+            if dur_changed {
                 if let Some(wb) = model.work_blocks.get_mut(&sel_id) {
                     wb.duration_days = duration_days;
                 }
@@ -368,21 +369,38 @@ fn side_panel_ui(
 
             ui.separator();
             ui.label("Estimate");
-            // Sliders are ordered best→expected→worst. Each slider's range is
-            // bounded by its neighbours so the three-point ordering invariant
-            // optimistic ≤ most_likely ≤ pessimistic is always maintained.
-            let opt_changed = ui
-                .add(egui::Slider::new(&mut optimistic, 0.5f32..=most_likely).text("optimistic").step_by(0.5))
-                .changed();
-            let ml_changed = ui
-                .add(egui::Slider::new(&mut most_likely, optimistic..=pessimistic).text("most likely").step_by(0.5))
-                .changed();
-            let pes_changed = ui
-                .add(egui::Slider::new(&mut pessimistic, most_likely..=200.0f32).text("pessimistic").step_by(0.5))
-                .changed();
-            ui.label(format!("Confidence:   {:.0}%", confidence * 100.0));
+            // DragValues are ordered best→expected→worst. Each range is bounded
+            // by its neighbours so optimistic ≤ most_likely ≤ pessimistic holds.
+            let opt_changed = ui.horizontal(|ui| {
+                ui.label("Optimistic:");
+                ui.add(
+                    egui::DragValue::new(&mut optimistic)
+                        .speed(0.5)
+                        .range(0.5f32..=most_likely)
+                        .suffix(" days"),
+                ).changed()
+            }).inner;
+            let ml_changed = ui.horizontal(|ui| {
+                ui.label("Most likely:");
+                ui.add(
+                    egui::DragValue::new(&mut most_likely)
+                        .speed(0.5)
+                        .range(optimistic..=pessimistic)
+                        .suffix(" days"),
+                ).changed()
+            }).inner;
+            let pes_changed = ui.horizontal(|ui| {
+                ui.label("Pessimistic:");
+                ui.add(
+                    egui::DragValue::new(&mut pessimistic)
+                        .speed(0.5)
+                        .range(most_likely..=200.0f32)
+                        .suffix(" days"),
+                ).changed()
+            }).inner;
+            ui.label(format!("Confidence: {:.0}%", confidence * 100.0));
 
-            if ml_changed || opt_changed || pes_changed {
+            if opt_changed || ml_changed || pes_changed {
                 if let Some(wb) = model.work_blocks.get_mut(&sel_id) {
                     wb.estimate.most_likely = most_likely;
                     wb.estimate.optimistic = optimistic;
@@ -448,12 +466,15 @@ fn side_panel_ui(
                 }
             });
 
-            // Custom HDR sliders — allow values > 1.0 for bloom.
+            // Custom HDR inputs — allow values > 1.0 for bloom.
             ui.label("Custom (R / G / B)");
             let mut custom = color.unwrap_or([1.0, 1.0, 1.0]);
-            let cr = ui.add(egui::Slider::new(&mut custom[0], 0.0f32..=3.0).text("R").step_by(0.05)).changed();
-            let cg = ui.add(egui::Slider::new(&mut custom[1], 0.0f32..=3.0).text("G").step_by(0.05)).changed();
-            let cb = ui.add(egui::Slider::new(&mut custom[2], 0.0f32..=3.0).text("B").step_by(0.05)).changed();
+            let (cr, cg, cb) = ui.horizontal(|ui| {
+                let cr = ui.add(egui::DragValue::new(&mut custom[0]).speed(0.05).range(0.0f32..=3.0).prefix("R ")).changed();
+                let cg = ui.add(egui::DragValue::new(&mut custom[1]).speed(0.05).range(0.0f32..=3.0).prefix("G ")).changed();
+                let cb = ui.add(egui::DragValue::new(&mut custom[2]).speed(0.05).range(0.0f32..=3.0).prefix("B ")).changed();
+                (cr, cg, cb)
+            }).inner;
             if cr || cg || cb {
                 new_color = Some(custom);
                 color_changed = true;
