@@ -105,10 +105,80 @@ fn setup_demo_schedule(mut model: ResMut<model::Model>, mut commands: Commands) 
     }
 }
 
-fn side_panel_ui(mut contexts: EguiContexts) {
+fn side_panel_ui(
+    mut contexts: EguiContexts,
+    selected: Res<blocks::SelectedBlock>,
+    mut model: ResMut<model::Model>,
+    mut schedule: ResMut<schedule::Schedule>,
+) {
     let Ok(ctx) = contexts.ctx_mut() else { return };
-    egui::SidePanel::left("side_panel").show(ctx, |ui| {
+    egui::SidePanel::left("side_panel").min_width(220.0).show(ctx, |ui| {
         ui.heading("brick_road");
-        ui.label("(panel placeholder)");
+        ui.separator();
+
+        let Some(sel_id) = selected.0 else {
+            ui.label("Click a block to inspect.");
+            return;
+        };
+
+        // Compute row index using the same sort order as block sprites.
+        let row = {
+            let mut ordered: Vec<_> = schedule.blocks.values().collect();
+            ordered.sort_by(|a, b| {
+                a.start_day
+                    .partial_cmp(&b.start_day)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then(a.work_block_id.0.cmp(&b.work_block_id.0))
+            });
+            ordered.iter().position(|b| b.work_block_id == sel_id)
+        };
+
+        // Clone display values before any mutable borrow of model.
+        let Some(wb) = model.work_blocks.get(&sel_id) else { return };
+        let name = wb.name.clone();
+        let mut most_likely = wb.estimate.most_likely;
+        let optimistic = wb.estimate.optimistic;
+        let pessimistic = wb.estimate.pessimistic;
+        let confidence = wb.estimate.confidence;
+
+        let (start_day, end_day) = schedule
+            .blocks
+            .get(&sel_id)
+            .map(|sb| (sb.start_day, sb.end_day))
+            .unwrap_or((0.0, 0.0));
+
+        ui.strong(&name);
+        ui.separator();
+        ui.label(format!("Start:  day {:.1}", start_day));
+        ui.label(format!("End:    day {:.1}", end_day));
+        if let Some(r) = row {
+            ui.label(format!("Row:    {}", r));
+        }
+
+        ui.separator();
+        ui.label("Estimate");
+        let changed = ui
+            .add(
+                egui::Slider::new(&mut most_likely, 1.0f32..=60.0)
+                    .text("Duration (days)")
+                    .step_by(0.5),
+            )
+            .changed();
+        ui.label(format!("Optimistic:   {:.1} days", optimistic));
+        ui.label(format!("Pessimistic:  {:.1} days", pessimistic));
+        ui.label(format!("Confidence:   {:.0}%", confidence * 100.0));
+
+        if changed {
+            if let Some(wb) = model.work_blocks.get_mut(&sel_id) {
+                wb.estimate.most_likely = most_likely;
+            }
+            let plan_id = schedule.plan_id;
+            if let Some(plan) = model.plans.get(&plan_id).cloned() {
+                let dep_graph = graph::build_graph(&model, &plan);
+                if let Ok(new_sched) = schedule::forward_pass(&model, &plan, &dep_graph) {
+                    *schedule = new_sched;
+                }
+            }
+        }
     });
 }
