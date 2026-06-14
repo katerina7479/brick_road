@@ -367,6 +367,7 @@ fn draw_arrowhead(gizmos: &mut Gizmos, src: Vec2, dst: Vec2, color: Color) {
 /// Right-click drag from one block to another to create a `FinishToStart`
 /// dependency. Press right button on source, release on target.
 /// Self-loops and duplicate FS edges in the same direction are silently ignored.
+#[allow(clippy::too_many_arguments)]
 pub fn handle_dep_drag(
     mut egui_ctx: EguiContexts,
     windows: Query<&Window>,
