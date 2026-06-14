@@ -7,6 +7,7 @@ use chrono::NaiveDate;
 
 pub mod analysis;
 pub mod blocks;
+pub mod calendar;
 pub mod camera;
 pub mod constants;
 pub mod db;
@@ -39,6 +40,7 @@ fn main() {
         .insert_resource(blocks::DeleteConfirmState::default())
         .insert_resource(blocks::CreateModeState::default())
         .insert_resource(schedule::ViewScope::default())
+        .insert_resource(schedule::TimelineViewMode::default())
         .insert_resource(schedule::VisibleBlocks::default())
         .insert_resource(analysis::ScheduleAnalysis::default())
         .insert_resource(blocks::BlockSpriteMap::default())
@@ -102,19 +104,26 @@ fn main() {
             Update,
             blocks::sync_block_sprites
                 .after(blocks::handle_block_drag)
-                .after(blocks::reconcile_block_sprites),
+                .after(blocks::reconcile_block_sprites)
+                .run_if(task_view_active),
         )
         .add_systems(
             Update,
-            blocks::sync_conflict_overlays.after(update_analysis),
+            blocks::sync_conflict_overlays
+                .after(update_analysis)
+                .run_if(task_view_active),
         )
         .add_systems(
             Update,
-            blocks::draw_block_borders.after(blocks::sync_block_sprites),
+            blocks::draw_block_borders
+                .after(blocks::sync_block_sprites)
+                .run_if(task_view_active),
         )
         .add_systems(
             Update,
-            blocks::sync_uncertainty_overlays.after(blocks::reconcile_block_sprites),
+            blocks::sync_uncertainty_overlays
+                .after(blocks::reconcile_block_sprites)
+                .run_if(task_view_active),
         )
         .add_systems(
             Update,
@@ -123,10 +132,12 @@ fn main() {
                 .before(blocks::handle_block_drag)
                 .before(blocks::handle_block_resize),
         )
-        .add_systems(Update, blocks::draw_block_handles)
+        .add_systems(Update, blocks::draw_block_handles.run_if(task_view_active))
         .add_systems(
             Update,
-            blocks::draw_dependency_edges.after(update_analysis),
+            blocks::draw_dependency_edges
+                .after(update_analysis)
+                .run_if(task_view_active),
         )
         .add_systems(
             Update,
@@ -140,23 +151,29 @@ fn main() {
                 .after(update_camera_target)
                 .after(smooth_camera),
         )
-        .add_systems(Update, labels::draw_nesting_indicators)
-        .add_systems(Update, labels::draw_violation_indicators)
+        .add_systems(Update, labels::draw_nesting_indicators.run_if(task_view_active))
+        .add_systems(Update, labels::draw_violation_indicators.run_if(task_view_active))
         .add_systems(Update, labels::scale_labels_to_zoom)
         .add_systems(
             Update,
-            blocks::sync_block_labels.after(blocks::reconcile_block_sprites),
+            blocks::sync_block_labels
+                .after(blocks::reconcile_block_sprites)
+                .run_if(task_view_active),
         )
         .add_systems(
             Update,
             blocks::sync_block_label_names
                 .after(blocks::reconcile_block_sprites)
-                .before(blocks::sync_block_labels),
+                .before(blocks::sync_block_labels)
+                .run_if(task_view_active),
         )
         .add_systems(
             Update,
-            blocks::sync_description_dots.after(blocks::reconcile_block_sprites),
+            blocks::sync_description_dots
+                .after(blocks::reconcile_block_sprites)
+                .run_if(task_view_active),
         )
+        .add_systems(Update, draw_resource_timeline)
         .add_systems(EguiPrimaryContextPass, side_panel_ui)
         .add_systems(EguiPrimaryContextPass, camera_nav_ui)
         .add_systems(EguiPrimaryContextPass, logo_ui)
@@ -213,6 +230,85 @@ fn draw_grid(
     }
 
     gizmos.line_2d(Vec2::new(x_left, 0.0), Vec2::new(x_right, 0.0), baseline_color);
+}
+
+fn task_view_active(mode: Res<schedule::TimelineViewMode>) -> bool {
+    *mode == schedule::TimelineViewMode::Task
+}
+
+/// Draws one row per resource block when `TimelineViewMode::Resource` is active.
+/// Each row shows bars for every work block allocated to that resource, coloured
+/// red if the window overlaps a detected resource conflict.
+fn draw_resource_timeline(
+    mode: Res<schedule::TimelineViewMode>,
+    model: Res<model::Model>,
+    schedule: Res<schedule::Schedule>,
+    sa: Res<analysis::ScheduleAnalysis>,
+    mut gizmos: Gizmos,
+) {
+    if *mode != schedule::TimelineViewMode::Resource {
+        return;
+    }
+
+    let Some(plan) = model.plans.get(&schedule.plan_id) else { return };
+
+    let mut resources: Vec<_> = model.resource_blocks.values().collect();
+    resources.sort_by_key(|r| r.id.0);
+
+    // Pre-index conflict windows per resource.
+    let mut conflict_windows: std::collections::HashMap<model::ResourceBlockId, Vec<(f32, f32)>> =
+        std::collections::HashMap::new();
+    for c in &sa.resource_conflicts {
+        conflict_windows
+            .entry(c.resource_id)
+            .or_default()
+            .push((c.window_start, c.window_end));
+    }
+
+    let row_sep = Color::srgba(0.3, 0.3, 0.5, 0.2);
+    let alloc_ok = Color::srgba(0.2, 1.8, 0.6, 0.7);
+    let alloc_conflict = Color::srgba(2.5, 0.3, 0.3, 0.9);
+    let bar_h = constants::ROW_HEIGHT * 0.65;
+
+    for (row, resource) in resources.iter().enumerate() {
+        let y = -(row as f32) * constants::ROW_HEIGHT;
+
+        // Row separator.
+        gizmos.line_2d(
+            Vec2::new(-50_000.0, y - constants::ROW_HEIGHT * 0.5),
+            Vec2::new(50_000.0,  y - constants::ROW_HEIGHT * 0.5),
+            row_sep,
+        );
+
+        let conflicts = conflict_windows.get(&resource.id);
+
+        for alloc in &plan.allocations {
+            if alloc.resource_id != resource.id {
+                continue;
+            }
+            let Some(wb) = model.work_blocks.get(&alloc.work_block_id) else { continue };
+
+            let x0 = wb.start_day * PIXELS_PER_DAY;
+            let x1 = (wb.start_day + wb.duration_days) * PIXELS_PER_DAY;
+            let w  = (x1 - x0).max(4.0);
+            let cx = x0 + w * 0.5;
+
+            let is_conflicted = conflicts.is_some_and(|cws| {
+                cws.iter().any(|&(cs, ce)| {
+                    wb.start_day < ce && (wb.start_day + wb.duration_days) > cs
+                })
+            });
+
+            let color = if is_conflicted { alloc_conflict } else { alloc_ok };
+            // Draw bar as four border lines (rect outline).
+            let (x_lo, x_hi) = (cx - w * 0.5, cx + w * 0.5);
+            let (y_lo, y_hi) = (y - bar_h * 0.5, y + bar_h * 0.5);
+            gizmos.line_2d(Vec2::new(x_lo, y_lo), Vec2::new(x_hi, y_lo), color);
+            gizmos.line_2d(Vec2::new(x_hi, y_lo), Vec2::new(x_hi, y_hi), color);
+            gizmos.line_2d(Vec2::new(x_hi, y_hi), Vec2::new(x_lo, y_hi), color);
+            gizmos.line_2d(Vec2::new(x_lo, y_hi), Vec2::new(x_lo, y_lo), color);
+        }
+    }
 }
 
 fn setup_demo_schedule(mut model: ResMut<model::Model>, mut commands: Commands) {
@@ -300,6 +396,7 @@ fn camera_nav_ui(
     model: Res<model::Model>,
     scope: Res<schedule::ViewScope>,
     windows: Query<&Window>,
+    mut view_mode: ResMut<schedule::TimelineViewMode>,
 ) {
     let Ok(ctx) = contexts.ctx_mut() else { return };
     egui::Area::new(egui::Id::new("camera_nav"))
@@ -314,6 +411,16 @@ fn camera_nav_ui(
                     if let Some(new_target) = camera::fit_to_blocks(&model, &scope, &windows) {
                         *target = new_target;
                     }
+                }
+                ui.separator();
+                let (label, next) = match *view_mode {
+                    schedule::TimelineViewMode::Task =>
+                        ("Resource View", schedule::TimelineViewMode::Resource),
+                    schedule::TimelineViewMode::Resource =>
+                        ("Task View", schedule::TimelineViewMode::Task),
+                };
+                if ui.small_button(label).clicked() {
+                    *view_mode = next;
                 }
             });
         });
@@ -573,8 +680,20 @@ fn side_panel_ui(
             let confidence = wb.estimate.confidence;
             let color = wb.color;
             let priority = wb.priority;
+            let block_variant_ids = wb.variants.clone();
 
             let (start_day, end_day) = (wb.start_day, wb.start_day + wb.duration_days);
+
+            // Clone variant names and current selection before any mutable model borrow.
+            let variant_names: Vec<(model::VariantId, String)> = block_variant_ids
+                .iter()
+                .filter_map(|&vid| model.variants.get(&vid).map(|v| (vid, v.name.clone())))
+                .collect();
+            let plan_id = schedule.plan_id;
+            let current_var = model
+                .plans
+                .get(&plan_id)
+                .and_then(|p| p.selected_variants.get(&sel_id).copied());
 
             let name_changed = ui.text_edit_singleline(&mut name).changed();
             if name_changed && !name.trim().is_empty() {
@@ -598,6 +717,64 @@ fn side_panel_ui(
                     error!("save_model failed: {e}");
                 }
             }
+
+            // Variant selector — only shown when the block has variants.
+            if !variant_names.is_empty() {
+                ui.separator();
+                ui.label("Variants");
+                let mut new_sel: Option<Option<model::VariantId>> = None;
+                if ui.radio(current_var.is_none(), "None").clicked() {
+                    new_sel = Some(None);
+                }
+                for &(var_id, ref var_name) in &variant_names {
+                    if ui.radio(current_var == Some(var_id), var_name.as_str()).clicked() {
+                        new_sel = Some(Some(var_id));
+                    }
+                }
+                if let Some(selection) = new_sel {
+                    // Zero out the old variant's children so they disappear from the timeline.
+                    if let Some(old_vid) = current_var {
+                        if let Some(old_v) = model.variants.get(&old_vid) {
+                            let children: Vec<_> = old_v.children.clone();
+                            for child_id in children {
+                                if let Some(wb) = model.work_blocks.get_mut(&child_id) {
+                                    wb.start_day = 0.0;
+                                    wb.duration_days = 0.0;
+                                }
+                            }
+                        }
+                    }
+                    // Apply new selection (or remove it when "None" was chosen).
+                    if let Some(plan) = model.plans.get_mut(&plan_id) {
+                        match selection {
+                            Some(var_id) => {
+                                plan.selected_variants.insert(sel_id, var_id);
+                            }
+                            None => {
+                                plan.selected_variants.remove(&sel_id);
+                            }
+                        }
+                    }
+                    // Recompute schedule from the updated variant selection.
+                    if let Some(plan) = model.plans.get(&plan_id).cloned() {
+                        let dep_graph = graph::build_graph(&model, &plan);
+                        if let Ok(new_sched) = schedule::forward_pass(&model, &plan, &dep_graph) {
+                            *cycle_error = None;
+                            for sb in new_sched.blocks.values() {
+                                if let Some(wb) = model.work_blocks.get_mut(&sb.work_block_id) {
+                                    wb.start_day = sb.start_day;
+                                    wb.duration_days = sb.duration_days;
+                                }
+                            }
+                            *schedule = new_sched;
+                        }
+                    }
+                    if let Err(e) = db::save_model(&conn, &model) {
+                        error!("save_model failed: {e}");
+                    }
+                }
+            }
+
             ui.separator();
             ui.label(format!("Start:  day {:.1}", start_day));
             ui.label(format!("End:    day {:.1}", end_day));
