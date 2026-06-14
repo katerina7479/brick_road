@@ -857,6 +857,28 @@ mod tests {
     }
 
     #[test]
+    fn work_block_placement_fields_round_trip() {
+        // Verify that non-default start_day and duration_days survive a
+        // save_model → load_model cycle.  The general round-trip tests use
+        // create_work_block (which zeros both), so this explicitly covers the
+        // persistence path for user-defined placement values.
+        let conn = open_in_memory();
+        let mut m = Model::default();
+        let id = m.create_work_block("task", est(5.0, 3.0, 8.0, 0.9));
+        let wb = m.work_blocks.get_mut(&id).unwrap();
+        wb.start_day = 7.5;
+        wb.duration_days = 3.0;
+
+        save_model(&conn, &m).unwrap();
+        let loaded = load_model(&conn).unwrap();
+
+        let loaded_wb = loaded.work_blocks.get(&id).unwrap();
+        assert_eq!(loaded_wb.start_day, 7.5);
+        assert_eq!(loaded_wb.duration_days, 3.0);
+        assert_eq!(m.work_blocks, loaded.work_blocks);
+    }
+
+    #[test]
     fn validate_accepts_valid_model() {
         let mut m = Model::default();
         let w = m.create_world("w");
