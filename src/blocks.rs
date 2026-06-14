@@ -1199,11 +1199,6 @@ pub fn handle_dep_drag(
                 return;
             }
         }
-        // No handle hit — clear any stale dep drag state so guards don't block
-        // block selection on this frame.
-        if !mouse.pressed(MouseButton::Left) {
-            drag.from = None;
-        }
     }
 
     // Left-click release: finish a handle-initiated dep drag.
