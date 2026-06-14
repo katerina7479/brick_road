@@ -13,10 +13,22 @@ use crate::{
 const DAY_LABEL_Y: f32 = 55.0;
 /// X position of the right edge of row name labels.
 const ROW_LABEL_X: f32 = -80.0;
-/// Draw a day label every this many days.
-const DAY_STEP: i32 = 5;
 /// Visual indentation per nesting level for row labels.
 const INDENT_PX: f32 = 12.0;
+
+/// Maps orthographic zoom scale to the day-label stride.
+/// Returns the number of days between consecutive day labels.
+fn day_step_for_zoom(scale: f32) -> i32 {
+    if scale < 0.5 {
+        1
+    } else if scale < 2.0 {
+        5
+    } else if scale < 4.0 {
+        10
+    } else {
+        30
+    }
+}
 
 /// Marker for day-number `Text2d` entities.
 #[derive(Component)]
@@ -29,41 +41,19 @@ pub struct RowLabel {
     pub row: usize,
 }
 
-/// Spawns (or re-spawns) all timeline labels:
-/// - Day numbers along the top at every `DAY_STEP` days.
-/// - Work-block names to the left of each row, indented by nesting depth.
+/// Spawns (or re-spawns) row-name labels to the left of each block row.
+/// Day-number labels are managed separately by `spawn_day_labels`.
 pub fn spawn_labels(
     mut commands: Commands,
-    schedule: Res<Schedule>,
     model: Res<Model>,
     scope: Res<ViewScope>,
-    day_q: Query<Entity, With<DayLabel>>,
     row_q: Query<Entity, With<RowLabel>>,
 ) {
     if !model.is_changed() && !scope.is_changed() {
         return;
     }
-    for e in &day_q {
-        commands.entity(e).despawn();
-    }
     for e in &row_q {
         commands.entity(e).despawn();
-    }
-
-    // Day number labels along the top of the grid.
-    let span = schedule.total_duration_days.ceil() as i32 + DAY_STEP;
-    for day in (0..=span).step_by(DAY_STEP as usize) {
-        let x = day as f32 * PIXELS_PER_DAY;
-        commands.spawn((
-            DayLabel,
-            Text2d::new(format!("D{day}")),
-            TextFont {
-                font_size: 11.0,
-                ..default()
-            },
-            TextColor(Color::srgba(0.6, 0.6, 0.9, 0.75)),
-            Transform::from_xyz(x, DAY_LABEL_Y, 1.0),
-        ));
     }
 
     // Row name labels — same sort order as block sprites for matching rows.
@@ -88,6 +78,62 @@ pub fn spawn_labels(
             },
             TextColor(Color::srgba(0.85, 0.85, 0.95, 0.9)),
             Transform::from_xyz(x, y, 1.0),
+        ));
+    }
+}
+
+/// Spawns (or re-spawns) day-number labels along the top of the timeline.
+///
+/// Respawns when:
+/// - The zoom band changes (scale crosses one of the 0.5 / 2.0 / 4.0 thresholds).
+/// - `model` or `schedule` changes (timeline span may have shifted).
+///
+/// Uses a `Local<i32>` to track the previously-active stride so that smooth
+/// zooming within a band incurs no per-frame entity churn.
+pub fn spawn_day_labels(
+    mut commands: Commands,
+    schedule: Res<Schedule>,
+    model: Res<Model>,
+    cam_q: Query<&Projection, With<Camera2d>>,
+    day_q: Query<Entity, With<DayLabel>>,
+    mut prev_step: Local<i32>,
+) {
+    let scale = cam_q
+        .single()
+        .ok()
+        .and_then(|proj| {
+            if let Projection::Orthographic(o) = proj {
+                Some(o.scale)
+            } else {
+                None
+            }
+        })
+        .unwrap_or(1.0);
+
+    let step = day_step_for_zoom(scale);
+    let zoom_band_changed = step != *prev_step;
+
+    if !zoom_band_changed && !schedule.is_changed() && !model.is_changed() {
+        return;
+    }
+    *prev_step = step;
+
+    for e in &day_q {
+        commands.entity(e).despawn();
+    }
+
+    let span = schedule.total_duration_days.ceil() as i32 + step;
+    for day in (0..=span).step_by(step as usize) {
+        let x = day as f32 * PIXELS_PER_DAY;
+        commands.spawn((
+            DayLabel,
+            Text2d::new(format!("D{day}")),
+            TextFont {
+                font_size: 11.0,
+                ..default()
+            },
+            TextColor(Color::srgba(0.6, 0.6, 0.9, 0.75)),
+            Transform::from_xyz(x, DAY_LABEL_Y, 1.0),
         ));
     }
 }
