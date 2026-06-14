@@ -7,6 +7,7 @@ use chrono::NaiveDate;
 
 pub mod analysis;
 pub mod blocks;
+pub mod calendar;
 pub mod camera;
 pub mod constants;
 pub mod db;
