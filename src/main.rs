@@ -602,6 +602,7 @@ fn side_panel_ui(
     mut create_state: ResMut<blocks::CreateModeState>,
     mut new_size_label: Local<String>,
     mut new_size_error: Local<Option<String>>,
+    mut camera_target: ResMut<CameraTarget>,
 ) {
     let Ok(ctx) = contexts.ctx_mut() else { return };
     egui::SidePanel::left("side_panel")
@@ -1263,6 +1264,16 @@ fn side_panel_ui(
             }
             if let Some(target_id) = jump_to {
                 selected.0 = Some(target_id);
+                // Pan the camera to centre the target block in the timeline.
+                if let Some(wb) = model.work_blocks.get(&target_id) {
+                    if wb.duration_days > 0.0 {
+                        let sorted = schedule::sorted_blocks(&model);
+                        let row = sorted.iter().position(|b| b.id == target_id).unwrap_or(0);
+                        let cx = (wb.start_day + wb.duration_days * 0.5) * PIXELS_PER_DAY;
+                        let cy = -(row as f32) * constants::ROW_HEIGHT;
+                        camera_target.pos = Vec2::new(cx, cy);
+                    }
+                }
             }
 
             ui.separator();
