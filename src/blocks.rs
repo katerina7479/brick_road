@@ -76,8 +76,10 @@ pub fn spawn_block_sprites(
         let x = wb.start_day * PIXELS_PER_DAY + width * 0.5;
         let y = -(row as f32) * ROW_HEIGHT;
 
-        // Critical-path blocks glow gold; others cycle through the palette.
-        let color = if on_critical_path.contains(&wb.id) {
+        // Color hierarchy: user color > critical-path gold > palette default.
+        let color = if let Some([r, g, b]) = wb.color {
+            Color::from(LinearRgba::new(r, g, b, 1.0))
+        } else if on_critical_path.contains(&wb.id) {
             Color::from(LinearRgba::new(3.0, 2.2, 0.1, 1.0))
         } else {
             Color::from(PALETTE[row % PALETTE.len()])
@@ -126,7 +128,10 @@ pub fn sync_block_sprites(
 
         let base = PALETTE[block_sprite.row % PALETTE.len()];
         let id = block_sprite.work_block_id;
-        sprite.color = if on_critical.contains(&id) {
+        // Color hierarchy: user color > critical-path gold > selected highlight > palette.
+        sprite.color = if let Some([r, g, b]) = wb.color {
+            Color::from(LinearRgba::new(r, g, b, 1.0))
+        } else if on_critical.contains(&id) {
             Color::from(CRITICAL_PATH_COLOR)
         } else if selected.0 == Some(id) {
             Color::from(LinearRgba::new(
