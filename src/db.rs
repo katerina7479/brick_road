@@ -908,6 +908,50 @@ mod tests {
     }
 
     #[test]
+    fn migration_from_pre_br60_schema_adds_placement_columns() {
+        // Simulate upgrading a DB created before br-60 added start_day /
+        // duration_days.  We create the old work_blocks table (no placement
+        // columns), insert a row, then call create_tables to run the ALTER
+        // TABLE migrations, and verify load_model succeeds with defaults.
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+
+        // Old schema: work_blocks without placement columns.
+        conn.execute_batch(
+            "CREATE TABLE work_blocks (
+                id                   INTEGER PRIMARY KEY,
+                name                 TEXT NOT NULL,
+                estimate_most_likely REAL NOT NULL,
+                estimate_optimistic  REAL NOT NULL,
+                estimate_pessimistic REAL NOT NULL,
+                estimate_confidence  REAL NOT NULL
+            );",
+        )
+        .unwrap();
+
+        // Insert a pre-migration work block.
+        conn.execute(
+            "INSERT INTO work_blocks
+                 (id, name, estimate_most_likely, estimate_optimistic,
+                  estimate_pessimistic, estimate_confidence)
+             VALUES (1, 'legacy task', 5.0, 3.5, 8.0, 0.8)",
+            [],
+        )
+        .unwrap();
+
+        // Run create_tables: all other tables are created fresh, and the two
+        // ALTER TABLE statements add start_day / duration_days to work_blocks.
+        create_tables(&conn).unwrap();
+
+        let model = load_model(&conn).unwrap();
+        let wb_id = WorkBlockId(1);
+        let wb = model.work_blocks.get(&wb_id).expect("legacy block loaded");
+        assert_eq!(wb.name, "legacy task");
+        assert_eq!(wb.start_day, 0.0, "start_day should default to 0.0");
+        assert_eq!(wb.duration_days, 0.0, "duration_days should default to 0.0");
+    }
+
+    #[test]
     fn validate_accepts_valid_model() {
         let mut m = Model::default();
         let w = m.create_world("w");

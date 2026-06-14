@@ -1,5 +1,7 @@
 use std::collections::HashMap;
 
+use bevy::prelude::Resource;
+
 use crate::model::{
     DependencyId, DependencyType, Model, Plan, ResourceBlock, ResourceBlockId, WorkBlockId,
 };
@@ -33,11 +35,15 @@ pub struct ResourceConflict {
     pub contributing_blocks: Vec<WorkBlockId>,
 }
 
-/// All analysis results for a model / plan.
-#[derive(Debug, Clone, Default, PartialEq)]
+/// All analysis results computed from the current model/plan state.
+#[derive(Debug, Clone, Default, PartialEq, Resource)]
 pub struct ScheduleAnalysis {
     pub violations: Vec<DependencyViolation>,
     pub resource_conflicts: Vec<ResourceConflict>,
+    /// Zero-float blocks in topological order (from user placement backward pass).
+    pub critical_path: Vec<WorkBlockId>,
+    /// Total float per block (latest_finish − earliest_finish over user placement).
+    pub float: HashMap<WorkBlockId, f32>,
 }
 
 /// Check every dependency in `model` against the current user-placed
@@ -85,7 +91,12 @@ pub fn analyze_dependencies(model: &Model) -> ScheduleAnalysis {
         }
     }
 
-    ScheduleAnalysis { violations, resource_conflicts: vec![] }
+    ScheduleAnalysis {
+        violations,
+        resource_conflicts: vec![],
+        critical_path: vec![],
+        float: HashMap::new(),
+    }
 }
 
 /// Detect time windows where allocated resource demand exceeds capacity for

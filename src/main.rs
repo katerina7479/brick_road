@@ -31,8 +31,10 @@ fn main() {
         .insert_resource(ClearColor(Color::srgb(0.02, 0.02, 0.05)))
         .insert_resource(CameraTarget::default())
         .insert_resource(blocks::SelectedBlock::default())
+        .insert_resource(analysis::ScheduleAnalysis::default())
         .add_systems(Startup, (setup_db, setup_camera))
         .add_systems(Startup, setup_demo_schedule.after(setup_db))
+        .add_systems(PostStartup, update_analysis.before(blocks::spawn_block_sprites))
         .add_systems(PostStartup, blocks::spawn_block_sprites)
         .add_systems(
             PostStartup,
@@ -40,6 +42,7 @@ fn main() {
         )
         .add_systems(Update, (update_camera_target, smooth_camera).chain())
         .add_systems(Update, draw_grid)
+        .add_systems(Update, update_analysis)
         .add_systems(Update, blocks::handle_block_selection)
         .add_systems(
             Update,
@@ -122,6 +125,37 @@ fn setup_demo_schedule(mut model: ResMut<model::Model>, mut commands: Commands) 
     }
 }
 
+fn update_analysis(
+    model: Res<model::Model>,
+    mut sa: ResMut<analysis::ScheduleAnalysis>,
+) {
+    let dep = analysis::analyze_dependencies(&model);
+    let (critical_path, float) = model
+        .plans
+        .values()
+        .next()
+        .and_then(|plan| {
+            let graph = graph::build_graph(&model, plan);
+            schedule::analyze_user_placement(&model, &graph).ok()
+        })
+        .map(|cpa| (cpa.critical_path, cpa.float))
+        .unwrap_or_default();
+
+    let resource_conflicts = model
+        .plans
+        .values()
+        .next()
+        .map(|plan| analysis::analyze_resources(&model, plan))
+        .unwrap_or_default();
+
+    *sa = analysis::ScheduleAnalysis {
+        violations: dep.violations,
+        resource_conflicts,
+        critical_path,
+        float,
+    };
+}
+
 fn side_panel_ui(
     mut contexts: EguiContexts,
     selected: Res<blocks::SelectedBlock>,
@@ -134,6 +168,27 @@ fn side_panel_ui(
         .min_width(220.0)
         .show(ctx, |ui| {
             ui.heading("brick_road");
+            ui.separator();
+
+            if ui.button("Auto-schedule").clicked() {
+                let plan_id = schedule.plan_id;
+                if let Some(plan) = model.plans.get(&plan_id).cloned() {
+                    let dep_graph = graph::build_graph(&model, &plan);
+                    if let Ok(new_sched) = schedule::forward_pass(&model, &plan, &dep_graph) {
+                        for sb in new_sched.blocks.values() {
+                            if let Some(wb) = model.work_blocks.get_mut(&sb.work_block_id) {
+                                wb.start_day = sb.start_day;
+                                wb.duration_days = sb.duration_days;
+                            }
+                        }
+                        *schedule = new_sched;
+                    }
+                }
+                if let Err(e) = db::save_model(&conn, &model) {
+                    error!("save_model failed: {e}");
+                }
+            }
+
             ui.separator();
 
             let Some(sel_id) = selected.0 else {
@@ -187,16 +242,9 @@ fn side_panel_ui(
                 if let Some(wb) = model.work_blocks.get_mut(&sel_id) {
                     wb.estimate.most_likely = most_likely;
                 }
-                let plan_id = schedule.plan_id;
-                if let Some(plan) = model.plans.get(&plan_id).cloned() {
-                    let dep_graph = graph::build_graph(&model, &plan);
-                    if let Ok(new_sched) = schedule::forward_pass(&model, &plan, &dep_graph) {
-                        *schedule = new_sched;
-                    }
+                if let Err(e) = db::save_model(&conn, &model) {
+                    error!("save_model failed: {e}");
                 }
-            }
-            if let Err(e) = db::save_model(&conn, &model) {
-                error!("save_model failed: {e}");
             }
         });
 }
