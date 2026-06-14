@@ -413,7 +413,6 @@ pub fn sync_block_labels(
 /// Clicking the currently selected block deselects it; single-clicking empty
 /// space deselects; double-clicking empty space (within 350 ms) creates a block.
 #[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_arguments)]
 pub fn handle_block_selection(
     mut egui_ctx: EguiContexts,
     windows: Query<&Window>,
