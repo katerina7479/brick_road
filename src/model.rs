@@ -235,6 +235,12 @@ impl Model {
         id
     }
 
+    /// Sets the internal ID counter. Used by load_model after deserialising
+    /// to ensure new IDs don't collide with any already stored in the DB.
+    pub fn set_next_id(&mut self, id: u64) {
+        self.next_id = id;
+    }
+
     // --- Accessors ---
 
     pub fn get_work_block(&self, id: WorkBlockId) -> Option<&WorkBlock> {
