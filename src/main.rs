@@ -206,6 +206,9 @@ fn update_analysis(
     model: Res<model::Model>,
     mut sa: ResMut<analysis::ScheduleAnalysis>,
 ) {
+    if !model.is_changed() {
+        return;
+    }
     let dep = analysis::analyze_dependencies(&model);
     let (critical_path, float) = model
         .plans
