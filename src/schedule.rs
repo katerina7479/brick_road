@@ -700,8 +700,10 @@ mod tests {
 
     #[test]
     fn dependency_plus_resource_conflict() {
-        // Dependency says B starts after A (day 3). Resource conflict from C
-        // (which uses R from [3, 6)) pushes B to start at day 6.
+        // Topo order (by WorkBlockId) is a < b < c.
+        // c has no deps and schedules first in leveling, occupying R [0, 3).
+        // b has a FS dep on a (min_start = 3) and needs R; at day 3 R is free,
+        // so b starts at 3 — the resource conflict does NOT delay b here.
         let (mut m, pid) = base();
         let r = m.create_resource_block("R", ResourceType::Person);
         let a = m.create_work_block("A", est(3.0)); // no resource
