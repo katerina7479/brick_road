@@ -6,7 +6,6 @@ use bevy_egui::{egui, EguiContexts};
 use bevy::sprite::Anchor;
 
 use crate::{
-    analysis::ScheduleAnalysis,
     constants::{PIXELS_PER_DAY, ROW_HEIGHT},
     db, graph,
     model::{self, Day, DependencyType, Estimate, PlanId, WorkBlockId},
@@ -62,9 +61,6 @@ const PALETTE: &[LinearRgba] = &[
     LinearRgba::new(0.15, 1.50, 1.60, 1.0), // teal
     LinearRgba::new(2.40, 1.60, 0.10, 1.0), // gold
 ];
-
-/// HDR gold applied to every block on the critical path.
-const CRITICAL_PATH_COLOR: LinearRgba = LinearRgba::new(3.0, 2.5, 0.0, 1.0);
 
 /// Tracks the currently selected work block (if any).
 #[derive(Resource, Default)]
@@ -139,7 +135,6 @@ pub struct BlockSprite {
 /// current by `sync_description_dots`.
 pub fn reconcile_block_sprites(
     mut commands: Commands,
-    sa: Res<ScheduleAnalysis>,
     model: Res<model::Model>,
     visible_blocks: Res<schedule::VisibleBlocks>,
     mut sprite_map: ResMut<BlockSpriteMap>,
@@ -149,8 +144,6 @@ pub fn reconcile_block_sprites(
         return;
     }
 
-    let on_critical_path: std::collections::HashSet<WorkBlockId> =
-        sa.critical_path.iter().copied().collect();
     let new_id_set: std::collections::HashSet<WorkBlockId> =
         visible_blocks.ids.iter().copied().collect();
 
@@ -190,8 +183,6 @@ pub fn reconcile_block_sprites(
 
             let color = if let Some([r, g, b]) = wb.color {
                 Color::from(LinearRgba::new(r, g, b, 1.0))
-            } else if on_critical_path.contains(&id) {
-                Color::from(LinearRgba::new(3.0, 2.2, 0.1, 1.0))
             } else {
                 Color::from(PALETTE[row.rem_euclid(PALETTE.len() as i32) as usize])
             };
@@ -340,7 +331,6 @@ pub fn sync_description_dots(
 ///   2. Selection 2× — block is the currently selected block
 ///   3. Palette default
 pub fn sync_block_sprites(
-    sa: Res<ScheduleAnalysis>,
     model: Res<model::Model>,
     selected: Res<SelectedBlock>,
     today: Res<schedule::TodayMarker>,
@@ -353,9 +343,6 @@ pub fn sync_block_sprites(
         .and_then(|p| if let Projection::Orthographic(o) = p { Some(o.scale) } else { None })
         .unwrap_or(1.0);
     let min_width = 8.0 * ortho_scale;
-
-    let on_critical: std::collections::HashSet<WorkBlockId> =
-        sa.critical_path.iter().copied().collect();
 
     for (block_sprite, mut transform, mut sprite) in &mut query {
         let Some(wb) = model.work_blocks.get(&block_sprite.work_block_id) else {
@@ -373,11 +360,9 @@ pub fn sync_block_sprites(
 
         let base = PALETTE[block_sprite.row.rem_euclid(PALETTE.len() as i32) as usize];
         let id = block_sprite.work_block_id;
-        // Color hierarchy: user color > critical-path gold > selected highlight > palette.
+        // Color hierarchy: user color > selected highlight > palette.
         sprite.color = if let Some([r, g, b]) = wb.color {
             Color::from(LinearRgba::new(r, g, b, 1.0))
-        } else if on_critical.contains(&id) {
-            Color::from(CRITICAL_PATH_COLOR)
         } else if selected.0 == Some(id) {
             Color::from(LinearRgba::new(
                 base.red * 2.0,
