@@ -1075,8 +1075,6 @@ fn side_panel_ui(
             ui.label("Calendar");
 
             let cal_start = model.calendar.start_date;
-            let cal_wdpw = model.calendar.working_days_per_week;
-            let mut new_wdpw = cal_wdpw;
 
             // Persistent buffer so partial typing isn't reset each frame from the model.
             let buf = date_edit_buf.get_or_insert_with(|| cal_start.format("%Y-%m-%d").to_string());
@@ -1097,20 +1095,6 @@ fn side_panel_ui(
                 *buf = cal_start.format("%Y-%m-%d").to_string();
             }
 
-            ui.label("Working Days / Week");
-            ui.horizontal(|ui| {
-                for days in [4u8, 5, 6, 7] {
-                    if ui.radio(cal_wdpw == days, days.to_string()).clicked() {
-                        new_wdpw = days;
-                    }
-                }
-            });
-            if new_wdpw != cal_wdpw {
-                model.calendar.working_days_per_week = new_wdpw;
-                if let Err(e) = db::save_model(&conn, &model) {
-                    error!("save_model failed: {e}");
-                }
-            }
 
             ui.separator();
 
