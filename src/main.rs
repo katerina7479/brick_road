@@ -31,7 +31,7 @@ fn main() {
             ..default()
         }))
         .add_plugins(EguiPlugin::default())
-        .insert_resource(ClearColor(Color::srgb(0.07, 0.08, 0.11)))
+        .insert_resource(ClearColor(Color::srgb(0.08, 0.07, 0.065)))
         .insert_resource(CameraTarget::default())
         .insert_resource(blocks::SelectedBlock::default())
         .insert_resource(blocks::NameEditState::default())
@@ -344,6 +344,19 @@ fn sync_weekend_bands(
 #[derive(Component)]
 struct PeriodBand;
 
+/// Subtle, desaturated quarter tints for the background period bands. Replaces
+/// the old saturated teal/amber/violet quarter colors that read as muddy green
+/// and brown. Low alpha so quarters register as gentle tonal shifts over the
+/// warm-dark canvas instead of loud color blocks.
+const QUARTER_TINTS: [[f32; 3]; 4] = [
+    [0.42, 0.47, 0.60], // Q1 — cool slate
+    [0.44, 0.54, 0.57], // Q2 — muted slate-teal
+    [0.60, 0.52, 0.44], // Q3 — warm taupe
+    [0.52, 0.46, 0.58], // Q4 — dusty mauve
+];
+/// Base alpha for the quarter tints (odd months within a quarter use 0.7×).
+const QUARTER_TINT_ALPHA: f32 = 0.05;
+
 /// Returns (x_center, width, rgba_color) for each month band in the plan span.
 fn period_band_spans(config: &model::CalendarConfig, span_days: i32) -> Vec<(f32, f32, [f32; 4])> {
     let mut result = Vec::new();
@@ -383,10 +396,14 @@ fn period_band_spans(config: &model::CalendarConfig, span_days: i32) -> Vec<(f32
         if width > 0.0 {
             let quarter = ((month - 1) / 3) as usize;
             let month_in_quarter = (month - 1) % 3;
-            let mut color = config.quarter_colors[quarter];
-            if month_in_quarter % 2 == 1 {
-                color[3] *= 0.8;
-            }
+            let tint = QUARTER_TINTS[quarter % 4];
+            // Subtle within-quarter texture: dim the odd months slightly.
+            let alpha = if month_in_quarter % 2 == 1 {
+                QUARTER_TINT_ALPHA * 0.7
+            } else {
+                QUARTER_TINT_ALPHA
+            };
+            let color = [tint[0], tint[1], tint[2], alpha];
             result.push((x_start + width * 0.5, width, color));
         }
 
@@ -1206,6 +1223,7 @@ fn top_bar_ui(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::NaiveDate;
 
     #[test]
     fn week_bands_at_every_wdpw_boundary() {
@@ -1262,15 +1280,14 @@ mod tests {
     }
 
     #[test]
-    fn period_bands_quarter_colors_match_config() {
+    fn period_bands_use_builtin_quarter_tints() {
         let mut cfg = model::CalendarConfig::default();
         cfg.start_date = NaiveDate::from_ymd_opt(2025, 1, 1).unwrap();
-        cfg.quarter_colors[0] = [1.0, 0.0, 0.0, 0.1];
         let bands = period_band_spans(&cfg, 25);
-        // All bands in Jan (Q1, first month) should have R=1.0.
-        for (_, _, color) in &bands {
-            assert!((color[0] - 1.0).abs() < 1e-5, "Q1 R channel should be 1.0");
-        }
+        // Jan is Q1, first month → Q1 tint at full QUARTER_TINT_ALPHA.
+        let (_, _, color) = bands[0];
+        assert_eq!([color[0], color[1], color[2]], QUARTER_TINTS[0]);
+        assert!((color[3] - QUARTER_TINT_ALPHA).abs() < 1e-5);
     }
 
     #[test]
@@ -1280,11 +1297,11 @@ mod tests {
         // Span enough to cover Jan and Feb (both Q1: month_in_quarter 0 and 1).
         let bands = period_band_spans(&cfg, 45);
         // Jan is month_in_quarter=0 (even): full alpha.
-        // Feb is month_in_quarter=1 (odd): 0.8× alpha.
-        let base_alpha = cfg.quarter_colors[0][3];
+        // Feb is month_in_quarter=1 (odd): 0.7× alpha.
+        let base_alpha = QUARTER_TINT_ALPHA;
         let jan = &bands[0];
         let feb = &bands[1];
         assert!((jan.2[3] - base_alpha).abs() < 1e-5, "Jan should have full alpha");
-        assert!((feb.2[3] - base_alpha * 0.8).abs() < 1e-5, "Feb should have 0.8× alpha");
+        assert!((feb.2[3] - base_alpha * 0.7).abs() < 1e-5, "Feb should have 0.7× alpha");
     }
 }
