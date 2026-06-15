@@ -38,7 +38,7 @@ fn main() {
         .insert_resource(blocks::DragState::default())
         .insert_resource(blocks::ResizeDragState::default())
         .insert_resource(blocks::DepDragState::default())
-        .insert_resource(blocks::DeleteConfirmState::default())
+        .insert_resource(blocks::UndoStack::default())
         .insert_resource(blocks::CreateModeState::default())
         .insert_resource(schedule::ViewScope::default())
         .insert_resource(schedule::TimelineViewMode::default())
@@ -99,13 +99,16 @@ fn main() {
                 .before(blocks::sync_conflict_overlays)
                 .before(blocks::sync_uncertainty_overlays)
                 .before(blocks::draw_dependency_edges)
-                .before(blocks::draw_block_handles),
+                .before(blocks::draw_block_handles)
+                .after(blocks::handle_block_delete)
+                .after(blocks::handle_undo),
         )
         .add_systems(Update, blocks::handle_name_edit)
         .add_systems(
             Update,
             blocks::handle_block_delete.after(blocks::handle_name_edit),
         )
+        .add_systems(Update, blocks::handle_undo)
         .add_systems(
             Update,
             blocks::handle_create_mode_toggle.after(blocks::handle_name_edit),
@@ -230,7 +233,6 @@ fn main() {
         .add_systems(EguiPrimaryContextPass, side_panel_ui)
         .add_systems(EguiPrimaryContextPass, resource_row_labels_ui)
         .add_systems(EguiPrimaryContextPass, blocks::draw_name_edit_overlay)
-        .add_systems(EguiPrimaryContextPass, blocks::draw_delete_confirm_overlay)
         .add_systems(EguiPrimaryContextPass, blocks::draw_create_mode_overlay)
         .add_systems(EguiPrimaryContextPass, blocks::draw_block_tooltip)
         .run();

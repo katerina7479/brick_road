@@ -715,6 +715,7 @@ pub fn handle_block_selection(
     mut last_empty_click: Local<f32>,
     dep_drag: Res<DepDragState>,
     active_schedule: Res<schedule::Schedule>,
+    mode: Res<schedule::TimelineViewMode>,
 ) {
     // Yield when a dep-handle drag is in progress.
     if dep_drag.from.is_some() {
@@ -747,21 +748,74 @@ pub fn handle_block_selection(
         return;
     };
 
-    // Hit-test each block sprite against its axis-aligned bounding rect.
+    // Hit-test: task view uses BlockSprite entities; resource view uses gizmo geometry.
     let mut clicked: Option<WorkBlockId> = None;
-    for (block_sprite, transform, sprite) in &block_query {
-        let Some(size) = sprite.custom_size else {
-            continue;
-        };
-        let center = transform.translation.truncate();
-        let half = size * 0.5;
-        if world_pos.x >= center.x - half.x
-            && world_pos.x <= center.x + half.x
-            && world_pos.y >= center.y - half.y
-            && world_pos.y <= center.y + half.y
-        {
-            clicked = Some(block_sprite.work_block_id);
-            break;
+    if *mode == schedule::TimelineViewMode::Task {
+        for (block_sprite, transform, sprite) in &block_query {
+            let Some(size) = sprite.custom_size else {
+                continue;
+            };
+            let center = transform.translation.truncate();
+            let half = size * 0.5;
+            if world_pos.x >= center.x - half.x
+                && world_pos.x <= center.x + half.x
+                && world_pos.y >= center.y - half.y
+                && world_pos.y <= center.y + half.y
+            {
+                clicked = Some(block_sprite.work_block_id);
+                break;
+            }
+        }
+    } else if *mode == schedule::TimelineViewMode::Resource {
+        // Replicate draw_resource_timeline geometry: allocated bars per resource row,
+        // then the unassigned row.
+        let bar_h = ROW_HEIGHT * 0.65;
+        if let Some(plan) = model.plans.get(&active_schedule.plan_id) {
+            let mut resources: Vec<_> = model.resource_blocks.values().collect();
+            resources.sort_by_key(|r| r.id.0);
+
+            'resource_rows: for (row_idx, resource) in resources.iter().enumerate() {
+                let row_y = -(row_idx as f32) * ROW_HEIGHT;
+                for alloc in &plan.allocations {
+                    if alloc.resource_id != resource.id {
+                        continue;
+                    }
+                    if let Some(wb) = model.work_blocks.get(&alloc.work_block_id) {
+                        let x0 = wb.start_day as f32 * PIXELS_PER_DAY;
+                        let x1 = (wb.start_day + wb.duration_days) as f32 * PIXELS_PER_DAY;
+                        if world_pos.x >= x0
+                            && world_pos.x <= x1.max(x0 + 4.0)
+                            && world_pos.y >= row_y - bar_h * 0.5
+                            && world_pos.y <= row_y + bar_h * 0.5
+                        {
+                            clicked = Some(alloc.work_block_id);
+                            break 'resource_rows;
+                        }
+                    }
+                }
+            }
+
+            // Unassigned row: placed blocks with no allocation in this plan.
+            if clicked.is_none() {
+                let allocated: HashSet<WorkBlockId> =
+                    plan.allocations.iter().map(|a| a.work_block_id).collect();
+                let unassigned_row = resources.len();
+                let row_y = -(unassigned_row as f32) * ROW_HEIGHT;
+                for wb in model.work_blocks.values() {
+                    if wb.duration_days > 0 && !allocated.contains(&wb.id) {
+                        let x0 = wb.start_day as f32 * PIXELS_PER_DAY;
+                        let x1 = (wb.start_day + wb.duration_days) as f32 * PIXELS_PER_DAY;
+                        if world_pos.x >= x0
+                            && world_pos.x <= x1.max(x0 + 4.0)
+                            && world_pos.y >= row_y - bar_h * 0.5
+                            && world_pos.y <= row_y + bar_h * 0.5
+                        {
+                            clicked = Some(wb.id);
+                            break;
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -1811,20 +1865,188 @@ pub fn draw_name_edit_overlay(
     }
 }
 
-/// Tracks a pending block deletion waiting for user confirmation.
-#[derive(Resource, Default)]
-pub struct DeleteConfirmState {
-    pub pending: Option<WorkBlockId>,
+/// Snapshot of everything removed by a single block deletion, enabling undo.
+struct DeletedBlockSnapshot {
+    blocks: Vec<model::WorkBlock>,
+    variants: Vec<model::Variant>,
+    dependencies: Vec<model::Dependency>,
+    /// (plan_id, root_block_ids that were in this plan)
+    plan_roots: Vec<(model::PlanId, Vec<WorkBlockId>)>,
+    /// (plan_id, selected_variants entries for deleted blocks)
+    plan_sel_vars: Vec<(model::PlanId, Vec<(WorkBlockId, model::VariantId)>)>,
+    /// (plan_id, allocations for deleted blocks)
+    plan_allocs: Vec<(model::PlanId, Vec<model::ResourceAllocation>)>,
+    /// (variant_id, child_ids) for surviving variants whose children lists
+    /// contained deleted blocks — needed to restore hierarchy on undo.
+    variant_child_refs: Vec<(model::VariantId, Vec<WorkBlockId>)>,
 }
 
-/// Detects Delete/Backspace key press and queues the selected block for
-/// confirmation. Skipped while a name edit or egui text input is active.
+/// Single-slot undo buffer for block deletions. Holds the most recent deletion;
+/// overwritten on each delete; consumed by undo.
+#[derive(Resource, Default)]
+pub struct UndoStack {
+    last_deletion: Option<DeletedBlockSnapshot>,
+}
+
+fn build_deletion_snapshot(model: &model::Model, id: WorkBlockId) -> DeletedBlockSnapshot {
+    // Mirror the BFS in delete_work_block to find all blocks that will be removed.
+    let mut to_delete: Vec<WorkBlockId> = vec![id];
+    let mut visited: HashSet<WorkBlockId> = HashSet::from([id]);
+    let mut i = 0;
+    while i < to_delete.len() {
+        let cur = to_delete[i];
+        if let Some(wb) = model.work_blocks.get(&cur) {
+            for &var_id in &wb.variants {
+                if let Some(var) = model.variants.get(&var_id) {
+                    for &child_id in &var.children {
+                        if visited.insert(child_id) {
+                            to_delete.push(child_id);
+                        }
+                    }
+                }
+            }
+        }
+        i += 1;
+    }
+    let delete_set: HashSet<WorkBlockId> = to_delete.iter().copied().collect();
+
+    let blocks = to_delete
+        .iter()
+        .filter_map(|&bid| model.work_blocks.get(&bid).cloned())
+        .collect();
+    let variants = model
+        .variants
+        .values()
+        .filter(|v| delete_set.contains(&v.parent))
+        .cloned()
+        .collect();
+    let dependencies = model
+        .dependencies
+        .values()
+        .filter(|d| delete_set.contains(&d.predecessor) || delete_set.contains(&d.successor))
+        .cloned()
+        .collect();
+
+    let mut plan_roots = Vec::new();
+    let mut plan_sel_vars = Vec::new();
+    let mut plan_allocs = Vec::new();
+    for (&plan_id, plan) in &model.plans {
+        let roots: Vec<WorkBlockId> =
+            plan.root_blocks.iter().filter(|&&b| delete_set.contains(&b)).copied().collect();
+        if !roots.is_empty() {
+            plan_roots.push((plan_id, roots));
+        }
+        let sel: Vec<(WorkBlockId, model::VariantId)> = plan
+            .selected_variants
+            .iter()
+            .filter(|(b, _)| delete_set.contains(b))
+            .map(|(&b, &v)| (b, v))
+            .collect();
+        if !sel.is_empty() {
+            plan_sel_vars.push((plan_id, sel));
+        }
+        let allocs: Vec<model::ResourceAllocation> = plan
+            .allocations
+            .iter()
+            .filter(|a| delete_set.contains(&a.work_block_id))
+            .cloned()
+            .collect();
+        if !allocs.is_empty() {
+            plan_allocs.push((plan_id, allocs));
+        }
+    }
+
+    // Capture references from surviving variants (not owned by deleted blocks)
+    // whose children lists include deleted blocks — delete_work_block strips
+    // these but restore needs to re-add them.
+    let variant_child_refs = model
+        .variants
+        .iter()
+        .filter(|(_, v)| !delete_set.contains(&v.parent))
+        .filter_map(|(&vid, v)| {
+            let refs: Vec<WorkBlockId> = v
+                .children
+                .iter()
+                .filter(|&&b| delete_set.contains(&b))
+                .copied()
+                .collect();
+            if refs.is_empty() { None } else { Some((vid, refs)) }
+        })
+        .collect();
+
+    DeletedBlockSnapshot {
+        blocks,
+        variants,
+        dependencies,
+        plan_roots,
+        plan_sel_vars,
+        plan_allocs,
+        variant_child_refs,
+    }
+}
+
+fn restore_deletion_snapshot(model: &mut model::Model, snap: DeletedBlockSnapshot) {
+    for wb in snap.blocks {
+        model.work_blocks.insert(wb.id, wb);
+    }
+    for var in snap.variants {
+        model.variants.insert(var.id, var);
+    }
+    for dep in snap.dependencies {
+        model.dependencies.insert(dep.id, dep);
+    }
+    for (plan_id, roots) in snap.plan_roots {
+        if let Some(plan) = model.plans.get_mut(&plan_id) {
+            for bid in roots {
+                if !plan.root_blocks.contains(&bid) {
+                    plan.root_blocks.push(bid);
+                }
+            }
+        }
+    }
+    for (plan_id, sel_vars) in snap.plan_sel_vars {
+        if let Some(plan) = model.plans.get_mut(&plan_id) {
+            for (bid, vid) in sel_vars {
+                plan.selected_variants.insert(bid, vid);
+            }
+        }
+    }
+    for (plan_id, allocs) in snap.plan_allocs {
+        if let Some(plan) = model.plans.get_mut(&plan_id) {
+            for alloc in allocs {
+                let already = plan
+                    .allocations
+                    .iter()
+                    .any(|a| a.work_block_id == alloc.work_block_id && a.resource_id == alloc.resource_id);
+                if !already {
+                    plan.allocations.push(alloc);
+                }
+            }
+        }
+    }
+    for (vid, children) in snap.variant_child_refs {
+        if let Some(var) = model.variants.get_mut(&vid) {
+            for bid in children {
+                if !var.children.contains(&bid) {
+                    var.children.push(bid);
+                }
+            }
+        }
+    }
+}
+
+/// Detects Delete/Backspace and immediately removes the selected block from the
+/// model. Runs in Update BEFORE `update_visible_blocks` so sprite reconciliation
+/// fires in the same frame — this avoids the timing bug where a deletion in
+/// `EguiPrimaryContextPass` would be invisible to `is_changed()` the next frame.
 pub fn handle_block_delete(
     mut egui_ctx: EguiContexts,
     keyboard: Res<ButtonInput<KeyCode>>,
-    selected: Res<SelectedBlock>,
+    mut selected: ResMut<SelectedBlock>,
     name_edit: Res<NameEditState>,
-    mut delete_confirm: ResMut<DeleteConfirmState>,
+    mut model: ResMut<model::Model>,
+    mut undo: ResMut<UndoStack>,
+    conn: NonSend<rusqlite::Connection>,
 ) {
     if name_edit.editing.is_some() {
         return;
@@ -1836,24 +2058,43 @@ pub fn handle_block_delete(
     }
     if keyboard.just_pressed(KeyCode::Delete) || keyboard.just_pressed(KeyCode::Backspace) {
         if let Some(id) = selected.0 {
-            delete_confirm.pending = Some(id);
+            undo.last_deletion = Some(build_deletion_snapshot(&model, id));
+            delete_work_block(&mut model, id);
+            if let Err(e) = db::save_model(&conn, &model) {
+                error!("save_model failed: {e}");
+            }
+            selected.0 = None;
         }
     }
 }
 
-/// Shows a confirmation dialog while `DeleteConfirmState::pending` is set.
-/// On confirm: removes the block and all references from the model, persists to
-/// DB, and clears the selection. On cancel: dismisses without deleting.
-/// Returns true if `id` has any variant with at least one child work block.
-fn has_variant_children(model: &model::Model, id: WorkBlockId) -> bool {
-    model
-        .work_blocks
-        .get(&id)
-        .is_some_and(|wb| {
-            wb.variants
-                .iter()
-                .any(|&vid| model.variants.get(&vid).is_some_and(|v| !v.children.is_empty()))
-        })
+/// Restores the most recent block deletion on Ctrl+Z / Cmd+Z.
+pub fn handle_undo(
+    mut egui_ctx: EguiContexts,
+    keyboard: Res<ButtonInput<KeyCode>>,
+    name_edit: Res<NameEditState>,
+    mut model: ResMut<model::Model>,
+    mut undo: ResMut<UndoStack>,
+    conn: NonSend<rusqlite::Connection>,
+) {
+    if name_edit.editing.is_some() {
+        return;
+    }
+    if let Ok(ctx) = egui_ctx.ctx_mut() {
+        if ctx.wants_keyboard_input() {
+            return;
+        }
+    }
+    let ctrl = keyboard.any_pressed([KeyCode::ControlLeft, KeyCode::ControlRight])
+        || keyboard.any_pressed([KeyCode::SuperLeft, KeyCode::SuperRight]);
+    if ctrl && keyboard.just_pressed(KeyCode::KeyZ) {
+        if let Some(snap) = undo.last_deletion.take() {
+            restore_deletion_snapshot(&mut model, snap);
+            if let Err(e) = db::save_model(&conn, &model) {
+                error!("save_model failed: {e}");
+            }
+        }
+    }
 }
 
 /// Remove a work block and all of its descendants (variants' children,
@@ -1909,59 +2150,6 @@ pub fn delete_work_block(model: &mut model::Model, id: WorkBlockId) {
     model.variants.retain(|_, v| !delete_set.contains(&v.parent));
 }
 
-pub fn draw_delete_confirm_overlay(
-    mut contexts: EguiContexts,
-    mut delete_confirm: ResMut<DeleteConfirmState>,
-    mut model: ResMut<model::Model>,
-    mut selected: ResMut<SelectedBlock>,
-    conn: NonSend<rusqlite::Connection>,
-) {
-    let Some(pending_id) = delete_confirm.pending else { return };
-
-    let block_name = model
-        .work_blocks
-        .get(&pending_id)
-        .map(|wb| wb.name.clone())
-        .unwrap_or_else(|| "Unknown".to_string());
-    let has_children = has_variant_children(&model, pending_id);
-
-    let Ok(ctx) = contexts.ctx_mut() else { return };
-
-    let mut confirmed = false;
-    let mut cancelled = false;
-
-    egui::Window::new("Confirm Delete")
-        .collapsible(false)
-        .resizable(false)
-        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-        .show(ctx, |ui| {
-            ui.label(format!("Delete \"{}\"?", block_name));
-            ui.label("This will also remove all its dependencies.");
-            if has_children {
-                ui.label("All variant child blocks will be deleted too.");
-            }
-            ui.separator();
-            ui.horizontal(|ui| {
-                if ui.button("Delete").clicked() {
-                    confirmed = true;
-                }
-                if ui.button("Cancel").clicked() {
-                    cancelled = true;
-                }
-            });
-        });
-
-    if confirmed {
-        delete_work_block(&mut model, pending_id);
-        if let Err(e) = db::save_model(&conn, &model) {
-            error!("save_model failed: {e}");
-        }
-        selected.0 = None;
-        delete_confirm.pending = None;
-    } else if cancelled {
-        delete_confirm.pending = None;
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -2044,23 +2232,6 @@ mod tests {
         assert!(m.variants.is_empty());
     }
 
-    #[test]
-    fn has_variant_children_false_when_no_variants() {
-        let mut m = Model::default();
-        let a = m.create_work_block("A", est());
-        assert!(!has_variant_children(&m, a));
-    }
-
-    #[test]
-    fn has_variant_children_true_when_has_children() {
-        let mut m = Model::default();
-        let parent = m.create_work_block("P", est());
-        let var = m.create_variant("V", parent);
-        let child = m.create_work_block("C", est());
-        m.work_blocks.get_mut(&parent).unwrap().variants.push(var);
-        m.variants.get_mut(&var).unwrap().children.push(child);
-        assert!(has_variant_children(&m, parent));
-    }
 }
 
 /// State for rapid block creation mode (activated with `N`).
