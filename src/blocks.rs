@@ -13,7 +13,7 @@ use crate::{
     schedule::{self, ViewScope},
 };
 
-const BLOCK_HEIGHT: f32 = 44.0;
+const BLOCK_HEIGHT: f32 = 28.0;
 /// Minimum logical block width (px) below which the inline name label is hidden.
 const MIN_LABEL_WIDTH: f32 = 20.0;
 /// Approximate pixel width per character at font_size 13 (used for truncation).
