@@ -269,9 +269,11 @@ fn draw_grid(
 
     gizmos.line_2d(Vec2::new(x_left, 0.0), Vec2::new(x_right, 0.0), baseline_color);
 
-    // Prominent today marker — HDR color triggers Bloom.
+    // Prominent today marker — draw 3 lines 2px apart so it reads as a thick bar at all zooms.
     let x_today = today.day as f32 * PIXELS_PER_DAY;
-    gizmos.line_2d(Vec2::new(x_today, y_bottom), Vec2::new(x_today, y_top), today_line_color);
+    for dx in [-2.0_f32, 0.0, 2.0] {
+        gizmos.line_2d(Vec2::new(x_today + dx, y_bottom), Vec2::new(x_today + dx, y_top), today_line_color);
+    }
 }
 
 /// Marker for weekend and holiday band sprites behind the timeline grid.
@@ -857,6 +859,7 @@ fn top_bar_ui(
     scope: Res<schedule::ViewScope>,
     windows: Query<&Window>,
     mut view_mode: ResMut<schedule::TimelineViewMode>,
+    today: Res<schedule::TodayMarker>,
 ) {
     let Ok(ctx) = contexts.ctx_mut() else { return };
     egui::TopBottomPanel::top("top_bar")
@@ -890,6 +893,10 @@ fn top_bar_ui(
                         *view_mode = next;
                     }
                     ui.separator();
+                    if ui.small_button("→ Today").clicked() {
+                        let x = today.day as f32 * PIXELS_PER_DAY;
+                        target.pos.x = x;
+                    }
                     if ui.small_button("Fit to view [F]").clicked() {
                         if let Some(new_target) = camera::fit_to_blocks(&model, &scope, &windows) {
                             *target = new_target;
@@ -930,6 +937,7 @@ fn side_panel_ui(
     mut camera_target: ResMut<CameraTarget>,
     mut compare_plan: Local<Option<model::PlanId>>,
     today: Res<schedule::TodayMarker>,
+    mut date_edit_buf: Local<Option<String>>,
 ) {
     let Ok(ctx) = contexts.ctx_mut() else { return };
     egui::SidePanel::right("side_panel")
@@ -1067,19 +1075,26 @@ fn side_panel_ui(
             ui.label("Calendar");
 
             let cal_start = model.calendar.start_date;
-            let mut date_str = cal_start.format("%Y-%m-%d").to_string();
+
+            // Persistent buffer so partial typing isn't reset each frame from the model.
+            let buf = date_edit_buf.get_or_insert_with(|| cal_start.format("%Y-%m-%d").to_string());
 
             ui.label("Plan Start Date");
-            let date_changed = ui.text_edit_singleline(&mut date_str).changed();
-
-            if date_changed {
-                if let Ok(d) = NaiveDate::parse_from_str(&date_str, "%Y-%m-%d") {
+            let resp = ui.text_edit_singleline(buf);
+            if resp.lost_focus() {
+                if let Ok(d) = NaiveDate::parse_from_str(buf.as_str(), "%Y-%m-%d") {
                     model.calendar.start_date = d;
                     if let Err(e) = db::save_model(&conn, &model) {
                         error!("save_model failed: {e}");
                     }
                 }
+                // Reset buffer to canonical form (valid or revert to model value).
+                *buf = model.calendar.start_date.format("%Y-%m-%d").to_string();
+            } else if !resp.has_focus() {
+                // Keep buffer in sync when model changes externally (e.g. after load).
+                *buf = cal_start.format("%Y-%m-%d").to_string();
             }
+
 
             ui.separator();
 
