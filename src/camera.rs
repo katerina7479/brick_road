@@ -168,9 +168,11 @@ pub fn fit_to_blocks(
         .iter()
         .map(|wb| (wb.start_day + wb.duration_days) as f32 * PIXELS_PER_DAY)
         .fold(f32::NEG_INFINITY, f32::max);
-    let n = visible.len() as f32;
-    let y_max = ROW_HEIGHT * 0.5;
-    let y_min = -(n - 1.0) * ROW_HEIGHT - ROW_HEIGHT * 0.5;
+    // Rows are explicit and can be sparse/negative, so frame the real lane range.
+    let min_row = visible.iter().map(|wb| wb.row).min().unwrap_or(0) as f32;
+    let max_row = visible.iter().map(|wb| wb.row).max().unwrap_or(0) as f32;
+    let y_max = -min_row * ROW_HEIGHT + ROW_HEIGHT * 0.5;
+    let y_min = -max_row * ROW_HEIGHT - ROW_HEIGHT * 0.5;
 
     let x_span = (x_max - x_min).max(1.0);
     let y_span = (y_max - y_min).max(1.0);

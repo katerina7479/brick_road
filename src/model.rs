@@ -50,6 +50,10 @@ pub struct WorkBlock {
     /// User-defined placement: duration in days.
     /// 0.0 until the user manually sizes the block.
     pub duration_days: Day,
+    /// User-defined vertical lane. World-Y = `-row * ROW_HEIGHT`, so `0` is the
+    /// baseline, negative rows sit above it and positive rows below. Freeform:
+    /// set on creation and by vertical drag, never derived from sort order.
+    pub row: i32,
     /// Optional user-defined HDR color [R, G, B] in linear space.
     /// Values > 1.0 trigger bloom. `None` falls back to the palette default.
     pub color: Option<[f32; 3]>,
@@ -274,6 +278,7 @@ impl Model {
                 variants: vec![],
                 start_day: 0,
                 duration_days: 0,
+                row: 0,
                 color: None,
                 description: String::new(),
                 priority: 1,

@@ -24,6 +24,7 @@ pub fn create_tables(conn: &Connection) -> Result<()> {
         "ALTER TABLE work_blocks ADD COLUMN description TEXT NOT NULL DEFAULT ''",
         "ALTER TABLE work_blocks ADD COLUMN priority INTEGER NOT NULL DEFAULT 1",
         "ALTER TABLE work_blocks ADD COLUMN t_shirt_size TEXT",
+        "ALTER TABLE work_blocks ADD COLUMN block_row INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE plans ADD COLUMN branch_start_day INTEGER",
     ] {
         match conn.execute_batch(sql) {
@@ -147,8 +148,8 @@ pub fn save_model(conn: &Connection, model: &Model) -> Result<()> {
                  (id, name, estimate_most_likely, estimate_optimistic,
                   estimate_pessimistic, estimate_confidence,
                   start_day, duration_days, color_r, color_g, color_b, description, priority,
-                  t_shirt_size)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+                  t_shirt_size, block_row)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
              ON CONFLICT(id) DO UPDATE SET
                  name = excluded.name,
                  estimate_most_likely = excluded.estimate_most_likely,
@@ -162,7 +163,8 @@ pub fn save_model(conn: &Connection, model: &Model) -> Result<()> {
                  color_b = excluded.color_b,
                  description = excluded.description,
                  priority = excluded.priority,
-                 t_shirt_size = excluded.t_shirt_size",
+                 t_shirt_size = excluded.t_shirt_size,
+                 block_row = excluded.block_row",
             (
                 wb.id.0 as i64,
                 &wb.name,
@@ -178,6 +180,7 @@ pub fn save_model(conn: &Connection, model: &Model) -> Result<()> {
                 &wb.description,
                 wb.priority as i64,
                 &wb.t_shirt_size,
+                wb.row as i64,
             ),
         )?;
     }
@@ -502,7 +505,7 @@ pub fn load_model(conn: &Connection) -> Result<Model> {
             "SELECT id, name, estimate_most_likely, estimate_optimistic,
                     estimate_pessimistic, estimate_confidence,
                     start_day, duration_days, color_r, color_g, color_b, description, priority,
-                    t_shirt_size
+                    t_shirt_size, block_row
              FROM work_blocks",
         )?;
         let rows = stmt.query_map([], |row| {
@@ -521,10 +524,11 @@ pub fn load_model(conn: &Connection) -> Result<Model> {
                 row.get::<_, String>(11)?,
                 row.get::<_, i64>(12)?,
                 row.get::<_, Option<String>>(13)?,
+                row.get::<_, i64>(14)?,
             ))
         })?;
         for row in rows {
-            let (id, name, ml, opt, pes, conf, start_day, duration_days, cr, cg, cb, description, priority, t_shirt_size) = row?;
+            let (id, name, ml, opt, pes, conf, start_day, duration_days, cr, cg, cb, description, priority, t_shirt_size, block_row) = row?;
             let color = match (cr, cg, cb) {
                 (Some(r), Some(g), Some(b)) => Some([r as f32, g as f32, b as f32]),
                 _ => None,
@@ -544,6 +548,7 @@ pub fn load_model(conn: &Connection) -> Result<Model> {
                     variants: vec![],
                     start_day: start_day as i32,
                     duration_days: duration_days as i32,
+                    row: block_row as i32,
                     color,
                     description,
                     priority: priority.clamp(0, 3) as u8,
@@ -1202,6 +1207,7 @@ mod tests {
         let wb = m.work_blocks.get_mut(&id).unwrap();
         wb.start_day = 7;
         wb.duration_days = 3;
+        wb.row = -2; // negative lane (above the baseline) must survive too
 
         save_model(&conn, &m).unwrap();
         let loaded = load_model(&conn).unwrap();
@@ -1209,6 +1215,7 @@ mod tests {
         let loaded_wb = loaded.work_blocks.get(&id).unwrap();
         assert_eq!(loaded_wb.start_day, 7);
         assert_eq!(loaded_wb.duration_days, 3);
+        assert_eq!(loaded_wb.row, -2);
         assert_eq!(m.work_blocks, loaded.work_blocks);
     }
 

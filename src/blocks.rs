@@ -256,7 +256,8 @@ pub struct NameEditState {
 #[derive(Component)]
 pub struct BlockSprite {
     pub work_block_id: WorkBlockId,
-    pub row: usize,
+    /// Explicit vertical lane (can be negative — above the baseline).
+    pub row: i32,
 }
 
 /// Reconciles `BlockSprite` entities against the current `VisibleBlocks` cache.
@@ -300,36 +301,14 @@ pub fn reconcile_block_sprites(
         }
     }
 
-    // Packed row assignment: greedy interval scheduling so non-overlapping
-    // blocks share a row instead of cascading into a diagonal staircase.
-    // Blocks in visible_blocks.ids are already sorted by start_day, which
-    // satisfies the greedy-earliest-start precondition.
-    let mut row_ends: Vec<Day> = Vec::new();
-    let id_to_row: HashMap<WorkBlockId, usize> = visible_blocks
-        .ids
-        .iter()
-        .filter_map(|&id| {
-            let wb = model.work_blocks.get(&id)?;
-            let row = row_ends
-                .iter()
-                .position(|&end| wb.start_day >= end)
-                .unwrap_or(row_ends.len());
-            let block_end = wb.start_day + wb.duration_days;
-            if row < row_ends.len() {
-                row_ends[row] = block_end;
-            } else {
-                row_ends.push(block_end);
-            }
-            Some((id, row))
-        })
-        .collect();
-
-    // Reconcile each visible block in row order.
+    // Reconcile each visible block at its explicit, user-assigned lane. Rows are
+    // a real persisted field now (freeform), not derived from sort order, so
+    // blocks stay exactly where the user puts them.
     for &id in &visible_blocks.ids {
-        let row = id_to_row.get(&id).copied().unwrap_or(0);
         let Some(wb) = model.work_blocks.get(&id) else {
             continue;
         };
+        let row = wb.row;
 
         if let Some(&entity) = sprite_map.entities.get(&id) {
             // Existing entity: update row in place. Transform and color are
@@ -348,7 +327,7 @@ pub fn reconcile_block_sprites(
             } else if on_critical_path.contains(&id) {
                 Color::from(LinearRgba::new(3.0, 2.2, 0.1, 1.0))
             } else {
-                Color::from(PALETTE[row % PALETTE.len()])
+                Color::from(PALETTE[row.rem_euclid(PALETTE.len() as i32) as usize])
             };
 
             let mut block_cmd = commands.spawn((
@@ -526,7 +505,7 @@ pub fn sync_block_sprites(
         transform.translation.y = y;
         sprite.custom_size = Some(Vec2::new(visual_width, BLOCK_HEIGHT));
 
-        let base = PALETTE[block_sprite.row % PALETTE.len()];
+        let base = PALETTE[block_sprite.row.rem_euclid(PALETTE.len() as i32) as usize];
         let id = block_sprite.work_block_id;
         // Color hierarchy: user color > critical-path gold > selected highlight > palette.
         sprite.color = if let Some([r, g, b]) = wb.color {
@@ -590,7 +569,7 @@ pub fn sync_compare_overlays(
     let Ok(cmp_sched) = schedule::forward_pass(&model, &cmp_plan, &cmp_graph) else { return };
 
     // Build id → row from the active plan's current block sprites.
-    let id_to_row: HashMap<WorkBlockId, usize> = block_sprites
+    let id_to_row: HashMap<WorkBlockId, i32> = block_sprites
         .iter()
         .map(|bs| (bs.work_block_id, bs.row))
         .collect();
@@ -782,9 +761,12 @@ pub fn handle_block_selection(
                 confidence: 0.8,
             };
             let new_id = model.create_work_block("New Block", est);
+            // Spawn at the double-clicked lane; the block stays where you put it.
+            let row = (-world_pos.y / ROW_HEIGHT).round() as i32;
             if let Some(wb) = model.work_blocks.get_mut(&new_id) {
                 wb.start_day = start_day;
                 wb.duration_days = 1;
+                wb.row = row;
             }
             let plan_id = active_schedule.plan_id;
             if let Some(plan) = model.plans.get_mut(&plan_id) {
@@ -993,8 +975,12 @@ pub fn handle_block_drag(
                 .max(0.0)
                 .round() as Day;
             let new_start = new_start.max(branch_min);
+            // Vertical drag snaps the block to whichever lane the cursor is over
+            // (negative rows sit above the baseline).
+            let new_row = (-world_pos.y / ROW_HEIGHT).round() as i32;
             if let Some(wb) = model.work_blocks.get_mut(&id) {
                 wb.start_day = new_start;
+                wb.row = new_row;
             }
         }
         return;
@@ -1028,6 +1014,7 @@ const CONFLICT_PADDING: f32 = 5.0;
 pub fn sync_conflict_overlays(
     mut commands: Commands,
     sa: Res<ScheduleAnalysis>,
+    model: Res<model::Model>,
     visible_blocks: Res<schedule::VisibleBlocks>,
     existing: Query<Entity, With<ConflictOverlay>>,
 ) {
@@ -1039,12 +1026,11 @@ pub fn sync_conflict_overlays(
         return;
     }
 
-    // Row lookup: WorkBlockId → row index (same ordering as block sprites).
-    let row_of: HashMap<WorkBlockId, usize> = visible_blocks
+    // Row lookup: WorkBlockId → its explicit lane.
+    let row_of: HashMap<WorkBlockId, i32> = visible_blocks
         .ids
         .iter()
-        .enumerate()
-        .map(|(i, &id)| (id, i))
+        .filter_map(|&id| model.work_blocks.get(&id).map(|wb| (id, wb.row)))
         .collect();
     let total_rows = visible_blocks.ids.len().max(1);
 
@@ -1055,7 +1041,7 @@ pub fn sync_conflict_overlays(
         }
 
         // Compute the y-center and height to cover contributing block rows.
-        let rows: Vec<usize> = conflict
+        let rows: Vec<i32> = conflict
             .contributing_blocks
             .iter()
             .filter_map(|id| row_of.get(id).copied())
@@ -1143,9 +1129,9 @@ pub fn sync_uncertainty_overlays(
     let mut desired: Vec<Overlay> = Vec::new();
 
     if ortho_scale <= LOD_OVERLAY_HIDE {
-        for (row, &id) in visible_blocks.ids.iter().enumerate() {
+        for &id in &visible_blocks.ids {
             let Some(wb) = model.work_blocks.get(&id) else { continue };
-            let y = -(row as f32) * ROW_HEIGHT;
+            let y = -(wb.row as f32) * ROW_HEIGHT;
             let confidence = wb.estimate.confidence.clamp(0.0, 1.0);
             let tail_alpha = (1.0 - confidence) * 0.55;
 
@@ -1239,7 +1225,7 @@ pub fn sync_past_overlays(
     }
     let mut desired: Vec<Overlay> = Vec::new();
 
-    for (row, &id) in visible_blocks.ids.iter().enumerate() {
+    for &id in &visible_blocks.ids {
         let Some(wb) = model.work_blocks.get(&id) else { continue };
         let end_day = wb.start_day + wb.duration_days;
         if wb.start_day >= today.day || end_day <= today.day {
@@ -1247,7 +1233,7 @@ pub fn sync_past_overlays(
         }
         let past_width = (today.day - wb.start_day) as f32 * PIXELS_PER_DAY;
         let x_left = wb.start_day as f32 * PIXELS_PER_DAY;
-        let y = -(row as f32) * ROW_HEIGHT;
+        let y = -(wb.row as f32) * ROW_HEIGHT;
         desired.push(Overlay {
             key: PastPortionOverlay(id),
             pos: Vec3::new(x_left + past_width * 0.5, y, 0.2),
@@ -1368,15 +1354,14 @@ pub fn draw_dependency_edges(
     let geom: HashMap<WorkBlockId, BlockGeom> = visible_blocks
         .ids
         .iter()
-        .enumerate()
-        .filter_map(|(row, &id)| {
+        .filter_map(|&id| {
             let wb = model.work_blocks.get(&id)?;
             Some((
                 wb.id,
                 BlockGeom {
                     xl: wb.start_day as f32 * PIXELS_PER_DAY,
                     xr: (wb.start_day + wb.duration_days) as f32 * PIXELS_PER_DAY,
-                    y: -(row as f32) * ROW_HEIGHT,
+                    y: -(wb.row as f32) * ROW_HEIGHT,
                 },
             ))
         })
@@ -1490,12 +1475,12 @@ pub fn draw_block_handles(
     let amber = Color::srgba(1.0, 0.75, 0.2, 0.9);  // right handle (outgoing)
     let white = Color::WHITE;
 
-    for (row, &id) in visible_blocks.ids.iter().enumerate() {
+    for &id in &visible_blocks.ids {
         let Some(wb) = model.work_blocks.get(&id) else { continue };
         if wb.duration_days <= 0 {
             continue;
         }
-        let y = -(row as f32) * ROW_HEIGHT;
+        let y = -(wb.row as f32) * ROW_HEIGHT;
         let xl = wb.start_day as f32 * PIXELS_PER_DAY;
         let xr = (wb.start_day + wb.duration_days) as f32 * PIXELS_PER_DAY;
 
@@ -2299,9 +2284,17 @@ pub fn draw_create_mode_overlay(
                 .get(&plan_id)
                 .and_then(|p| p.branch_start_day)
                 .unwrap_or(0);
+            // No cursor in bulk-create mode: stack each new block one lane down
+            // (by current block count) so they don't pile onto the same spot.
+            let new_row = model
+                .plans
+                .get(&plan_id)
+                .map(|p| p.root_blocks.len() as i32)
+                .unwrap_or(0);
             if let Some(wb) = model.work_blocks.get_mut(&new_id) {
                 wb.start_day = branch_min;
                 wb.duration_days = 1;
+                wb.row = new_row;
             }
             if let Some(plan) = model.plans.get_mut(&plan_id) {
                 plan.root_blocks.push(new_id);
