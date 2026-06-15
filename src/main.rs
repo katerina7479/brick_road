@@ -322,7 +322,7 @@ fn sync_weekend_bands(
         commands.entity(e).despawn();
     }
 
-    let span = schedule.total_duration_days + 10;
+    let span = schedule.total_duration_days.max(CALENDAR_HORIZON_DAYS) + 10;
     let weekend_color = Color::srgba(0.22, 0.26, 0.42, 0.09);
     let holiday_color = Color::srgba(0.72, 0.28, 0.28, 0.11);
 
@@ -344,18 +344,22 @@ fn sync_weekend_bands(
 #[derive(Component)]
 struct PeriodBand;
 
-/// Subtle, desaturated quarter tints for the background period bands. Replaces
-/// the old saturated teal/amber/violet quarter colors that read as muddy green
-/// and brown. Low alpha so quarters register as gentle tonal shifts over the
-/// warm-dark canvas instead of loud color blocks.
+/// Subtle quarter tints for the background period bands — an all-cool twilight
+/// palette (blue → indigo → violet) where blue is always the dominant channel,
+/// so nothing reads as brown or green. Low alpha so quarters register as gentle
+/// tonal shifts over the warm-dark canvas instead of loud color blocks.
 const QUARTER_TINTS: [[f32; 3]; 4] = [
-    [0.42, 0.47, 0.60], // Q1 — cool slate
-    [0.44, 0.54, 0.57], // Q2 — muted slate-teal
-    [0.60, 0.52, 0.44], // Q3 — warm taupe
-    [0.52, 0.46, 0.58], // Q4 — dusty mauve
+    [0.40, 0.50, 0.70], // Q1 — blue
+    [0.45, 0.46, 0.72], // Q2 — indigo
+    [0.54, 0.46, 0.70], // Q3 — violet
+    [0.44, 0.50, 0.70], // Q4 — blue-slate
 ];
 /// Base alpha for the quarter tints (odd months within a quarter use 0.7×).
 const QUARTER_TINT_ALPHA: f32 = 0.05;
+/// Minimum calendar horizon (working days) the background bands fill, so the
+/// quarter tints and week markers keep going for ~3 years even when the plan
+/// itself is short. ~260 working days per year.
+const CALENDAR_HORIZON_DAYS: i32 = 780;
 
 /// Returns (x_center, width, rgba_color) for each month band in the plan span.
 fn period_band_spans(config: &model::CalendarConfig, span_days: i32) -> Vec<(f32, f32, [f32; 4])> {
@@ -437,7 +441,7 @@ fn sync_period_bands(
     for e in &band_q {
         commands.entity(e).despawn();
     }
-    let span = schedule.total_duration_days + 30;
+    let span = schedule.total_duration_days.max(CALENDAR_HORIZON_DAYS) + 30;
     for (cx, w, color) in period_band_spans(&model.calendar, span) {
         commands.spawn((
             PeriodBand,
