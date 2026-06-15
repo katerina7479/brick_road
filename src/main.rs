@@ -46,6 +46,8 @@ fn main() {
         .insert_resource(analysis::ScheduleAnalysis::default())
         .insert_resource(schedule::TodayMarker::default())
         .insert_resource(blocks::BlockSpriteMap::default())
+        .insert_resource(blocks::ComparePlanState::default())
+        .insert_resource(blocks::CompareBlockSpriteMap::default())
         .insert_resource(labels::NestingDepthMap::default())
         .insert_resource(ResourceDragState::default())
         .add_systems(Startup, (setup_db, setup_camera))
@@ -147,6 +149,12 @@ fn main() {
             blocks::sync_past_overlays
                 .after(blocks::reconcile_block_sprites)
                 .after(schedule::update_today_marker)
+                .run_if(task_view_active),
+        )
+        .add_systems(
+            Update,
+            blocks::sync_compare_overlays
+                .after(blocks::reconcile_block_sprites)
                 .run_if(task_view_active),
         )
         .add_systems(
@@ -935,7 +943,7 @@ fn side_panel_ui(
     mut new_size_label: Local<String>,
     mut new_size_error: Local<Option<String>>,
     mut camera_target: ResMut<CameraTarget>,
-    mut compare_plan: Local<Option<model::PlanId>>,
+    mut compare_state: ResMut<blocks::ComparePlanState>,
     today: Res<schedule::TodayMarker>,
     mut date_edit_buf: Local<Option<String>>,
 ) {
@@ -1301,13 +1309,13 @@ fn side_panel_ui(
                 other_plans.sort_by_key(|(id, _)| id.0);
 
                 // Invalidate compare selection if that plan no longer exists.
-                if let Some(cmp_id) = *compare_plan {
+                if let Some(cmp_id) = compare_state.compare_plan_id {
                     if !model.plans.contains_key(&cmp_id) {
-                        *compare_plan = None;
+                        compare_state.compare_plan_id = None;
                     }
                 }
 
-                let compare_label = compare_plan
+                let compare_label = compare_state.compare_plan_id
                     .and_then(|id| model.plans.get(&id))
                     .map(|p| p.name.clone())
                     .unwrap_or_else(|| "None".to_string());
@@ -1315,20 +1323,20 @@ fn side_panel_ui(
                 egui::ComboBox::from_label("vs.")
                     .selected_text(&compare_label)
                     .show_ui(ui, |ui| {
-                        if ui.selectable_label(compare_plan.is_none(), "None").clicked() {
-                            *compare_plan = None;
+                        if ui.selectable_label(compare_state.compare_plan_id.is_none(), "None").clicked() {
+                            compare_state.compare_plan_id = None;
                         }
                         for (pid, ref name) in &other_plans {
                             if ui
-                                .selectable_label(*compare_plan == Some(*pid), name.as_str())
+                                .selectable_label(compare_state.compare_plan_id == Some(*pid), name.as_str())
                                 .clicked()
                             {
-                                *compare_plan = Some(*pid);
+                                compare_state.compare_plan_id = Some(*pid);
                             }
                         }
                     });
 
-                let Some(cmp_id) = *compare_plan else { return };
+                let Some(cmp_id) = compare_state.compare_plan_id else { return };
 
                 let plan_a = match model.plans.get(&current_plan_id).cloned() {
                     Some(p) => p,
@@ -1348,26 +1356,10 @@ fn side_panel_ui(
                 let conflicts_a = analysis::analyze_resources(&model, &plan_a).len();
                 let conflicts_b = analysis::analyze_resources(&model, &plan_b).len();
 
-                // Build id→duration maps for each plan.
-                let map_a: std::collections::HashMap<model::WorkBlockId, Day> = sched_a
-                    .as_ref()
-                    .map(|s| s.blocks.iter().map(|(&id, sb)| (id, sb.duration_days)).collect())
-                    .unwrap_or_default();
-                let map_b: std::collections::HashMap<model::WorkBlockId, Day> = sched_b
-                    .as_ref()
-                    .map(|s| s.blocks.iter().map(|(&id, sb)| (id, sb.duration_days)).collect())
-                    .unwrap_or_default();
                 let total_a = sched_a.as_ref().map(|s| s.total_duration_days).unwrap_or(0);
                 let total_b = sched_b.as_ref().map(|s| s.total_duration_days).unwrap_or(0);
-
-                // Collect all block IDs that differ between the two plans.
-                let mut all_ids: Vec<model::WorkBlockId> = {
-                    let mut ids: std::collections::HashSet<model::WorkBlockId> = std::collections::HashSet::new();
-                    ids.extend(map_a.keys());
-                    ids.extend(map_b.keys());
-                    ids.into_iter().collect()
-                };
-                all_ids.sort_by_key(|id| id.0);
+                let count_a = sched_a.as_ref().map(|s| s.blocks.len()).unwrap_or(0);
+                let count_b = sched_b.as_ref().map(|s| s.blocks.len()).unwrap_or(0);
 
                 // ── Summary ───────────────────────────────────────────────────────
                 ui.separator();
@@ -1386,8 +1378,8 @@ fn side_panel_ui(
                         ui.end_row();
 
                         ui.label("Blocks:");
-                        ui.label(format!("{}", map_a.len()));
-                        ui.label(format!("{}", map_b.len()));
+                        ui.label(format!("{}", count_a));
+                        ui.label(format!("{}", count_b));
                         ui.end_row();
 
                         ui.label("Conflicts:");
@@ -1396,83 +1388,23 @@ fn side_panel_ui(
                         ui.end_row();
                     });
 
-                // ── Block-level diff ─────────────────────────────────────────────
-                let diff_rows: Vec<(String, Option<Day>, Option<Day>)> = all_ids
-                    .iter()
-                    .filter_map(|id| {
-                        let dur_a = map_a.get(id).copied();
-                        let dur_b = map_b.get(id).copied();
-                        let differs = match (dur_a, dur_b) {
-                            (Some(a), Some(b)) => a != b,
-                            _ => true,
-                        };
-                        if !differs {
-                            return None;
-                        }
-                        let name = model
-                            .work_blocks
-                            .get(id)
-                            .map(|wb| wb.name.clone())
-                            .unwrap_or_else(|| format!("#{}", id.0));
-                        Some((name, dur_a, dur_b))
-                    })
-                    .collect();
-
-                if diff_rows.is_empty() {
-                    ui.weak("Plans are identical.");
-                } else {
-                    ui.separator();
-                    ui.weak(format!("{} differing block(s):", diff_rows.len()));
-                    egui::ScrollArea::vertical()
-                        .id_salt("plan_compare_scroll")
-                        .max_height(180.0)
-                        .show(ui, |ui| {
-                            egui::Grid::new("plan_compare_diff")
-                                .num_columns(4)
-                                .spacing([6.0, 2.0])
-                                .striped(true)
-                                .show(ui, |ui| {
-                                    ui.weak("Block");
-                                    ui.weak(&name_a);
-                                    ui.weak(&name_b);
-                                    ui.weak("Δ");
-                                    ui.end_row();
-                                    for (name, dur_a, dur_b) in &diff_rows {
-                                        let only_a = dur_b.is_none();
-                                        let only_b = dur_a.is_none();
-                                        let row_color = if only_a {
-                                            egui::Color32::from_rgb(80, 160, 80)
-                                        } else if only_b {
-                                            egui::Color32::from_rgb(180, 80, 80)
-                                        } else {
-                                            egui::Color32::from_rgb(180, 160, 80)
-                                        };
-                                        ui.colored_label(row_color, name.as_str());
-                                        match dur_a {
-                                            Some(d) => ui.label(format!("{d}d")),
-                                            None => ui.weak("—"),
-                                        };
-                                        match dur_b {
-                                            Some(d) => ui.label(format!("{d}d")),
-                                            None => ui.weak("—"),
-                                        };
-                                        let delta_label = match (dur_a, dur_b) {
-                                            (Some(a), Some(b)) => {
-                                                let d = b - a;
-                                                if d > 0 {
-                                                    format!("+{d}")
-                                                } else {
-                                                    format!("{d}")
-                                                }
-                                            }
-                                            _ => "—".to_string(),
-                                        };
-                                        ui.label(delta_label);
-                                        ui.end_row();
-                                    }
-                                });
-                        });
-                }
+                // ── Overlay legend ────────────────────────────────────────────────
+                ui.separator();
+                ui.weak("Timeline overlay shows comparison plan ghosts:");
+                egui::Grid::new("compare_legend")
+                    .num_columns(2)
+                    .spacing([6.0, 1.0])
+                    .show(ui, |ui| {
+                        ui.colored_label(egui::Color32::from_rgb(120, 110, 20), "amber");
+                        ui.weak("duration differs");
+                        ui.end_row();
+                        ui.colored_label(egui::Color32::from_rgb(160, 50, 50), "coral");
+                        ui.weak("only in comparison plan");
+                        ui.end_row();
+                        ui.colored_label(egui::Color32::from_rgb(100, 100, 110), "gray");
+                        ui.weak("same duration");
+                        ui.end_row();
+                    });
             });
 
             ui.separator();

@@ -8,8 +8,8 @@ use bevy::sprite::Anchor;
 use crate::{
     analysis::ScheduleAnalysis,
     constants::{PIXELS_PER_DAY, ROW_HEIGHT},
-    db,
-    model::{self, Day, DependencyId, DependencyType, Estimate, WorkBlockId},
+    db, graph,
+    model::{self, Day, DependencyId, DependencyType, Estimate, PlanId, WorkBlockId},
     schedule::{self, ViewScope},
 };
 
@@ -78,6 +78,25 @@ pub struct SelectedBlock(pub Option<WorkBlockId>);
 #[derive(Resource, Default)]
 pub struct BlockSpriteMap {
     pub entities: HashMap<WorkBlockId, Entity>,
+}
+
+/// Which comparison plan (if any) is overlaid on the timeline.
+/// Written by the side panel UI; read by `sync_compare_overlays`.
+#[derive(Resource, Default)]
+pub struct ComparePlanState {
+    pub compare_plan_id: Option<PlanId>,
+}
+
+/// Tracks ghost sprite entities for the comparison plan overlay.
+#[derive(Resource, Default)]
+pub struct CompareBlockSpriteMap {
+    pub entities: HashMap<WorkBlockId, Entity>,
+}
+
+/// Marker for a ghost block sprite showing how a block is placed in the comparison plan.
+#[derive(Component)]
+pub struct CompareBlockSprite {
+    pub work_block_id: WorkBlockId,
 }
 
 /// Tracks inline name-edit state: which block is being renamed and the live text buffer.
@@ -398,6 +417,85 @@ pub fn sync_block_sprites(
             let b = c.blue + (lum - c.blue) * desat;
             sprite.color = Color::from(LinearRgba::new(r * 0.75, g * 0.75, b * 0.75, 0.72));
         }
+    }
+}
+
+/// Spawns, updates, and despawns ghost block sprites overlaid on the timeline
+/// to show how the comparison plan schedules each block.
+///
+/// Fires when `ComparePlanState` or the model changes. Clears all ghost sprites
+/// before rebuilding so there is never stale state. Ghost sprites sit at Z = -0.5
+/// (behind active-plan blocks). Color encodes the relationship to the active plan:
+///   faint gray  — same duration as active plan (timing may still differ)
+///   amber       — duration differs between plans
+///   coral       — block is only in the comparison plan
+pub fn sync_compare_overlays(
+    mut commands: Commands,
+    model: Res<model::Model>,
+    compare_state: Res<ComparePlanState>,
+    mut map: ResMut<CompareBlockSpriteMap>,
+    block_sprites: Query<&BlockSprite>,
+) {
+    if !compare_state.is_changed() && !model.is_changed() {
+        return;
+    }
+
+    for (_, entity) in map.entities.drain() {
+        commands.entity(entity).despawn();
+    }
+
+    let Some(cmp_id) = compare_state.compare_plan_id else { return };
+    let Some(cmp_plan) = model.plans.get(&cmp_id).cloned() else { return };
+
+    let cmp_graph = graph::build_graph(&model, &cmp_plan);
+    let Ok(cmp_sched) = schedule::forward_pass(&model, &cmp_plan, &cmp_graph) else { return };
+
+    // Build id → row from the active plan's current block sprites.
+    let id_to_row: HashMap<WorkBlockId, usize> = block_sprites
+        .iter()
+        .map(|bs| (bs.work_block_id, bs.row))
+        .collect();
+
+    let max_row = id_to_row.values().copied().max().unwrap_or(0);
+    let mut next_extra_row = max_row + 1;
+
+    for (&id, cmp_block) in &cmp_sched.blocks {
+        let row = if let Some(&r) = id_to_row.get(&id) {
+            r
+        } else {
+            let r = next_extra_row;
+            next_extra_row += 1;
+            r
+        };
+
+        let width = cmp_block.duration_days as f32 * PIXELS_PER_DAY;
+        let x = cmp_block.start_day as f32 * PIXELS_PER_DAY + width * 0.5;
+        let y = -(row as f32) * ROW_HEIGHT;
+
+        let active_dur = model.work_blocks.get(&id).map(|wb| wb.duration_days);
+        let color = if active_dur.is_none() {
+            // Compare-only block.
+            Color::from(LinearRgba::new(1.2, 0.15, 0.15, 0.45))
+        } else if active_dur == Some(cmp_block.duration_days) {
+            // Same duration — ghost confirms the block matches.
+            Color::from(LinearRgba::new(0.5, 0.5, 0.55, 0.22))
+        } else {
+            // Duration differs — amber ghost.
+            Color::from(LinearRgba::new(1.4, 0.9, 0.05, 0.45))
+        };
+
+        let entity = commands
+            .spawn((
+                CompareBlockSprite { work_block_id: id },
+                Sprite {
+                    color,
+                    custom_size: Some(Vec2::new(width.max(8.0), BLOCK_HEIGHT * 0.7)),
+                    ..default()
+                },
+                Transform::from_xyz(x, y, -0.5),
+            ))
+            .id();
+        map.entities.insert(id, entity);
     }
 }
 
