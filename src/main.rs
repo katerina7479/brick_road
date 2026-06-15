@@ -41,7 +41,6 @@ fn main() {
         .insert_resource(blocks::UndoStack::default())
         .insert_resource(blocks::CreateModeState::default())
         .insert_resource(schedule::ViewScope::default())
-        .insert_resource(schedule::TimelineViewMode::default())
         .insert_resource(schedule::VisibleBlocks::default())
         .insert_resource(analysis::ScheduleAnalysis::default())
         .insert_resource(schedule::TodayMarker::default())
@@ -50,7 +49,6 @@ fn main() {
         .insert_resource(blocks::CompareBlockSpriteMap::default())
         .insert_resource(blocks::BranchGhostMap::default())
         .insert_resource(labels::NestingDepthMap::default())
-        .insert_resource(ResourceDragState::default())
         .insert_resource(ForkHoverState::default())
         .add_systems(Startup, (setup_db, setup_camera))
         .add_systems(Startup, setup_demo_schedule.after(setup_db))
@@ -129,38 +127,38 @@ fn main() {
             blocks::sync_block_sprites
                 .after(blocks::handle_block_drag)
                 .after(blocks::reconcile_block_sprites)
-                .run_if(task_view_active),
+                ,
         )
         .add_systems(
             Update,
             blocks::sync_conflict_overlays
                 .after(update_analysis)
-                .run_if(task_view_active),
+                ,
         )
         .add_systems(
             Update,
             blocks::draw_block_borders
                 .after(blocks::sync_block_sprites)
-                .run_if(task_view_active),
+                ,
         )
         .add_systems(
             Update,
             blocks::sync_uncertainty_overlays
                 .after(blocks::reconcile_block_sprites)
-                .run_if(task_view_active),
+                ,
         )
         .add_systems(
             Update,
             blocks::sync_past_overlays
                 .after(blocks::reconcile_block_sprites)
                 .after(schedule::update_today_marker)
-                .run_if(task_view_active),
+                ,
         )
         .add_systems(
             Update,
             blocks::sync_compare_overlays
                 .after(blocks::reconcile_block_sprites)
-                .run_if(task_view_active),
+                ,
         )
         .add_systems(
             Update,
@@ -169,12 +167,12 @@ fn main() {
                 .before(blocks::handle_block_drag)
                 .before(blocks::handle_block_resize),
         )
-        .add_systems(Update, blocks::draw_block_handles.run_if(task_view_active))
+        .add_systems(Update, blocks::draw_block_handles)
         .add_systems(
             Update,
             blocks::draw_dependency_edges
                 .after(update_analysis)
-                .run_if(task_view_active),
+                ,
         )
         .add_systems(
             Update,
@@ -186,32 +184,29 @@ fn main() {
             Update,
             labels::compute_nesting_depths.before(labels::draw_nesting_indicators),
         )
-        .add_systems(Update, labels::draw_nesting_indicators.run_if(task_view_active))
-        .add_systems(Update, labels::draw_violation_indicators.run_if(task_view_active))
+        .add_systems(Update, labels::draw_nesting_indicators)
+        .add_systems(Update, labels::draw_violation_indicators)
         .add_systems(
             Update,
             blocks::sync_block_labels
                 .after(blocks::reconcile_block_sprites)
-                .run_if(task_view_active),
+                ,
         )
         .add_systems(
             Update,
             blocks::sync_block_label_names
                 .after(blocks::reconcile_block_sprites)
                 .before(blocks::sync_block_labels)
-                .run_if(task_view_active),
+                ,
         )
         .add_systems(
             Update,
             blocks::sync_description_dots
                 .after(blocks::reconcile_block_sprites)
-                .run_if(task_view_active),
+                ,
         )
-        .add_systems(Update, draw_resource_timeline)
-        .add_systems(Update, handle_resource_drag)
         .add_systems(EguiPrimaryContextPass, top_bar_ui)
         .add_systems(EguiPrimaryContextPass, calendar_ruler_ui.after(top_bar_ui))
-        .add_systems(EguiPrimaryContextPass, resource_row_labels_ui)
         .add_systems(EguiPrimaryContextPass, blocks::draw_name_edit_overlay)
         .add_systems(EguiPrimaryContextPass, blocks::draw_create_mode_overlay)
         .add_systems(EguiPrimaryContextPass, blocks::draw_block_tooltip)
@@ -479,362 +474,11 @@ fn sync_total_duration(
     }
 }
 
-fn task_view_active(mode: Res<schedule::TimelineViewMode>) -> bool {
-    *mode == schedule::TimelineViewMode::Task
-}
-
 /// Tracks which timeline day the user is hovering for a "fork plan here" gesture.
 /// Cleared when the pointer leaves the timeline or enters a UI panel.
 #[derive(Resource, Default)]
 struct ForkHoverState {
     hovered_day: Option<model::Day>,
-}
-
-/// Tracks an in-progress drag in the resource timeline view.
-#[derive(Resource, Default)]
-struct ResourceDragState {
-    /// Block being dragged, its original resource row, and the X grab offset (px).
-    dragging: Option<(model::WorkBlockId, model::ResourceBlockId, f32)>,
-}
-
-/// Handles block dragging in resource view: horizontal drag reschedules (changes
-/// `start_day`), vertical drag to a different row reassigns the resource allocation.
-/// Both can happen in the same drag. Dependencies are cascaded on release.
-fn handle_resource_drag(
-    mode: Res<schedule::TimelineViewMode>,
-    mut model: ResMut<model::Model>,
-    schedule: Res<schedule::Schedule>,
-    windows: Query<&Window>,
-    camera: Query<(&Camera, &GlobalTransform), With<Camera2d>>,
-    mouse: Res<ButtonInput<MouseButton>>,
-    conn: NonSend<rusqlite::Connection>,
-    mut drag: ResMut<ResourceDragState>,
-    mut egui_ctx: EguiContexts,
-) {
-    if *mode != schedule::TimelineViewMode::Resource {
-        drag.dragging = None;
-        return;
-    }
-    if let Ok(ctx) = egui_ctx.ctx_mut() {
-        if ctx.is_pointer_over_area() {
-            drag.dragging = None;
-            return;
-        }
-    }
-
-    let Ok(window) = windows.single() else { return };
-    let Ok((cam, cam_transform)) = camera.single() else { return };
-    let Some(cursor_pos) = window.cursor_position() else {
-        drag.dragging = None;
-        return;
-    };
-    let Ok(world_pos) = cam.viewport_to_world_2d(cam_transform, cursor_pos) else { return };
-
-    // Sorted resource list — same order as draw_resource_timeline.
-    let mut resource_ids: Vec<model::ResourceBlockId> =
-        model.resource_blocks.keys().copied().collect();
-    resource_ids.sort_by_key(|id| id.0);
-
-    let bar_h = constants::ROW_HEIGHT * 0.65;
-
-    if mouse.just_pressed(MouseButton::Left) {
-        drag.dragging = None;
-        // Clone allocations to avoid borrow conflict with model.work_blocks below.
-        let plan_id = schedule.plan_id;
-        let allocs: Vec<_> = model
-            .plans
-            .get(&plan_id)
-            .map(|p| p.allocations.iter().map(|a| (a.work_block_id, a.resource_id)).collect())
-            .unwrap_or_default();
-
-        'hit: for (block_id, resource_id) in allocs {
-            let Some(row) = resource_ids.iter().position(|&rid| rid == resource_id) else {
-                continue;
-            };
-            let Some(wb) = model.work_blocks.get(&block_id) else { continue };
-            if wb.duration_days <= 0 {
-                continue;
-            }
-            let x0 = wb.start_day as f32 * PIXELS_PER_DAY;
-            let w = (wb.duration_days as f32 * PIXELS_PER_DAY).max(4.0);
-            let cx = x0 + w * 0.5;
-            let y = -(row as f32) * constants::ROW_HEIGHT;
-
-            if world_pos.x >= cx - w * 0.5
-                && world_pos.x <= cx + w * 0.5
-                && world_pos.y >= y - bar_h * 0.5
-                && world_pos.y <= y + bar_h * 0.5
-            {
-                // Record how far from the block's left edge the cursor landed.
-                let offset_px = world_pos.x - x0;
-                drag.dragging = Some((block_id, resource_id, offset_px));
-                break 'hit;
-            }
-        }
-        return;
-    }
-
-    // Held: slide start_day in real time so the bar tracks the cursor.
-    if mouse.pressed(MouseButton::Left) {
-        if let Some((block_id, _, offset_px)) = drag.dragging {
-            let branch_min = model
-                .plans
-                .get(&schedule.plan_id)
-                .and_then(|p| p.branch_start_day)
-                .unwrap_or(0);
-            let new_start = ((world_pos.x - offset_px) / PIXELS_PER_DAY)
-                .max(0.0)
-                .round() as Day;
-            let new_start = new_start.max(branch_min);
-            if let Some(wb) = model.work_blocks.get_mut(&block_id) {
-                wb.start_day = new_start;
-            }
-        }
-        return;
-    }
-
-    // Release: cascade deps, optionally reassign resource row, and persist.
-    if mouse.just_released(MouseButton::Left) {
-        if let Some((block_id, old_resource_id, _)) = drag.dragging.take() {
-            schedule::cascade_dependencies(&mut model, block_id);
-
-            let new_resource_id = resource_ids.iter().enumerate().find_map(|(row, &rid)| {
-                let y = -(row as f32) * constants::ROW_HEIGHT;
-                if (world_pos.y - y).abs() <= constants::ROW_HEIGHT * 0.5 {
-                    Some(rid)
-                } else {
-                    None
-                }
-            });
-
-            if let Some(new_rid) = new_resource_id {
-                if new_rid != old_resource_id {
-                    let plan_id = schedule.plan_id;
-                    if let Some(plan) = model.plans.get_mut(&plan_id) {
-                        if let Some(alloc) = plan
-                            .allocations
-                            .iter_mut()
-                            .find(|a| a.work_block_id == block_id && a.resource_id == old_resource_id)
-                        {
-                            alloc.resource_id = new_rid;
-                        }
-                    }
-                }
-            }
-
-            if let Err(e) = db::save_model(&conn, &model) {
-                error!("save_model failed: {e}");
-            }
-        }
-    }
-}
-
-/// Draws one row per resource block when `TimelineViewMode::Resource` is active.
-/// Each row shows bars for every work block allocated to that resource, coloured
-/// red if the window overlaps a detected resource conflict.
-fn draw_resource_timeline(
-    mode: Res<schedule::TimelineViewMode>,
-    model: Res<model::Model>,
-    schedule: Res<schedule::Schedule>,
-    sa: Res<analysis::ScheduleAnalysis>,
-    drag: Res<ResourceDragState>,
-    mut gizmos: Gizmos,
-    cam_q: Query<(&Transform, &Projection), With<Camera2d>>,
-    windows: Query<&Window>,
-) {
-    if *mode != schedule::TimelineViewMode::Resource {
-        return;
-    }
-
-    let Ok((cam_t, proj)) = cam_q.single() else { return };
-    let Projection::Orthographic(ortho) = proj else { return };
-    let Ok(window) = windows.single() else { return };
-
-    let half_w = (window.width() * 0.5 + PIXELS_PER_DAY) * ortho.scale;
-    let x_left  = cam_t.translation.x - half_w;
-    let x_right = cam_t.translation.x + half_w;
-
-    let Some(plan) = model.plans.get(&schedule.plan_id) else { return };
-
-    let mut resources: Vec<_> = model.resource_blocks.values().collect();
-    resources.sort_by_key(|r| r.id.0);
-
-    // Pre-index conflict windows per resource.
-    let mut conflict_windows: std::collections::HashMap<model::ResourceBlockId, Vec<(Day, Day)>> =
-        std::collections::HashMap::new();
-    for c in &sa.resource_conflicts {
-        conflict_windows
-            .entry(c.resource_id)
-            .or_default()
-            .push((c.window_start, c.window_end));
-    }
-
-    let row_sep = Color::srgba(0.38, 0.42, 0.58, 0.15);
-    let alloc_ok = Color::srgba(0.2, 1.8, 0.6, 0.7);
-    let alloc_conflict = Color::srgba(2.5, 0.3, 0.3, 0.9);
-    let bar_h = constants::ROW_HEIGHT * 0.65;
-
-    for (row, resource) in resources.iter().enumerate() {
-        let y = -(row as f32) * constants::ROW_HEIGHT;
-
-        // Row separator.
-        gizmos.line_2d(
-            Vec2::new(x_left,  y - constants::ROW_HEIGHT * 0.5),
-            Vec2::new(x_right, y - constants::ROW_HEIGHT * 0.5),
-            row_sep,
-        );
-
-        let conflicts = conflict_windows.get(&resource.id);
-
-        for alloc in &plan.allocations {
-            if alloc.resource_id != resource.id {
-                continue;
-            }
-            let Some(wb) = model.work_blocks.get(&alloc.work_block_id) else { continue };
-
-            let x0 = wb.start_day as f32 * PIXELS_PER_DAY;
-            let x1 = (wb.start_day + wb.duration_days) as f32 * PIXELS_PER_DAY;
-            let w  = (x1 - x0).max(4.0);
-            let cx = x0 + w * 0.5;
-
-            let is_conflicted = conflicts.is_some_and(|cws| {
-                cws.iter().any(|&(cs, ce)| {
-                    wb.start_day < ce && (wb.start_day + wb.duration_days) > cs
-                })
-            });
-
-            let is_dragged = drag
-                .dragging
-                .is_some_and(|(bid, rid, _)| bid == alloc.work_block_id && rid == alloc.resource_id);
-            let color = if is_conflicted { alloc_conflict } else { alloc_ok };
-            let (x_lo, x_hi) = (cx - w * 0.5, cx + w * 0.5);
-            let (y_lo, y_hi) = (y - bar_h * 0.5, y + bar_h * 0.5);
-            gizmos.line_2d(Vec2::new(x_lo, y_lo), Vec2::new(x_hi, y_lo), color);
-            gizmos.line_2d(Vec2::new(x_hi, y_lo), Vec2::new(x_hi, y_hi), color);
-            gizmos.line_2d(Vec2::new(x_hi, y_hi), Vec2::new(x_lo, y_hi), color);
-            gizmos.line_2d(Vec2::new(x_lo, y_hi), Vec2::new(x_lo, y_lo), color);
-            if is_dragged {
-                // Bright white outer outline to indicate the block is being dragged.
-                let pad = 3.0;
-                let drag_color = Color::srgba(3.0, 3.0, 3.0, 1.0);
-                gizmos.line_2d(Vec2::new(x_lo - pad, y_lo - pad), Vec2::new(x_hi + pad, y_lo - pad), drag_color);
-                gizmos.line_2d(Vec2::new(x_hi + pad, y_lo - pad), Vec2::new(x_hi + pad, y_hi + pad), drag_color);
-                gizmos.line_2d(Vec2::new(x_hi + pad, y_hi + pad), Vec2::new(x_lo - pad, y_hi + pad), drag_color);
-                gizmos.line_2d(Vec2::new(x_lo - pad, y_hi + pad), Vec2::new(x_lo - pad, y_lo - pad), drag_color);
-            }
-        }
-    }
-
-    // Unassigned row: placed blocks with no allocation in the current plan.
-    let allocated: std::collections::HashSet<model::WorkBlockId> =
-        plan.allocations.iter().map(|a| a.work_block_id).collect();
-    let unassigned: Vec<_> = model
-        .work_blocks
-        .values()
-        .filter(|wb| wb.duration_days > 0 && !allocated.contains(&wb.id))
-        .collect();
-
-    if !unassigned.is_empty() {
-        let row = resources.len();
-        let y = -(row as f32) * constants::ROW_HEIGHT;
-
-        gizmos.line_2d(
-            Vec2::new(x_left,  y - constants::ROW_HEIGHT * 0.5),
-            Vec2::new(x_right, y - constants::ROW_HEIGHT * 0.5),
-            row_sep,
-        );
-
-        let unassigned_color = Color::srgba(0.55, 0.55, 0.55, 0.5);
-        for wb in &unassigned {
-            let x0 = wb.start_day as f32 * PIXELS_PER_DAY;
-            let x1 = (wb.start_day + wb.duration_days) as f32 * PIXELS_PER_DAY;
-            let w  = (x1 - x0).max(4.0);
-            let cx = x0 + w * 0.5;
-            let (x_lo, x_hi) = (cx - w * 0.5, cx + w * 0.5);
-            let (y_lo, y_hi) = (y - bar_h * 0.5, y + bar_h * 0.5);
-            gizmos.line_2d(Vec2::new(x_lo, y_lo), Vec2::new(x_hi, y_lo), unassigned_color);
-            gizmos.line_2d(Vec2::new(x_hi, y_lo), Vec2::new(x_hi, y_hi), unassigned_color);
-            gizmos.line_2d(Vec2::new(x_hi, y_hi), Vec2::new(x_lo, y_hi), unassigned_color);
-            gizmos.line_2d(Vec2::new(x_lo, y_hi), Vec2::new(x_lo, y_lo), unassigned_color);
-        }
-    }
-}
-
-/// Renders resource row name labels in Resource view using egui, positioned at
-/// the screen Y that corresponds to each row's world-space Y coordinate.
-fn resource_row_labels_ui(
-    mut contexts: EguiContexts,
-    mode: Res<schedule::TimelineViewMode>,
-    model: Res<model::Model>,
-    schedule: Res<schedule::Schedule>,
-    cam_q: Query<(&Transform, &Projection), With<Camera2d>>,
-    windows: Query<&Window>,
-) {
-    if *mode != schedule::TimelineViewMode::Resource {
-        return;
-    }
-    let Ok(ctx) = contexts.ctx_mut() else { return };
-    let Ok((cam_t, proj)) = cam_q.single() else { return };
-    let Projection::Orthographic(ortho) = proj else { return };
-    let Ok(window) = windows.single() else { return };
-
-    let cam_y = cam_t.translation.y;
-    let scale = ortho.scale;
-    let win_h = window.height();
-
-    let world_y_to_screen = |world_y: f32| -> f32 {
-        win_h * 0.5 - (world_y - cam_y) / scale
-    };
-
-    let Some(plan) = model.plans.get(&schedule.plan_id) else { return };
-
-    let mut resources: Vec<_> = model.resource_blocks.values().collect();
-    resources.sort_by_key(|r| r.id.0);
-
-    let allocated: std::collections::HashSet<model::WorkBlockId> =
-        plan.allocations.iter().map(|a| a.work_block_id).collect();
-    let has_unassigned = model
-        .work_blocks
-        .values()
-        .any(|wb| wb.duration_days > 0 && !allocated.contains(&wb.id));
-
-    egui::Area::new(egui::Id::new("resource_row_labels"))
-        .fixed_pos(egui::Pos2::ZERO)
-        .interactable(false)
-        .show(ctx, |ui| {
-            let label_x = 6.0;
-            for (row, resource) in resources.iter().enumerate() {
-                let world_y = -(row as f32) * constants::ROW_HEIGHT;
-                let sy = world_y_to_screen(world_y);
-                ui.put(
-                    egui::Rect::from_min_size(
-                        egui::Pos2::new(label_x, sy - 8.0),
-                        egui::Vec2::new(150.0, 16.0),
-                    ),
-                    egui::Label::new(
-                        egui::RichText::new(resource.name.as_str())
-                            .size(12.0)
-                            .color(egui::Color32::from_rgb(180, 180, 210)),
-                    ),
-                );
-            }
-            if has_unassigned {
-                let row = resources.len();
-                let world_y = -(row as f32) * constants::ROW_HEIGHT;
-                let sy = world_y_to_screen(world_y);
-                ui.put(
-                    egui::Rect::from_min_size(
-                        egui::Pos2::new(label_x, sy - 8.0),
-                        egui::Vec2::new(150.0, 16.0),
-                    ),
-                    egui::Label::new(
-                        egui::RichText::new("Unassigned")
-                            .size(12.0)
-                            .color(egui::Color32::from_rgba_unmultiplied(140, 140, 170, 180)),
-                    ),
-                );
-            }
-        });
 }
 
 fn setup_demo_schedule(mut model: ResMut<model::Model>, mut commands: Commands) {
@@ -934,7 +578,6 @@ fn handle_fork_hover(
     mut fork: ResMut<ForkHoverState>,
     mut model: ResMut<model::Model>,
     mut schedule: ResMut<schedule::Schedule>,
-    mode: Res<schedule::TimelineViewMode>,
     windows: Query<&Window>,
     camera: Query<(&Camera, &GlobalTransform), With<Camera2d>>,
     mouse: Res<ButtonInput<MouseButton>>,
@@ -942,11 +585,6 @@ fn handle_fork_hover(
     mut egui_ctx: EguiContexts,
     conn: NonSend<rusqlite::Connection>,
 ) {
-    // Only active in task view; resource view has its own drag handling.
-    if *mode != schedule::TimelineViewMode::Task {
-        fork.hovered_day = None;
-        return;
-    }
     let Ok(ctx) = egui_ctx.ctx_mut() else { return };
     if ctx.is_pointer_over_area() {
         fork.hovered_day = None;
@@ -1001,11 +639,7 @@ fn draw_branch_markers(
     fork: Res<ForkHoverState>,
     cam_q: Query<(&Transform, &Projection), With<Camera2d>>,
     windows: Query<&Window>,
-    mode: Res<schedule::TimelineViewMode>,
 ) {
-    if *mode != schedule::TimelineViewMode::Task {
-        return;
-    }
     let Ok((cam_t, proj)) = cam_q.single() else { return };
     let Projection::Orthographic(ortho) = proj else { return };
     let Ok(window) = windows.single() else { return };
@@ -1170,7 +804,6 @@ fn top_bar_ui(
     model: Res<model::Model>,
     scope: Res<schedule::ViewScope>,
     windows: Query<&Window>,
-    mut view_mode: ResMut<schedule::TimelineViewMode>,
     today: Res<schedule::TodayMarker>,
 ) {
     let Ok(ctx) = contexts.ctx_mut() else { return };
@@ -1195,16 +828,6 @@ fn top_bar_ui(
                 }
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let (label, next) = match *view_mode {
-                        schedule::TimelineViewMode::Task =>
-                            ("Resource View", schedule::TimelineViewMode::Resource),
-                        schedule::TimelineViewMode::Resource =>
-                            ("Task View", schedule::TimelineViewMode::Task),
-                    };
-                    if ui.small_button(label).clicked() {
-                        *view_mode = next;
-                    }
-                    ui.separator();
                     if ui.small_button("→ Today").clicked() {
                         let x = today.day as f32 * PIXELS_PER_DAY;
                         target.pos.x = x;

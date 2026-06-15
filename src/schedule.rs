@@ -111,16 +111,6 @@ pub struct ViewScope {
     pub scope_stack: Vec<ScopeEntry>,
 }
 
-/// Which rendering mode the timeline is in.
-#[derive(Resource, Default, PartialEq, Eq, Clone, Copy, Debug)]
-pub enum TimelineViewMode {
-    /// One row per work block — the standard Gantt layout.
-    #[default]
-    Task,
-    /// One row per resource block, showing allocation bars.
-    Resource,
-}
-
 /// Returns the blocks visible at the current view scope, sorted by
 /// ascending `start_day` with id as a tie-breaker.
 ///
