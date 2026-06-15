@@ -21,8 +21,11 @@ const LABEL_CHAR_WIDTH: f32 = 8.0;
 
 /// ortho.scale below this → show full block name.
 const LOD_CLOSE_MAX: f32 = 1.0;
-/// ortho.scale above this → hide block name entirely.
+/// ortho.scale above this → hide block name entirely; also the start of dep-edge fade and the
+/// threshold at which uncertainty overlays and nesting brackets are hidden.
 const LOD_FAR_MIN: f32 = 3.0;
+/// ortho.scale above this → dependency edges are fully hidden.
+const LOD_DEP_HIDE: f32 = 6.0;
 /// Characters shown in the medium-zoom abbreviated label.
 const LOD_ABBREV_CHARS: usize = 3;
 
@@ -841,8 +844,18 @@ pub fn sync_uncertainty_overlays(
     model: Res<model::Model>,
     visible_blocks: Res<schedule::VisibleBlocks>,
     mut overlay_q: Query<(Entity, &UncertaintyOverlay, &mut Transform, &mut Sprite)>,
+    cam_q: Query<&Projection, With<Camera2d>>,
+    mut prev_scale: Local<f32>,
 ) {
-    if !model.is_changed() && !visible_blocks.is_changed() {
+    let ortho_scale = cam_q
+        .single()
+        .ok()
+        .and_then(|p| if let Projection::Orthographic(o) = p { Some(o.scale) } else { None })
+        .unwrap_or(1.0);
+    let scale_changed = (ortho_scale - *prev_scale).abs() > 0.001;
+    *prev_scale = ortho_scale;
+
+    if !model.is_changed() && !visible_blocks.is_changed() && !scale_changed {
         return;
     }
 
@@ -861,37 +874,40 @@ pub fn sync_uncertainty_overlays(
     }
     let mut desired: Vec<Overlay> = Vec::new();
 
-    for (row, &id) in visible_blocks.ids.iter().enumerate() {
-        let Some(wb) = model.work_blocks.get(&id) else { continue };
-        let y = -(row as f32) * ROW_HEIGHT;
-        let confidence = wb.estimate.confidence.clamp(0.0, 1.0);
-        let tail_alpha = (1.0 - confidence) * 0.55;
+    if ortho_scale <= LOD_FAR_MIN {
+        for (row, &id) in visible_blocks.ids.iter().enumerate() {
+            let Some(wb) = model.work_blocks.get(&id) else { continue };
+            let y = -(row as f32) * ROW_HEIGHT;
+            let confidence = wb.estimate.confidence.clamp(0.0, 1.0);
+            let tail_alpha = (1.0 - confidence) * 0.55;
 
-        // Pessimistic tail — extends past the right edge to the pessimistic end.
-        let x_right = (wb.start_day + wb.duration_days) as f32 * PIXELS_PER_DAY;
-        let x_pes  = (wb.start_day + wb.estimate.pessimistic) as f32 * PIXELS_PER_DAY;
-        let tail_w = (x_pes - x_right).max(0.0);
-        if tail_w > 0.5 && tail_alpha > 0.01 {
-            desired.push(Overlay {
-                key:   UncertaintyOverlay::PessimisticTail(id),
-                pos:   Vec3::new(x_right + tail_w * 0.5, y, -0.1),
-                size:  Vec2::new(tail_w, BLOCK_HEIGHT * 0.65),
-                color: Color::from(LinearRgba::new(1.8, 1.3, 0.5, tail_alpha)),
-            });
-        }
+            // Pessimistic tail — extends past the right edge to the pessimistic end.
+            let x_right = (wb.start_day + wb.duration_days) as f32 * PIXELS_PER_DAY;
+            let x_pes  = (wb.start_day + wb.estimate.pessimistic) as f32 * PIXELS_PER_DAY;
+            let tail_w = (x_pes - x_right).max(0.0);
+            if tail_w > 0.5 && tail_alpha > 0.01 {
+                desired.push(Overlay {
+                    key:   UncertaintyOverlay::PessimisticTail(id),
+                    pos:   Vec3::new(x_right + tail_w * 0.5, y, -0.1),
+                    size:  Vec2::new(tail_w, BLOCK_HEIGHT * 0.65),
+                    color: Color::from(LinearRgba::new(1.8, 1.3, 0.5, tail_alpha)),
+                });
+            }
 
-        // Optimistic marker — narrow bar at the optimistic estimate end.
-        let x_left    = wb.start_day as f32 * PIXELS_PER_DAY;
-        let x_opt_end = (wb.start_day + wb.estimate.optimistic) as f32 * PIXELS_PER_DAY;
-        if x_opt_end > x_left + 1.0 && x_opt_end < x_right - 1.0 {
-            desired.push(Overlay {
-                key:   UncertaintyOverlay::OptimisticMarker(id),
-                pos:   Vec3::new(x_opt_end, y, 0.3),
-                size:  Vec2::new(2.0, BLOCK_HEIGHT * 0.9),
-                color: Color::from(LinearRgba::new(1.4, 1.4, 1.4, 0.55)),
-            });
+            // Optimistic marker — narrow bar at the optimistic estimate end.
+            let x_left    = wb.start_day as f32 * PIXELS_PER_DAY;
+            let x_opt_end = (wb.start_day + wb.estimate.optimistic) as f32 * PIXELS_PER_DAY;
+            if x_opt_end > x_left + 1.0 && x_opt_end < x_right - 1.0 {
+                desired.push(Overlay {
+                    key:   UncertaintyOverlay::OptimisticMarker(id),
+                    pos:   Vec3::new(x_opt_end, y, 0.3),
+                    size:  Vec2::new(2.0, BLOCK_HEIGHT * 0.9),
+                    color: Color::from(LinearRgba::new(1.4, 1.4, 1.4, 0.55)),
+                });
+            }
         }
     }
+    // At ortho_scale > LOD_FAR_MIN, desired stays empty → all overlays are despawned below.
 
     // Update existing overlays in place; spawn new ones.
     let mut live: HashSet<Entity> = HashSet::with_capacity(desired.len());
@@ -1079,6 +1095,7 @@ pub fn draw_dependency_edges(
     visible_blocks: Res<schedule::VisibleBlocks>,
     windows: Query<&Window>,
     camera: Query<(&Camera, &GlobalTransform)>,
+    cam_proj: Query<&Projection, With<Camera2d>>,
 ) {
     let geom: HashMap<WorkBlockId, BlockGeom> = visible_blocks
         .ids
@@ -1100,26 +1117,41 @@ pub fn draw_dependency_edges(
     let violated: std::collections::HashSet<DependencyId> =
         sa.violations.iter().map(|v| v.dependency_id).collect();
 
-    for dep in model.dependencies.values() {
-        let (Some(pg), Some(sg)) = (geom.get(&dep.predecessor), geom.get(&dep.successor)) else {
-            continue;
-        };
+    let ortho_scale = cam_proj
+        .single()
+        .ok()
+        .and_then(|p| if let Projection::Orthographic(o) = p { Some(o.scale) } else { None })
+        .unwrap_or(1.0);
 
-        let (src, dst) = match dep.dependency_type {
-            DependencyType::FinishToStart => (Vec2::new(pg.xr, pg.y), Vec2::new(sg.xl, sg.y)),
-            DependencyType::StartToStart => (Vec2::new(pg.xl, pg.y), Vec2::new(sg.xl, sg.y)),
-            DependencyType::FinishToFinish => (Vec2::new(pg.xr, pg.y), Vec2::new(sg.xr, sg.y)),
-            DependencyType::StartToFinish => (Vec2::new(pg.xl, pg.y), Vec2::new(sg.xr, sg.y)),
-        };
+    // Fade edges between LOD_FAR_MIN and LOD_DEP_HIDE; skip entirely beyond LOD_DEP_HIDE.
+    let edge_alpha = if ortho_scale <= LOD_FAR_MIN {
+        1.0_f32
+    } else {
+        ((LOD_DEP_HIDE - ortho_scale) / (LOD_DEP_HIDE - LOD_FAR_MIN)).clamp(0.0, 1.0)
+    };
 
-        let color = if violated.contains(&dep.id) {
-            Color::srgba(1.0, 0.25, 0.1, 0.9)
-        } else {
-            Color::srgba(0.35, 0.85, 0.85, 0.65)
-        };
+    if edge_alpha > 0.0 {
+        for dep in model.dependencies.values() {
+            let (Some(pg), Some(sg)) = (geom.get(&dep.predecessor), geom.get(&dep.successor)) else {
+                continue;
+            };
 
-        gizmos.line_2d(src, dst, color);
-        draw_arrowhead(&mut gizmos, src, dst, color);
+            let (src, dst) = match dep.dependency_type {
+                DependencyType::FinishToStart => (Vec2::new(pg.xr, pg.y), Vec2::new(sg.xl, sg.y)),
+                DependencyType::StartToStart => (Vec2::new(pg.xl, pg.y), Vec2::new(sg.xl, sg.y)),
+                DependencyType::FinishToFinish => (Vec2::new(pg.xr, pg.y), Vec2::new(sg.xr, sg.y)),
+                DependencyType::StartToFinish => (Vec2::new(pg.xl, pg.y), Vec2::new(sg.xr, sg.y)),
+            };
+
+            let color = if violated.contains(&dep.id) {
+                Color::srgba(1.0, 0.25, 0.1, 0.9 * edge_alpha)
+            } else {
+                Color::srgba(0.35, 0.85, 0.85, 0.65 * edge_alpha)
+            };
+
+            gizmos.line_2d(src, dst, color);
+            draw_arrowhead(&mut gizmos, src, dst, color);
+        }
     }
 
     // In-progress drag line.
