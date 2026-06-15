@@ -52,6 +52,7 @@ fn main() {
         .insert_resource(labels::NestingDepthMap::default())
         .insert_resource(ResourceDragState::default())
         .insert_resource(ForkHoverState::default())
+        .insert_resource(SettingsWindowOpen::default())
         .add_systems(Startup, (setup_db, setup_camera))
         .add_systems(Startup, setup_demo_schedule.after(setup_db))
         .add_systems(PostStartup, update_analysis.before(blocks::reconcile_block_sprites))
@@ -227,6 +228,7 @@ fn main() {
         .add_systems(Update, draw_resource_timeline)
         .add_systems(Update, handle_resource_drag)
         .add_systems(EguiPrimaryContextPass, top_bar_ui)
+        .add_systems(EguiPrimaryContextPass, settings_window_ui)
         .add_systems(EguiPrimaryContextPass, side_panel_ui)
         .add_systems(EguiPrimaryContextPass, resource_row_labels_ui)
         .add_systems(EguiPrimaryContextPass, blocks::draw_name_edit_overlay)
@@ -486,6 +488,10 @@ fn task_view_active(mode: Res<schedule::TimelineViewMode>) -> bool {
 struct ForkHoverState {
     hovered_day: Option<model::Day>,
 }
+
+/// Tracks whether the floating "Plan Settings" window is open.
+#[derive(Resource, Default)]
+struct SettingsWindowOpen(bool);
 
 /// Tracks an in-progress drag in the resource timeline view.
 #[derive(Resource, Default)]
@@ -1056,6 +1062,7 @@ fn top_bar_ui(
     windows: Query<&Window>,
     mut view_mode: ResMut<schedule::TimelineViewMode>,
     today: Res<schedule::TodayMarker>,
+    mut settings_open: ResMut<SettingsWindowOpen>,
 ) {
     let Ok(ctx) = contexts.ctx_mut() else { return };
     egui::TopBottomPanel::top("top_bar")
@@ -1089,6 +1096,14 @@ fn top_bar_ui(
                         *view_mode = next;
                     }
                     ui.separator();
+                    let settings_label = egui::RichText::new("⚙").size(14.0);
+                    if ui.selectable_label(settings_open.0, settings_label)
+                        .on_hover_text("Plan Settings")
+                        .clicked()
+                    {
+                        settings_open.0 = !settings_open.0;
+                    }
+                    ui.separator();
                     if ui.small_button("→ Today").clicked() {
                         let x = today.day as f32 * PIXELS_PER_DAY;
                         target.pos.x = x;
@@ -1119,6 +1134,196 @@ fn confidence_to_factors(confidence: f32, cf: &model::ConfidenceFactors) -> (f32
     }
 }
 
+/// Floating "Plan Settings" window — Calendar config, Size Mapping,
+/// Confidence Spread, and Quarter Colors. Opened by the ⚙ button in the top bar.
+fn settings_window_ui(
+    mut contexts: EguiContexts,
+    mut open: ResMut<SettingsWindowOpen>,
+    mut model: ResMut<model::Model>,
+    conn: NonSend<rusqlite::Connection>,
+    mut new_size_label: Local<String>,
+    mut new_size_error: Local<Option<String>>,
+    mut date_edit_buf: Local<Option<String>>,
+) {
+    if !open.0 {
+        return;
+    }
+    let Ok(ctx) = contexts.ctx_mut() else { return };
+    egui::Window::new("Plan Settings")
+        .open(&mut open.0)
+        .min_width(220.0)
+        .resizable(false)
+        .show(ctx, |ui| {
+            ui.strong("Calendar");
+            let cal_start = model.calendar.start_date;
+            let buf = date_edit_buf
+                .get_or_insert_with(|| cal_start.format("%Y-%m-%d").to_string());
+            ui.label("Plan Start Date");
+            let resp = ui.text_edit_singleline(buf);
+            if resp.lost_focus() {
+                if let Ok(d) = NaiveDate::parse_from_str(buf.as_str(), "%Y-%m-%d") {
+                    model.calendar.start_date = d;
+                    if let Err(e) = db::save_model(&conn, &model) {
+                        error!("save_model failed: {e}");
+                    }
+                }
+                *buf = model.calendar.start_date.format("%Y-%m-%d").to_string();
+            } else if !resp.has_focus() {
+                *buf = cal_start.format("%Y-%m-%d").to_string();
+            }
+
+            ui.horizontal(|ui| {
+                ui.label("Working Days/Week");
+                let mut wdpw = model.calendar.working_days_per_week as i32;
+                if ui.add(egui::DragValue::new(&mut wdpw).range(1..=7).speed(0.05)).changed() {
+                    model.calendar.working_days_per_week = wdpw.clamp(1, 7) as u8;
+                    if let Err(e) = db::save_model(&conn, &model) {
+                        error!("save_model failed: {e}");
+                    }
+                }
+            });
+
+            ui.separator();
+            ui.collapsing("Size Mapping", |ui| {
+                let mut mapping_changed = false;
+                let mut to_remove: Option<usize> = None;
+                let mut swap_with_prev: Option<usize> = None;
+                let mut swap_with_next: Option<usize> = None;
+                let n = model.t_shirt_sizes.len();
+                for (i, size) in model.t_shirt_sizes.iter_mut().enumerate() {
+                    let row = ui.horizontal(|ui| {
+                        let up = ui.add_enabled(i > 0, egui::Button::new("↑").small()).clicked();
+                        let dn = ui.add_enabled(i + 1 < n, egui::Button::new("↓").small()).clicked();
+                        if up { swap_with_prev = Some(i); }
+                        if dn { swap_with_next = Some(i); }
+                        let label_changed = ui
+                            .add(egui::TextEdit::singleline(&mut size.label).desired_width(36.0))
+                            .lost_focus();
+                        let days_changed = ui
+                            .add(
+                                egui::DragValue::new(&mut size.days)
+                                    .speed(0.5)
+                                    .range(0.5f32..=120.0)
+                                    .suffix(" d"),
+                            )
+                            .changed();
+                        let removed = ui.small_button("×").clicked();
+                        if removed { to_remove = Some(i); }
+                        up || dn || label_changed || days_changed || removed
+                    });
+                    if row.inner { mapping_changed = true; }
+                }
+                if let Some(idx) = to_remove { model.t_shirt_sizes.remove(idx); }
+                if let Some(idx) = swap_with_prev { model.t_shirt_sizes.swap(idx - 1, idx); }
+                if let Some(idx) = swap_with_next { model.t_shirt_sizes.swap(idx, idx + 1); }
+                ui.horizontal(|ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut *new_size_label)
+                            .desired_width(36.0)
+                            .hint_text("label"),
+                    );
+                    if ui.small_button("+ Add").clicked() {
+                        let label = new_size_label.trim().to_string();
+                        if label.is_empty() {
+                            *new_size_error = Some("Label cannot be empty".to_string());
+                        } else if model.t_shirt_sizes.iter().any(|s| s.label == label) {
+                            *new_size_error = Some(format!("'{label}' already exists"));
+                        } else {
+                            model.t_shirt_sizes.push(model::TShirtSize { label, days: 1 });
+                            new_size_label.clear();
+                            *new_size_error = None;
+                            mapping_changed = true;
+                        }
+                    }
+                });
+                if let Some(ref err) = *new_size_error {
+                    ui.colored_label(egui::Color32::from_rgb(220, 60, 60), err);
+                }
+                if mapping_changed {
+                    let unique: std::collections::HashSet<_> =
+                        model.t_shirt_sizes.iter().map(|s| &s.label).collect();
+                    if unique.len() < model.t_shirt_sizes.len() {
+                        *new_size_error =
+                            Some("Duplicate size label — rename before saving".to_string());
+                    } else {
+                        *new_size_error = None;
+                        if let Err(e) = db::save_model(&conn, &model) {
+                            error!("save_model failed: {e}");
+                        }
+                    }
+                }
+            });
+
+            ui.collapsing("Confidence Spread", |ui| {
+                let mut cf = model.confidence_factors.clone();
+                let mut changed = false;
+                ui.label("50% confidence");
+                changed |= ui.horizontal(|ui| {
+                    let a = ui.add(
+                        egui::DragValue::new(&mut cf.opt_50)
+                            .speed(0.01).range(0.1f32..=1.0).prefix("opt ×").max_decimals(2),
+                    ).changed();
+                    let b = ui.add(
+                        egui::DragValue::new(&mut cf.pes_50)
+                            .speed(0.05).range(1.0f32..=10.0).prefix("pes ×").max_decimals(2),
+                    ).changed();
+                    a || b
+                }).inner;
+                ui.label("75% confidence");
+                changed |= ui.horizontal(|ui| {
+                    let a = ui.add(
+                        egui::DragValue::new(&mut cf.opt_75)
+                            .speed(0.01).range(0.1f32..=1.0).prefix("opt ×").max_decimals(2),
+                    ).changed();
+                    let b = ui.add(
+                        egui::DragValue::new(&mut cf.pes_75)
+                            .speed(0.05).range(1.0f32..=10.0).prefix("pes ×").max_decimals(2),
+                    ).changed();
+                    a || b
+                }).inner;
+                if changed {
+                    model.confidence_factors = cf;
+                    if let Err(e) = db::save_model(&conn, &model) {
+                        error!("save_model failed: {e}");
+                    }
+                }
+            });
+
+            ui.collapsing("Quarter Colors", |ui| {
+                let mut changed = false;
+                for (q, label) in ["Q1", "Q2", "Q3", "Q4"].iter().enumerate() {
+                    ui.label(*label);
+                    let c = &mut model.calendar.quarter_colors[q];
+                    changed |= ui.horizontal(|ui| {
+                        let r = ui.add(
+                            egui::DragValue::new(&mut c[0])
+                                .speed(0.01).range(0.0f32..=1.0).prefix("R ").max_decimals(2),
+                        ).changed();
+                        let g = ui.add(
+                            egui::DragValue::new(&mut c[1])
+                                .speed(0.01).range(0.0f32..=1.0).prefix("G ").max_decimals(2),
+                        ).changed();
+                        let b = ui.add(
+                            egui::DragValue::new(&mut c[2])
+                                .speed(0.01).range(0.0f32..=1.0).prefix("B ").max_decimals(2),
+                        ).changed();
+                        let a = ui.add(
+                            egui::DragValue::new(&mut c[3])
+                                .speed(0.005).range(0.0f32..=1.0).prefix("A ").max_decimals(3),
+                        ).changed();
+                        r || g || b || a
+                    }).inner;
+                }
+                if changed {
+                    if let Err(e) = db::save_model(&conn, &model) {
+                        error!("save_model failed: {e}");
+                    }
+                }
+            });
+        });
+}
+
+#[allow(clippy::too_many_arguments)]
 fn side_panel_ui(
     mut contexts: EguiContexts,
     mut selected: ResMut<blocks::SelectedBlock>,
@@ -1128,12 +1333,9 @@ fn side_panel_ui(
     mut cycle_error: Local<Option<String>>,
     mut scope: ResMut<schedule::ViewScope>,
     mut create_state: ResMut<blocks::CreateModeState>,
-    mut new_size_label: Local<String>,
-    mut new_size_error: Local<Option<String>>,
     mut camera_target: ResMut<CameraTarget>,
     mut compare_state: ResMut<blocks::ComparePlanState>,
     today: Res<schedule::TodayMarker>,
-    mut date_edit_buf: Local<Option<String>>,
     mut new_resource_name: Local<String>,
 ) {
     let Ok(ctx) = contexts.ctx_mut() else { return };
@@ -1269,44 +1471,6 @@ fn side_panel_ui(
             }
 
             ui.separator();
-            ui.label("Calendar");
-
-            let cal_start = model.calendar.start_date;
-
-            // Persistent buffer so partial typing isn't reset each frame from the model.
-            let buf = date_edit_buf.get_or_insert_with(|| cal_start.format("%Y-%m-%d").to_string());
-
-            ui.label("Plan Start Date");
-            let resp = ui.text_edit_singleline(buf);
-            if resp.lost_focus() {
-                if let Ok(d) = NaiveDate::parse_from_str(buf.as_str(), "%Y-%m-%d") {
-                    model.calendar.start_date = d;
-                    if let Err(e) = db::save_model(&conn, &model) {
-                        error!("save_model failed: {e}");
-                    }
-                }
-                // Reset buffer to canonical form (valid or revert to model value).
-                *buf = model.calendar.start_date.format("%Y-%m-%d").to_string();
-            } else if !resp.has_focus() {
-                // Keep buffer in sync when model changes externally (e.g. after load).
-                *buf = cal_start.format("%Y-%m-%d").to_string();
-            }
-
-            ui.horizontal(|ui| {
-                ui.label("Working Days/Week");
-                let mut wdpw = model.calendar.working_days_per_week as i32;
-                if ui
-                    .add(egui::DragValue::new(&mut wdpw).range(1..=7).speed(0.05))
-                    .changed()
-                {
-                    model.calendar.working_days_per_week = wdpw.clamp(1, 7) as u8;
-                    if let Err(e) = db::save_model(&conn, &model) {
-                        error!("save_model failed: {e}");
-                    }
-                }
-            });
-
-            ui.separator();
 
             let label = if create_state.active {
                 "⏹ Creating Blocks [N]"
@@ -1319,182 +1483,6 @@ fn side_panel_ui(
                     create_state.text_buf.clear();
                 }
             }
-
-            ui.separator();
-            ui.collapsing("Size Mapping", |ui| {
-                let mut mapping_changed = false;
-                let mut to_remove: Option<usize> = None;
-                let mut swap_with_prev: Option<usize> = None;
-                let mut swap_with_next: Option<usize> = None;
-                let n = model.t_shirt_sizes.len();
-                for (i, size) in model.t_shirt_sizes.iter_mut().enumerate() {
-                    let row = ui.horizontal(|ui| {
-                        let up = ui.add_enabled(i > 0, egui::Button::new("↑").small()).clicked();
-                        let dn = ui.add_enabled(i + 1 < n, egui::Button::new("↓").small()).clicked();
-                        if up { swap_with_prev = Some(i); }
-                        if dn { swap_with_next = Some(i); }
-                        let label_changed = ui
-                            .add(egui::TextEdit::singleline(&mut size.label).desired_width(36.0))
-                            .lost_focus();
-                        let days_changed = ui
-                            .add(
-                                egui::DragValue::new(&mut size.days)
-                                    .speed(0.5)
-                                    .range(0.5f32..=120.0)
-                                    .suffix(" d"),
-                            )
-                            .changed();
-                        let removed = ui.small_button("×").clicked();
-                        if removed {
-                            to_remove = Some(i);
-                        }
-                        up || dn || label_changed || days_changed || removed
-                    });
-                    if row.inner {
-                        mapping_changed = true;
-                    }
-                }
-                if let Some(idx) = to_remove {
-                    model.t_shirt_sizes.remove(idx);
-                }
-                if let Some(idx) = swap_with_prev {
-                    model.t_shirt_sizes.swap(idx - 1, idx);
-                }
-                if let Some(idx) = swap_with_next {
-                    model.t_shirt_sizes.swap(idx, idx + 1);
-                }
-
-                // New-size input row: validate uniqueness before inserting.
-                ui.horizontal(|ui| {
-                    ui.add(
-                        egui::TextEdit::singleline(&mut *new_size_label)
-                            .desired_width(36.0)
-                            .hint_text("label"),
-                    );
-                    if ui.small_button("+ Add").clicked() {
-                        let label = new_size_label.trim().to_string();
-                        if label.is_empty() {
-                            *new_size_error = Some("Label cannot be empty".to_string());
-                        } else if model.t_shirt_sizes.iter().any(|s| s.label == label) {
-                            *new_size_error = Some(format!("'{label}' already exists"));
-                        } else {
-                            model.t_shirt_sizes.push(model::TShirtSize { label, days: 1 });
-                            new_size_label.clear();
-                            *new_size_error = None;
-                            mapping_changed = true;
-                        }
-                    }
-                });
-                if let Some(ref err) = *new_size_error {
-                    ui.colored_label(egui::Color32::from_rgb(220, 60, 60), err);
-                }
-
-                if mapping_changed {
-                    // Guard against duplicate labels from inline edits before saving.
-                    let unique: std::collections::HashSet<_> =
-                        model.t_shirt_sizes.iter().map(|s| &s.label).collect();
-                    if unique.len() < model.t_shirt_sizes.len() {
-                        *new_size_error =
-                            Some("Duplicate size label — rename before saving".to_string());
-                    } else {
-                        *new_size_error = None;
-                        if let Err(e) = db::save_model(&conn, &model) {
-                            error!("save_model failed: {e}");
-                        }
-                    }
-                }
-            });
-
-            ui.collapsing("Confidence Spread", |ui| {
-                let mut cf = model.confidence_factors.clone();
-                let mut changed = false;
-                ui.label("50% confidence");
-                changed |= ui.horizontal(|ui| {
-                    let a = ui.add(
-                        egui::DragValue::new(&mut cf.opt_50)
-                            .speed(0.01)
-                            .range(0.1f32..=1.0)
-                            .prefix("opt ×")
-                            .max_decimals(2),
-                    ).changed();
-                    let b = ui.add(
-                        egui::DragValue::new(&mut cf.pes_50)
-                            .speed(0.05)
-                            .range(1.0f32..=10.0)
-                            .prefix("pes ×")
-                            .max_decimals(2),
-                    ).changed();
-                    a || b
-                }).inner;
-                ui.label("75% confidence");
-                changed |= ui.horizontal(|ui| {
-                    let a = ui.add(
-                        egui::DragValue::new(&mut cf.opt_75)
-                            .speed(0.01)
-                            .range(0.1f32..=1.0)
-                            .prefix("opt ×")
-                            .max_decimals(2),
-                    ).changed();
-                    let b = ui.add(
-                        egui::DragValue::new(&mut cf.pes_75)
-                            .speed(0.05)
-                            .range(1.0f32..=10.0)
-                            .prefix("pes ×")
-                            .max_decimals(2),
-                    ).changed();
-                    a || b
-                }).inner;
-                if changed {
-                    model.confidence_factors = cf;
-                    if let Err(e) = db::save_model(&conn, &model) {
-                        error!("save_model failed: {e}");
-                    }
-                }
-            });
-
-            ui.collapsing("Quarter Colors", |ui| {
-                let mut changed = false;
-                for (q, label) in ["Q1", "Q2", "Q3", "Q4"].iter().enumerate() {
-                    ui.label(*label);
-                    let c = &mut model.calendar.quarter_colors[q];
-                    changed |= ui.horizontal(|ui| {
-                        let r = ui.add(
-                            egui::DragValue::new(&mut c[0])
-                                .speed(0.01)
-                                .range(0.0f32..=1.0)
-                                .prefix("R ")
-                                .max_decimals(2),
-                        ).changed();
-                        let g = ui.add(
-                            egui::DragValue::new(&mut c[1])
-                                .speed(0.01)
-                                .range(0.0f32..=1.0)
-                                .prefix("G ")
-                                .max_decimals(2),
-                        ).changed();
-                        let b = ui.add(
-                            egui::DragValue::new(&mut c[2])
-                                .speed(0.01)
-                                .range(0.0f32..=1.0)
-                                .prefix("B ")
-                                .max_decimals(2),
-                        ).changed();
-                        let a = ui.add(
-                            egui::DragValue::new(&mut c[3])
-                                .speed(0.005)
-                                .range(0.0f32..=1.0)
-                                .prefix("A ")
-                                .max_decimals(3),
-                        ).changed();
-                        r || g || b || a
-                    }).inner;
-                }
-                if changed {
-                    if let Err(e) = db::save_model(&conn, &model) {
-                        error!("save_model failed: {e}");
-                    }
-                }
-            });
 
             // ── Plan Comparison ───────────────────────────────────────────────────
             ui.separator();
