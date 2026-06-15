@@ -43,6 +43,7 @@ fn main() {
         .insert_resource(schedule::ViewScope::default())
         .insert_resource(schedule::TimelineViewMode::default())
         .insert_resource(schedule::VisibleBlocks::default())
+        .insert_resource(schedule::DragActive::default())
         .insert_resource(analysis::ScheduleAnalysis::default())
         .insert_resource(schedule::TodayMarker::default())
         .insert_resource(blocks::BlockSpriteMap::default())

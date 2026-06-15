@@ -847,14 +847,17 @@ pub fn handle_block_resize(
     conn: NonSend<rusqlite::Connection>,
     block_query: Query<(&BlockSprite, &Transform, &Sprite)>,
     dep_drag: Res<DepDragState>,
+    mut drag_active: ResMut<schedule::DragActive>,
 ) {
     if dep_drag.from.is_some() {
         resize.dragging = None;
+        drag_active.0 = false;
         return;
     }
     if let Ok(ctx) = egui_ctx.ctx_mut() {
         if ctx.is_pointer_over_area() {
             resize.dragging = None;
+            drag_active.0 = false;
             return;
         }
     }
@@ -863,6 +866,7 @@ pub fn handle_block_resize(
     let Ok((camera, camera_transform)) = camera.single() else { return };
     let Some(cursor_pos) = window.cursor_position() else {
         resize.dragging = None;
+        drag_active.0 = false;
         return;
     };
     let Ok(world_pos) = camera.viewport_to_world_2d(camera_transform, cursor_pos) else {
@@ -872,6 +876,7 @@ pub fn handle_block_resize(
     // Press: hit-test the right-edge handle.
     if mouse.just_pressed(MouseButton::Left) {
         resize.dragging = None;
+        drag_active.0 = false;
         for (block_sprite, transform, sprite) in &block_query {
             let Some(size) = sprite.custom_size else { continue };
             let center = transform.translation.truncate();
@@ -882,6 +887,7 @@ pub fn handle_block_resize(
                 && world_pos.y <= center.y + half.y
             {
                 resize.dragging = Some(block_sprite.work_block_id);
+                drag_active.0 = true;
                 break;
             }
         }
@@ -891,6 +897,7 @@ pub fn handle_block_resize(
     // Held: update duration_days so the right edge follows the cursor.
     if mouse.pressed(MouseButton::Left) {
         if let Some(id) = resize.dragging {
+            drag_active.0 = true;
             if let Some(wb) = model.work_blocks.get_mut(&id) {
                 let raw_dur =
                     ((world_pos.x - wb.start_day as f32 * PIXELS_PER_DAY) / PIXELS_PER_DAY).max(1.0);
@@ -902,6 +909,7 @@ pub fn handle_block_resize(
 
     // Release: cascade constraints and persist.
     if mouse.just_released(MouseButton::Left) {
+        drag_active.0 = false;
         if let Some(id) = resize.dragging.take() {
             schedule::cascade_dependencies(&mut model, id);
             if let Err(e) = db::save_model(&conn, &model) {
@@ -933,15 +941,18 @@ pub fn handle_block_drag(
     resize: Res<ResizeDragState>,
     dep_drag: Res<DepDragState>,
     active_schedule: Res<schedule::Schedule>,
+    mut drag_active: ResMut<schedule::DragActive>,
 ) {
     if dep_drag.from.is_some() {
         drag.dragging = None;
+        drag_active.0 = false;
         return;
     }
     // Guard: egui owns the pointer when the cursor is over any egui area.
     if let Ok(ctx) = egui_ctx.ctx_mut() {
         if ctx.is_pointer_over_area() {
             drag.dragging = None;
+            drag_active.0 = false;
             return;
         }
     }
@@ -952,6 +963,7 @@ pub fn handle_block_drag(
     };
     let Some(cursor_pos) = window.cursor_position() else {
         drag.dragging = None;
+        drag_active.0 = false;
         return;
     };
     let Ok(world_pos) = camera.viewport_to_world_2d(camera_transform, cursor_pos) else {
@@ -961,6 +973,7 @@ pub fn handle_block_drag(
     // Press: hit-test and start drag. Skip if a resize is already in progress.
     if mouse.just_pressed(MouseButton::Left) {
         drag.dragging = None;
+        drag_active.0 = false;
         if resize.dragging.is_some() {
             return;
         }
@@ -981,6 +994,7 @@ pub fn handle_block_drag(
                     .unwrap_or(0.0);
                 // Offset preserves where within the block the user grabbed.
                 drag.dragging = Some((id, world_pos.x - start_px));
+                drag_active.0 = true;
                 selected.0 = Some(id);
                 break;
             }
@@ -991,6 +1005,7 @@ pub fn handle_block_drag(
     // Held: slide start_day to follow cursor.
     if mouse.pressed(MouseButton::Left) {
         if let Some((id, offset_px)) = drag.dragging {
+            drag_active.0 = true;
             let branch_min = model
                 .plans
                 .get(&active_schedule.plan_id)
@@ -1009,6 +1024,7 @@ pub fn handle_block_drag(
 
     // Release: cascade dependencies and persist.
     if mouse.just_released(MouseButton::Left) {
+        drag_active.0 = false;
         if let Some((id, _)) = drag.dragging.take() {
             schedule::cascade_dependencies(&mut model, id);
             if let Err(e) = db::save_model(&conn, &model) {

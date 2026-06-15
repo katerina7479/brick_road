@@ -190,16 +190,27 @@ pub struct VisibleBlocks {
     pub ids: Vec<WorkBlockId>,
 }
 
+/// Set to `true` while a block drag or resize is in progress.
+/// `update_visible_blocks` skips re-sorting while this is true so rows stay
+/// stable under the block being dragged. Row order is re-evaluated on release.
+#[derive(Debug, Default, Resource)]
+pub struct DragActive(pub bool);
+
 /// Refreshes `VisibleBlocks` when the model or view scope changes.
 ///
-/// Only writes to `cache.ids` when the content actually changes, so downstream
-/// systems that check `visible_blocks.is_changed()` do not fire on every frame
-/// during block drag/resize (where only position changes, not the visible set).
+/// Skips re-sorting while a drag is active (`DragActive`) so row order stays
+/// stable mid-drag. Only writes to `cache.ids` when content actually changes,
+/// so downstream systems that check `visible_blocks.is_changed()` do not fire
+/// on every frame during drag/resize (where only position changes).
 pub fn update_visible_blocks(
     model: Res<Model>,
     scope: Res<ViewScope>,
+    drag_active: Res<DragActive>,
     mut cache: ResMut<VisibleBlocks>,
 ) {
+    if drag_active.0 {
+        return;
+    }
     if !model.is_changed() && !scope.is_changed() {
         return;
     }
