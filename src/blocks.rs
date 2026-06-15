@@ -307,29 +307,51 @@ pub fn reconcile_block_sprites(
         }
     }
 
-    // Packed row assignment: greedy interval scheduling so non-overlapping
-    // blocks share a row instead of cascading into a diagonal staircase.
-    // Blocks in visible_blocks.ids are already sorted by start_day, which
-    // satisfies the greedy-earliest-start precondition.
-    let mut row_ends: Vec<Day> = Vec::new();
-    let id_to_row: HashMap<WorkBlockId, usize> = visible_blocks
-        .ids
-        .iter()
-        .filter_map(|&id| {
-            let wb = model.work_blocks.get(&id)?;
-            let row = row_ends
-                .iter()
-                .position(|&end| wb.start_day >= end)
-                .unwrap_or(row_ends.len());
-            let block_end = wb.start_day + wb.duration_days;
-            if row < row_ends.len() {
-                row_ends[row] = block_end;
-            } else {
-                row_ends.push(block_end);
+    // Row assignment: blocks with an explicit `wb.row` pin stay on that row.
+    // Remaining blocks are greedy-packed from row 0, skipping time ranges
+    // already occupied by pinned or previously placed blocks.
+    // row_occupancy maps row index → list of (start_day, end_day) intervals.
+    let mut row_occupancy: HashMap<usize, Vec<(Day, Day)>> = HashMap::new();
+    let mut id_to_row: HashMap<WorkBlockId, usize> = HashMap::new();
+
+    // Phase 1: honour explicit row pins.
+    for &id in &visible_blocks.ids {
+        let Some(wb) = model.work_blocks.get(&id) else { continue };
+        if let Some(pinned) = wb.row {
+            let r = pinned.max(0) as usize;
+            id_to_row.insert(id, r);
+            row_occupancy
+                .entry(r)
+                .or_default()
+                .push((wb.start_day, wb.start_day + wb.duration_days));
+        }
+    }
+
+    // Phase 2: greedy-pack blocks without an explicit row pin.
+    for &id in &visible_blocks.ids {
+        if id_to_row.contains_key(&id) {
+            continue;
+        }
+        let Some(wb) = model.work_blocks.get(&id) else { continue };
+        let end = wb.start_day + wb.duration_days;
+        let mut r = 0;
+        loop {
+            let fits = row_occupancy
+                .get(&r)
+                .map(|intervals| {
+                    intervals
+                        .iter()
+                        .all(|&(s, e)| wb.start_day >= e || end <= s)
+                })
+                .unwrap_or(true);
+            if fits {
+                break;
             }
-            Some((id, row))
-        })
-        .collect();
+            r += 1;
+        }
+        id_to_row.insert(id, r);
+        row_occupancy.entry(r).or_default().push((wb.start_day, end));
+    }
 
     // Reconcile each visible block in row order.
     for &id in &visible_blocks.ids {
@@ -988,7 +1010,7 @@ pub fn handle_block_drag(
         return;
     }
 
-    // Held: slide start_day to follow cursor.
+    // Held: slide start_day and row to follow cursor.
     if mouse.pressed(MouseButton::Left) {
         if let Some((id, offset_px)) = drag.dragging {
             let branch_min = model
@@ -1000,8 +1022,10 @@ pub fn handle_block_drag(
                 .max(0.0)
                 .round() as Day;
             let new_start = new_start.max(branch_min);
+            let new_row = ((-world_pos.y) / ROW_HEIGHT).round().max(0.0) as i32;
             if let Some(wb) = model.work_blocks.get_mut(&id) {
                 wb.start_day = new_start;
+                wb.row = Some(new_row);
             }
         }
         return;

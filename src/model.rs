@@ -61,6 +61,10 @@ pub struct WorkBlock {
     /// Selected t-shirt size label (e.g. "M"), if any. The resolved day count
     /// is always stored in `duration_days`; this tracks which size was chosen.
     pub t_shirt_size: Option<String>,
+    /// User-pinned timeline row. `None` means auto-pack with greedy interval
+    /// scheduling. `Some(r)` means the user dragged this block to row `r` and
+    /// it must stay there even if other blocks overlap the same time range.
+    pub row: Option<i32>,
 }
 
 /// A named t-shirt size that maps a label (e.g. "M") to a day count.
@@ -278,6 +282,7 @@ impl Model {
                 description: String::new(),
                 priority: 1,
                 t_shirt_size: None,
+                row: None,
             },
         );
         id
