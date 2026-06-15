@@ -1820,6 +1820,9 @@ struct DeletedBlockSnapshot {
     plan_sel_vars: Vec<(model::PlanId, Vec<(WorkBlockId, model::VariantId)>)>,
     /// (plan_id, allocations for deleted blocks)
     plan_allocs: Vec<(model::PlanId, Vec<model::ResourceAllocation>)>,
+    /// (variant_id, child_ids) for surviving variants whose children lists
+    /// contained deleted blocks — needed to restore hierarchy on undo.
+    variant_child_refs: Vec<(model::VariantId, Vec<WorkBlockId>)>,
 }
 
 /// Single-slot undo buffer for block deletions. Holds the most recent deletion;
@@ -1897,7 +1900,33 @@ fn build_deletion_snapshot(model: &model::Model, id: WorkBlockId) -> DeletedBloc
         }
     }
 
-    DeletedBlockSnapshot { blocks, variants, dependencies, plan_roots, plan_sel_vars, plan_allocs }
+    // Capture references from surviving variants (not owned by deleted blocks)
+    // whose children lists include deleted blocks — delete_work_block strips
+    // these but restore needs to re-add them.
+    let variant_child_refs = model
+        .variants
+        .iter()
+        .filter(|(_, v)| !delete_set.contains(&v.parent))
+        .filter_map(|(&vid, v)| {
+            let refs: Vec<WorkBlockId> = v
+                .children
+                .iter()
+                .filter(|&&b| delete_set.contains(&b))
+                .copied()
+                .collect();
+            if refs.is_empty() { None } else { Some((vid, refs)) }
+        })
+        .collect();
+
+    DeletedBlockSnapshot {
+        blocks,
+        variants,
+        dependencies,
+        plan_roots,
+        plan_sel_vars,
+        plan_allocs,
+        variant_child_refs,
+    }
 }
 
 fn restore_deletion_snapshot(model: &mut model::Model, snap: DeletedBlockSnapshot) {
@@ -1935,6 +1964,15 @@ fn restore_deletion_snapshot(model: &mut model::Model, snap: DeletedBlockSnapsho
                     .any(|a| a.work_block_id == alloc.work_block_id && a.resource_id == alloc.resource_id);
                 if !already {
                     plan.allocations.push(alloc);
+                }
+            }
+        }
+    }
+    for (vid, children) in snap.variant_child_refs {
+        if let Some(var) = model.variants.get_mut(&vid) {
+            for bid in children {
+                if !var.children.contains(&bid) {
+                    var.children.push(bid);
                 }
             }
         }

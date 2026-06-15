@@ -100,7 +100,8 @@ fn main() {
                 .before(blocks::sync_uncertainty_overlays)
                 .before(blocks::draw_dependency_edges)
                 .before(blocks::draw_block_handles)
-                .after(blocks::handle_block_delete),
+                .after(blocks::handle_block_delete)
+                .after(blocks::handle_undo),
         )
         .add_systems(Update, blocks::handle_name_edit)
         .add_systems(
