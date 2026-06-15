@@ -9,6 +9,12 @@ use crate::{
     schedule::{self, ViewScope},
 };
 
+/// Left-edge margin (px) for the plan-start anchor on Home / Fit.
+const HOME_LEFT_MARGIN: f32 = 24.0;
+/// Top-edge margin (px) for the first row anchor on Home / Fit.
+/// Sized to clear the egui top bar (~34 px) plus comfortable padding.
+const HOME_TOP_MARGIN: f32 = 84.0;
+
 /// Desired camera state. Input systems write here; the smoothing system reads it.
 #[derive(Resource)]
 pub struct CameraTarget {
@@ -71,8 +77,13 @@ pub fn camera_nav_keys(
         return;
     }
     if keyboard.just_pressed(KeyCode::Home) {
-        target.pos = Vec2::ZERO;
+        let Ok(window) = windows.single() else { return };
+        let w = window.width();
+        let h = window.height();
         target.zoom = 1.0;
+        // Anchor day-0 / row-0 to the upper-left corner with margin.
+        target.pos.x = w * 0.5 - HOME_LEFT_MARGIN;
+        target.pos.y = ROW_HEIGHT * 0.5 - (h * 0.5 - HOME_TOP_MARGIN);
     }
     if keyboard.just_pressed(KeyCode::KeyF) {
         if let Some(new_target) = fit_to_blocks(&model, &scope, &windows) {
@@ -118,19 +129,17 @@ pub fn fit_to_blocks(
 
     const MARGIN: f32 = 1.15;
     let avail_w = (window_w - SIDE_PANEL_WIDTH).max(1.0);
-    let avail_h = window_h.max(1.0);
+    let avail_h = (window_h - HOME_TOP_MARGIN).max(1.0);
 
     let zoom = ((x_span / avail_w).max(y_span / avail_h) * MARGIN).clamp(0.15, 6.0);
 
-    // Centre the blocks in the timeline area (left portion of window, right panel excluded).
-    // The camera pos maps to the window centre; shift left by half the panel width
-    // so blocks appear centred in the available area to the left of the panel.
-    let blocks_cx = (x_min + x_max) * 0.5;
-    let blocks_cy = (y_min + y_max) * 0.5;
-    let pos_x = blocks_cx + zoom * SIDE_PANEL_WIDTH * 0.5;
+    // Anchor plan start at the upper-left corner of the timeline viewport.
+    // pos is the world-space point at the window centre.
+    let pos_x = x_min + (window_w * 0.5 - HOME_LEFT_MARGIN) * zoom;
+    let pos_y = y_max - (window_h * 0.5 - HOME_TOP_MARGIN) * zoom;
 
     Some(CameraTarget {
-        pos: Vec2::new(pos_x, blocks_cy),
+        pos: Vec2::new(pos_x, pos_y),
         zoom,
     })
 }
