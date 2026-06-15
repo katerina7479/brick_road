@@ -358,11 +358,17 @@ pub fn sync_block_sprites(
             Color::from(base)
         };
 
-        // Desaturate and dim blocks that are entirely in the past.
+        // Subtly mute blocks that are entirely in the past: partial desaturation
+        // and slight dimming so they remain readable but look clearly historical.
         if wb.start_day + wb.duration_days <= today.day {
             let c = sprite.color.to_linear();
             let lum = 0.2126 * c.red + 0.7152 * c.green + 0.0722 * c.blue;
-            sprite.color = Color::from(LinearRgba::new(lum * 0.35, lum * 0.35, lum * 0.35, 0.4));
+            // Blend 40% toward grayscale, dim to 75%, keep mostly opaque.
+            let desat = 0.40_f32;
+            let r = c.red + (lum - c.red) * desat;
+            let g = c.green + (lum - c.green) * desat;
+            let b = c.blue + (lum - c.blue) * desat;
+            sprite.color = Color::from(LinearRgba::new(r * 0.75, g * 0.75, b * 0.75, 0.72));
         }
     }
 }
