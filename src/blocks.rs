@@ -56,12 +56,12 @@ pub struct DescriptionDot {
 
 /// HDR linear palette — one or more channels > 1.0 so the Bloom post-process fires.
 const PALETTE: &[LinearRgba] = &[
-    LinearRgba::new(2.0, 0.5, 0.1, 1.0), // amber
-    LinearRgba::new(0.2, 1.8, 0.5, 1.0), // green
-    LinearRgba::new(0.2, 0.8, 3.0, 1.0), // cyan
-    LinearRgba::new(2.2, 0.3, 1.5, 1.0), // magenta
-    LinearRgba::new(2.5, 1.8, 0.1, 1.0), // yellow
-    LinearRgba::new(0.5, 0.5, 3.0, 1.0), // blue
+    LinearRgba::new(0.25, 0.65, 2.80, 1.0), // indigo
+    LinearRgba::new(0.20, 1.70, 0.80, 1.0), // emerald
+    LinearRgba::new(2.20, 0.55, 0.15, 1.0), // orange
+    LinearRgba::new(1.50, 0.30, 2.20, 1.0), // violet
+    LinearRgba::new(0.15, 1.50, 1.60, 1.0), // teal
+    LinearRgba::new(2.40, 1.60, 0.10, 1.0), // gold
 ];
 
 /// HDR gold applied to every block on the critical path.
@@ -410,12 +410,12 @@ pub fn sync_block_sprites(
         if wb.start_day + wb.duration_days <= today.day {
             let c = sprite.color.to_linear();
             let lum = 0.2126 * c.red + 0.7152 * c.green + 0.0722 * c.blue;
-            // Blend 40% toward grayscale, dim to 75%, keep mostly opaque.
-            let desat = 0.40_f32;
+            // Blend 25% toward grayscale, dim to 85%, keep mostly opaque.
+            let desat = 0.25_f32;
             let r = c.red + (lum - c.red) * desat;
             let g = c.green + (lum - c.green) * desat;
             let b = c.blue + (lum - c.blue) * desat;
-            sprite.color = Color::from(LinearRgba::new(r * 0.75, g * 0.75, b * 0.75, 0.72));
+            sprite.color = Color::from(LinearRgba::new(r * 0.85, g * 0.85, b * 0.85, 0.80));
         }
     }
 }

@@ -31,7 +31,7 @@ fn main() {
             ..default()
         }))
         .add_plugins(EguiPlugin::default())
-        .insert_resource(ClearColor(Color::srgb(0.02, 0.02, 0.05)))
+        .insert_resource(ClearColor(Color::srgb(0.07, 0.08, 0.11)))
         .insert_resource(CameraTarget::default())
         .insert_resource(blocks::SelectedBlock::default())
         .insert_resource(blocks::NameEditState::default())
@@ -244,9 +244,9 @@ fn draw_grid(
     cam_q: Query<(&Transform, &Projection), With<Camera2d>>,
     windows: Query<&Window>,
 ) {
-    let line_color       = Color::srgba(0.3, 0.3, 0.5, 0.15);
-    let past_line_color  = Color::srgba(0.3, 0.3, 0.5, 0.05);
-    let baseline_color   = Color::srgba(0.4, 0.4, 0.6, 0.35);
+    let line_color       = Color::srgba(0.42, 0.46, 0.60, 0.13);
+    let past_line_color  = Color::srgba(0.38, 0.42, 0.55, 0.06);
+    let baseline_color   = Color::srgba(0.50, 0.55, 0.70, 0.28);
     let today_line_color = Color::from(LinearRgba::new(4.0, 2.0, 0.5, 1.0)); // HDR → Bloom
 
     let Ok((cam_t, proj)) = cam_q.single() else { return };
@@ -331,8 +331,8 @@ fn sync_weekend_bands(
     }
 
     let span = schedule.total_duration_days + 10;
-    let weekend_color = Color::srgba(0.35, 0.30, 0.50, 0.10);
-    let holiday_color = Color::srgba(0.70, 0.25, 0.25, 0.15);
+    let weekend_color = Color::srgba(0.22, 0.26, 0.42, 0.09);
+    let holiday_color = Color::srgba(0.72, 0.28, 0.28, 0.11);
 
     for (x, is_holiday) in weekend_band_positions(span, &model) {
         let color = if is_holiday { holiday_color } else { weekend_color };
@@ -625,7 +625,7 @@ fn draw_resource_timeline(
             .push((c.window_start, c.window_end));
     }
 
-    let row_sep = Color::srgba(0.3, 0.3, 0.5, 0.2);
+    let row_sep = Color::srgba(0.38, 0.42, 0.58, 0.15);
     let alloc_ok = Color::srgba(0.2, 1.8, 0.6, 0.7);
     let alloc_conflict = Color::srgba(2.5, 0.3, 0.3, 0.9);
     let bar_h = constants::ROW_HEIGHT * 0.65;
