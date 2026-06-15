@@ -1123,6 +1123,7 @@ fn confidence_to_factors(confidence: f32, cf: &model::ConfidenceFactors) -> (f32
 fn side_panel_ui(
     mut contexts: EguiContexts,
     mut selected: ResMut<blocks::SelectedBlock>,
+    mut multi: ResMut<blocks::MultiSelection>,
     mut model: ResMut<model::Model>,
     mut schedule: ResMut<schedule::Schedule>,
     conn: NonSend<rusqlite::Connection>,
