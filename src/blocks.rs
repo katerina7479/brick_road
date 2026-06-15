@@ -71,6 +71,11 @@ const CRITICAL_PATH_COLOR: LinearRgba = LinearRgba::new(3.0, 2.5, 0.0, 1.0);
 #[derive(Resource, Default)]
 pub struct SelectedBlock(pub Option<WorkBlockId>);
 
+/// Tracks a multi-block selection (shift-click / ctrl-click / cmd-click).
+/// When this set has ≥ 2 entries the side panel shows batch-edit mode.
+#[derive(Resource, Default)]
+pub struct MultiSelection(pub HashSet<WorkBlockId>);
+
 /// Maps each currently-visible `WorkBlockId` to its `BlockSprite` entity.
 ///
 /// Maintained by `reconcile_block_sprites` to allow incremental ECS updates:
