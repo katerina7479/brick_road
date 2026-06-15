@@ -235,7 +235,7 @@ pub struct Plan {
 
 /// Central data store. All entities are keyed by their ID type.
 /// Derives `Resource` so Bevy can manage it as an ECS resource.
-#[derive(Debug, Default, Resource, PartialEq)]
+#[derive(Debug, Default, Clone, Resource, PartialEq)]
 pub struct Model {
     next_id: u64,
     pub work_blocks: HashMap<WorkBlockId, WorkBlock>,

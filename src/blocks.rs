@@ -567,6 +567,7 @@ pub fn handle_block_selection(
     mut last_empty_click: Local<f32>,
     dep_drag: Res<DepDragState>,
     active_schedule: Res<schedule::Schedule>,
+    mode: Res<schedule::TimelineViewMode>,
 ) {
     // Yield when a dep-handle drag is in progress.
     if dep_drag.from.is_some() {
@@ -599,21 +600,74 @@ pub fn handle_block_selection(
         return;
     };
 
-    // Hit-test each block sprite against its axis-aligned bounding rect.
+    // Hit-test each block sprite against its axis-aligned bounding rect (task view).
     let mut clicked: Option<WorkBlockId> = None;
-    for (block_sprite, transform, sprite) in &block_query {
-        let Some(size) = sprite.custom_size else {
-            continue;
-        };
-        let center = transform.translation.truncate();
-        let half = size * 0.5;
-        if world_pos.x >= center.x - half.x
-            && world_pos.x <= center.x + half.x
-            && world_pos.y >= center.y - half.y
-            && world_pos.y <= center.y + half.y
-        {
-            clicked = Some(block_sprite.work_block_id);
-            break;
+    if *mode == schedule::TimelineViewMode::Task {
+        for (block_sprite, transform, sprite) in &block_query {
+            let Some(size) = sprite.custom_size else {
+                continue;
+            };
+            let center = transform.translation.truncate();
+            let half = size * 0.5;
+            if world_pos.x >= center.x - half.x
+                && world_pos.x <= center.x + half.x
+                && world_pos.y >= center.y - half.y
+                && world_pos.y <= center.y + half.y
+            {
+                clicked = Some(block_sprite.work_block_id);
+                break;
+            }
+        }
+    } else if *mode == schedule::TimelineViewMode::Resource {
+        // Resource view uses gizmos, not sprites. Hit-test against the same
+        // geometry that draw_resource_timeline uses.
+        let bar_h = ROW_HEIGHT * 0.65;
+        if let Some(plan) = model.plans.get(&active_schedule.plan_id) {
+            let mut resources: Vec<_> = model.resource_blocks.values().collect();
+            resources.sort_by_key(|r| r.id.0);
+
+            'resource_rows: for (row_idx, resource) in resources.iter().enumerate() {
+                let row_y = -(row_idx as f32) * ROW_HEIGHT;
+                for alloc in &plan.allocations {
+                    if alloc.resource_id != resource.id {
+                        continue;
+                    }
+                    if let Some(wb) = model.work_blocks.get(&alloc.work_block_id) {
+                        let x0 = wb.start_day as f32 * PIXELS_PER_DAY;
+                        let x1 = (wb.start_day + wb.duration_days) as f32 * PIXELS_PER_DAY;
+                        if world_pos.x >= x0
+                            && world_pos.x <= x1.max(x0 + 4.0)
+                            && world_pos.y >= row_y - bar_h * 0.5
+                            && world_pos.y <= row_y + bar_h * 0.5
+                        {
+                            clicked = Some(alloc.work_block_id);
+                            break 'resource_rows;
+                        }
+                    }
+                }
+            }
+
+            // Also check unassigned row.
+            if clicked.is_none() {
+                let allocated: HashSet<WorkBlockId> =
+                    plan.allocations.iter().map(|a| a.work_block_id).collect();
+                let unassigned_row = resources.len();
+                let row_y = -(unassigned_row as f32) * ROW_HEIGHT;
+                for wb in model.work_blocks.values() {
+                    if wb.duration_days > 0 && !allocated.contains(&wb.id) {
+                        let x0 = wb.start_day as f32 * PIXELS_PER_DAY;
+                        let x1 = (wb.start_day + wb.duration_days) as f32 * PIXELS_PER_DAY;
+                        if world_pos.x >= x0
+                            && world_pos.x <= x1.max(x0 + 4.0)
+                            && world_pos.y >= row_y - bar_h * 0.5
+                            && world_pos.y <= row_y + bar_h * 0.5
+                        {
+                            clicked = Some(wb.id);
+                            break;
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -1663,20 +1717,29 @@ pub fn draw_name_edit_overlay(
     }
 }
 
-/// Tracks a pending block deletion waiting for user confirmation.
+const UNDO_WINDOW_SECS: f32 = 5.0;
+
+/// Holds a pre-delete model snapshot that can be restored by pressing Z within
+/// the undo window. Replaces the old confirmation dialog.
 #[derive(Resource, Default)]
-pub struct DeleteConfirmState {
-    pub pending: Option<WorkBlockId>,
+pub struct DeleteUndoState {
+    snapshot: Option<model::Model>,
+    pub block_name: String,
+    pub deleted_at: f32,
 }
 
-/// Detects Delete/Backspace key press and queues the selected block for
-/// confirmation. Skipped while a name edit or egui text input is active.
+/// Detects Delete/Backspace and immediately removes the selected block.
+/// Stores a model snapshot so the user can undo with Z within 5 seconds.
+/// Skipped while a name edit or egui text input is active.
 pub fn handle_block_delete(
     mut egui_ctx: EguiContexts,
     keyboard: Res<ButtonInput<KeyCode>>,
-    selected: Res<SelectedBlock>,
+    mut selected: ResMut<SelectedBlock>,
     name_edit: Res<NameEditState>,
-    mut delete_confirm: ResMut<DeleteConfirmState>,
+    mut model: ResMut<model::Model>,
+    conn: NonSend<rusqlite::Connection>,
+    mut undo_state: ResMut<DeleteUndoState>,
+    time: Res<Time>,
 ) {
     if name_edit.editing.is_some() {
         return;
@@ -1688,15 +1751,87 @@ pub fn handle_block_delete(
     }
     if keyboard.just_pressed(KeyCode::Delete) || keyboard.just_pressed(KeyCode::Backspace) {
         if let Some(id) = selected.0 {
-            delete_confirm.pending = Some(id);
+            let block_name = model
+                .work_blocks
+                .get(&id)
+                .map(|wb| wb.name.clone())
+                .unwrap_or_default();
+            let snapshot = model.clone();
+            delete_work_block(&mut model, id);
+            if let Err(e) = db::save_model(&conn, &model) {
+                error!("save_model failed: {e}");
+            }
+            selected.0 = None;
+            undo_state.snapshot = Some(snapshot);
+            undo_state.block_name = block_name;
+            undo_state.deleted_at = time.elapsed_secs();
         }
     }
+}
+
+/// Restores the pre-delete model snapshot when Z is pressed within the undo window.
+pub fn handle_delete_undo(
+    mut egui_ctx: EguiContexts,
+    keyboard: Res<ButtonInput<KeyCode>>,
+    mut model: ResMut<model::Model>,
+    conn: NonSend<rusqlite::Connection>,
+    mut undo_state: ResMut<DeleteUndoState>,
+    time: Res<Time>,
+) {
+    if undo_state.snapshot.is_none() {
+        return;
+    }
+    if time.elapsed_secs() - undo_state.deleted_at > UNDO_WINDOW_SECS {
+        undo_state.snapshot = None;
+        return;
+    }
+    if let Ok(ctx) = egui_ctx.ctx_mut() {
+        if ctx.wants_keyboard_input() {
+            return;
+        }
+    }
+    if keyboard.just_pressed(KeyCode::KeyZ) {
+        if let Some(snap) = undo_state.snapshot.take() {
+            *model = snap;
+            if let Err(e) = db::save_model(&conn, &model) {
+                error!("save_model failed: {e}");
+            }
+        }
+    }
+}
+
+/// Shows a brief toast in the bottom-center of the screen after a delete,
+/// informing the user they can press Z to undo within the undo window.
+pub fn draw_undo_toast(
+    mut contexts: EguiContexts,
+    undo_state: Res<DeleteUndoState>,
+    time: Res<Time>,
+) {
+    if undo_state.snapshot.is_none() {
+        return;
+    }
+    let remaining = UNDO_WINDOW_SECS - (time.elapsed_secs() - undo_state.deleted_at);
+    if remaining <= 0.0 {
+        return;
+    }
+    let Ok(ctx) = contexts.ctx_mut() else { return };
+    egui::Window::new("##undo_toast")
+        .title_bar(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_BOTTOM, [0.0, -20.0])
+        .show(ctx, |ui| {
+            ui.label(format!(
+                "\"{}\" deleted — Z to undo ({:.0}s)",
+                undo_state.block_name, remaining
+            ));
+        });
 }
 
 /// Shows a confirmation dialog while `DeleteConfirmState::pending` is set.
 /// On confirm: removes the block and all references from the model, persists to
 /// DB, and clears the selection. On cancel: dismisses without deleting.
 /// Returns true if `id` has any variant with at least one child work block.
+#[cfg(test)]
 fn has_variant_children(model: &model::Model, id: WorkBlockId) -> bool {
     model
         .work_blocks
@@ -1761,59 +1896,6 @@ pub fn delete_work_block(model: &mut model::Model, id: WorkBlockId) {
     model.variants.retain(|_, v| !delete_set.contains(&v.parent));
 }
 
-pub fn draw_delete_confirm_overlay(
-    mut contexts: EguiContexts,
-    mut delete_confirm: ResMut<DeleteConfirmState>,
-    mut model: ResMut<model::Model>,
-    mut selected: ResMut<SelectedBlock>,
-    conn: NonSend<rusqlite::Connection>,
-) {
-    let Some(pending_id) = delete_confirm.pending else { return };
-
-    let block_name = model
-        .work_blocks
-        .get(&pending_id)
-        .map(|wb| wb.name.clone())
-        .unwrap_or_else(|| "Unknown".to_string());
-    let has_children = has_variant_children(&model, pending_id);
-
-    let Ok(ctx) = contexts.ctx_mut() else { return };
-
-    let mut confirmed = false;
-    let mut cancelled = false;
-
-    egui::Window::new("Confirm Delete")
-        .collapsible(false)
-        .resizable(false)
-        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-        .show(ctx, |ui| {
-            ui.label(format!("Delete \"{}\"?", block_name));
-            ui.label("This will also remove all its dependencies.");
-            if has_children {
-                ui.label("All variant child blocks will be deleted too.");
-            }
-            ui.separator();
-            ui.horizontal(|ui| {
-                if ui.button("Delete").clicked() {
-                    confirmed = true;
-                }
-                if ui.button("Cancel").clicked() {
-                    cancelled = true;
-                }
-            });
-        });
-
-    if confirmed {
-        delete_work_block(&mut model, pending_id);
-        if let Err(e) = db::save_model(&conn, &model) {
-            error!("save_model failed: {e}");
-        }
-        selected.0 = None;
-        delete_confirm.pending = None;
-    } else if cancelled {
-        delete_confirm.pending = None;
-    }
-}
 
 #[cfg(test)]
 mod tests {
