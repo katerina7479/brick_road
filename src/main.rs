@@ -48,8 +48,10 @@ fn main() {
         .insert_resource(blocks::BlockSpriteMap::default())
         .insert_resource(blocks::ComparePlanState::default())
         .insert_resource(blocks::CompareBlockSpriteMap::default())
+        .insert_resource(blocks::BranchGhostMap::default())
         .insert_resource(labels::NestingDepthMap::default())
         .insert_resource(ResourceDragState::default())
+        .insert_resource(ForkHoverState::default())
         .add_systems(Startup, (setup_db, setup_camera))
         .add_systems(Startup, setup_demo_schedule.after(setup_db))
         .add_systems(PostStartup, update_analysis.before(blocks::reconcile_block_sprites))
@@ -62,6 +64,7 @@ fn main() {
             schedule::update_visible_blocks.before(blocks::reconcile_block_sprites),
         )
         .add_systems(PostStartup, blocks::reconcile_block_sprites)
+        .add_systems(PostStartup, blocks::sync_branch_ghosts.after(blocks::reconcile_block_sprites))
         .add_systems(PostStartup, sync_weekend_bands.after(blocks::reconcile_block_sprites))
         .add_systems(PostStartup, sync_period_bands.after(blocks::reconcile_block_sprites))
         .add_systems(
@@ -78,10 +81,16 @@ fn main() {
         )
         .add_systems(Update, (camera_nav_keys, update_camera_target, smooth_camera).chain())
         .add_systems(Update, draw_grid)
+        .add_systems(Update, draw_branch_markers)
+        .add_systems(Update, handle_fork_hover)
         .add_systems(Update, schedule::update_today_marker)
         .add_systems(Update, sync_weekend_bands)
         .add_systems(Update, sync_period_bands)
         .add_systems(Update, update_analysis)
+        .add_systems(
+            Update,
+            blocks::sync_branch_ghosts.after(blocks::reconcile_block_sprites),
+        )
         .add_systems(
             Update,
             schedule::update_visible_blocks
@@ -445,6 +454,17 @@ fn sync_period_bands(
 fn task_view_active(mode: Res<schedule::TimelineViewMode>) -> bool {
     *mode == schedule::TimelineViewMode::Task
 }
+
+/// Tracks which timeline day the user is hovering for a "fork plan here" gesture.
+/// Cleared when the pointer leaves the timeline or enters a UI panel.
+#[derive(Resource, Default)]
+struct ForkHoverState {
+    hovered_day: Option<model::Day>,
+}
+
+/// Marker component for horizontal separator sprites drawn between plan lanes.
+#[derive(Component)]
+struct BranchLaneSeparator;
 
 /// Tracks an in-progress drag in the resource timeline view.
 #[derive(Resource, Default)]
@@ -871,6 +891,134 @@ fn update_analysis(
         critical_path,
         float,
     };
+}
+
+/// Tracks mouse position over the timeline and updates `ForkHoverState`.
+/// On left-click, creates a new plan that branches from the hovered day.
+fn handle_fork_hover(
+    mut fork: ResMut<ForkHoverState>,
+    mut model: ResMut<model::Model>,
+    mut schedule: ResMut<schedule::Schedule>,
+    mode: Res<schedule::TimelineViewMode>,
+    windows: Query<&Window>,
+    camera: Query<(&Camera, &GlobalTransform), With<Camera2d>>,
+    mouse: Res<ButtonInput<MouseButton>>,
+    keyboard: Res<ButtonInput<KeyCode>>,
+    mut egui_ctx: EguiContexts,
+    conn: NonSend<rusqlite::Connection>,
+) {
+    // Only active in task view; resource view has its own drag handling.
+    if *mode != schedule::TimelineViewMode::Task {
+        fork.hovered_day = None;
+        return;
+    }
+    let Ok(ctx) = egui_ctx.ctx_mut() else { return };
+    if ctx.is_pointer_over_area() {
+        fork.hovered_day = None;
+        return;
+    }
+
+    let Ok(window) = windows.single() else { return };
+    let Ok((cam, cam_gt)) = camera.single() else { return };
+
+    let world_x = window
+        .cursor_position()
+        .and_then(|cursor| cam.viewport_to_world_2d(cam_gt, cursor).ok())
+        .map(|wp| wp.x);
+
+    fork.hovered_day = world_x.map(|x| (x / PIXELS_PER_DAY).floor() as model::Day);
+
+    // Ctrl+Left-click: fork the active plan from the hovered day.
+    let ctrl = keyboard.pressed(KeyCode::ControlLeft) || keyboard.pressed(KeyCode::ControlRight);
+    if ctrl && mouse.just_pressed(MouseButton::Left) {
+        if let Some(fork_day) = fork.hovered_day {
+            let active_id = schedule.plan_id;
+            if let Some(active_plan) = model.plans.get(&active_id).cloned() {
+                let wid = active_plan.world_id;
+                let n = model.plans.len() + 1;
+                let new_id = model.create_plan(format!("Plan {n}"), wid, Some(fork_day.max(0)));
+                // Copy root blocks and selected variants from the active plan.
+                if let Some(new_plan) = model.plans.get_mut(&new_id) {
+                    new_plan.root_blocks = active_plan.root_blocks.clone();
+                    new_plan.selected_variants = active_plan.selected_variants.clone();
+                }
+                *schedule = schedule::Schedule::new(active_id);
+                if let Err(e) = db::save_model(&conn, &model) {
+                    error!("save_model failed: {e}");
+                }
+            }
+        }
+    }
+}
+
+/// Draws branch-point markers and fork-hover indicators using gizmos.
+///
+/// For each non-active plan with a `branch_start_day`, draws:
+///   - A vertical colored line at that day spanning the viewport
+///   - A small fork symbol (two short diagonal lines diverging upward)
+///
+/// When `ForkHoverState` has a hovered day, draws a ghost vertical line
+/// showing where a new plan would branch from.
+fn draw_branch_markers(
+    mut gizmos: Gizmos,
+    model: Res<model::Model>,
+    schedule: Res<schedule::Schedule>,
+    fork: Res<ForkHoverState>,
+    cam_q: Query<(&Transform, &Projection), With<Camera2d>>,
+    windows: Query<&Window>,
+    mode: Res<schedule::TimelineViewMode>,
+) {
+    if *mode != schedule::TimelineViewMode::Task {
+        return;
+    }
+    let Ok((cam_t, proj)) = cam_q.single() else { return };
+    let Projection::Orthographic(ortho) = proj else { return };
+    let Ok(window) = windows.single() else { return };
+    let half_h = (window.height() * 0.5 * ortho.scale).max(800.0);
+
+    let active_id = schedule.plan_id;
+
+    // Branch-point markers for non-active plans.
+    let mut branch_plans: Vec<&model::Plan> = model.plans.values()
+        .filter(|p| p.id != active_id && p.branch_start_day.is_some())
+        .collect();
+    branch_plans.sort_by_key(|p| p.id.0);
+
+    for (idx, plan) in branch_plans.iter().enumerate() {
+        let Some(branch_day) = plan.branch_start_day else { continue };
+        let x = branch_day as f32 * PIXELS_PER_DAY;
+        let lc = blocks::BRANCH_PALETTE[idx % blocks::BRANCH_PALETTE.len()];
+        let color = Color::from(LinearRgba::new(lc.red * 0.7, lc.green * 0.7, lc.blue * 0.7, 0.55));
+
+        // Vertical branch line.
+        gizmos.line_2d(
+            Vec2::new(x, cam_t.translation.y + half_h),
+            Vec2::new(x, cam_t.translation.y - half_h),
+            color,
+        );
+
+        // Fork symbol: two diagonal lines diverging from the branch point.
+        let fork_y = cam_t.translation.y + half_h * 0.30;
+        let arm = ortho.scale * 18.0;
+        gizmos.line_2d(Vec2::new(x, fork_y), Vec2::new(x - arm, fork_y + arm), color);
+        gizmos.line_2d(Vec2::new(x, fork_y), Vec2::new(x + arm, fork_y + arm), color);
+    }
+
+    // Fork-hover indicator: ghost line at hovered day.
+    if let Some(hovered_day) = fork.hovered_day {
+        let x = hovered_day as f32 * PIXELS_PER_DAY;
+        let ghost = Color::srgba(0.55, 0.75, 1.0, 0.25);
+        gizmos.line_2d(
+            Vec2::new(x, cam_t.translation.y + half_h),
+            Vec2::new(x, cam_t.translation.y - half_h),
+            ghost,
+        );
+        // Small fork arms on the hover indicator.
+        let fork_y = cam_t.translation.y + half_h * 0.30;
+        let arm = ortho.scale * 14.0;
+        gizmos.line_2d(Vec2::new(x, fork_y), Vec2::new(x - arm, fork_y + arm), ghost);
+        gizmos.line_2d(Vec2::new(x, fork_y), Vec2::new(x + arm, fork_y + arm), ghost);
+    }
 }
 
 /// Renders Re-center and Fit-to-view buttons in a small floating area
