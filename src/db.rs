@@ -37,11 +37,10 @@ pub fn create_tables(conn: &Connection) -> Result<()> {
         conn.query_row("SELECT COUNT(*) FROM t_shirt_sizes", [], |r| r.get(0))?;
     if count == 0 {
         conn.execute_batch(
-            "INSERT INTO t_shirt_sizes (label, days, sort_order) VALUES ('XS',  1, 0);
-             INSERT INTO t_shirt_sizes (label, days, sort_order) VALUES ('S',   3, 1);
-             INSERT INTO t_shirt_sizes (label, days, sort_order) VALUES ('M',   5, 2);
-             INSERT INTO t_shirt_sizes (label, days, sort_order) VALUES ('L',  10, 3);
-             INSERT INTO t_shirt_sizes (label, days, sort_order) VALUES ('XL', 20, 4);",
+            "INSERT INTO t_shirt_sizes (label, days, sort_order) VALUES ('XS',  5, 0);
+             INSERT INTO t_shirt_sizes (label, days, sort_order) VALUES ('S',  10, 1);
+             INSERT INTO t_shirt_sizes (label, days, sort_order) VALUES ('M',  15, 2);
+             INSERT INTO t_shirt_sizes (label, days, sort_order) VALUES ('L',  25, 3);",
         )?;
     }
     Ok(())
