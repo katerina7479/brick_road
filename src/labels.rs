@@ -266,13 +266,26 @@ const DEPTH_INDENT_PX: f32 = 6.0;
 /// Brackets for deeper nesting levels are shifted further left by
 /// `DEPTH_INDENT_PX` per level so nested groups remain visually distinct
 /// even when their child blocks share the same x range.
+/// ortho.scale above which nesting brackets are hidden to reduce visual noise.
+const LOD_BRACKET_HIDE: f32 = 3.0;
+
 pub fn draw_nesting_indicators(
     schedule: Res<Schedule>,
     model: Res<Model>,
     depth_map: Res<NestingDepthMap>,
     mut gizmos: Gizmos,
     block_q: Query<(&BlockSprite, &Transform)>,
+    cam_q: Query<&Projection, With<Camera2d>>,
 ) {
+    let ortho_scale = cam_q
+        .single()
+        .ok()
+        .and_then(|p| if let Projection::Orthographic(o) = p { Some(o.scale) } else { None })
+        .unwrap_or(1.0);
+    if ortho_scale > LOD_BRACKET_HIDE {
+        return;
+    }
+
     let bracket_color = Color::srgba(0.5, 0.5, 0.75, 0.45);
 
     // Build a lookup from WorkBlockId → row Y from live BlockSprite positions.
