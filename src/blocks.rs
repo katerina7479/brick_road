@@ -19,15 +19,15 @@ const MIN_LABEL_WIDTH: f32 = 20.0;
 /// Approximate pixel width per character at font_size 13 (used for truncation).
 const LABEL_CHAR_WIDTH: f32 = 8.0;
 
-/// ortho.scale below this → show full block name.
-const LOD_CLOSE_MAX: f32 = 1.0;
+/// ortho.scale at or below this → show full block name (covers default zoom=1.0 and normal browsing).
+const LOD_CLOSE_MAX: f32 = 2.5;
 /// ortho.scale above this → hide block name entirely; also the start of dep-edge fade and the
 /// threshold at which uncertainty overlays and nesting brackets are hidden.
-const LOD_FAR_MIN: f32 = 3.0;
+const LOD_FAR_MIN: f32 = 6.0;
 /// ortho.scale above this → dependency edges are fully hidden.
-const LOD_DEP_HIDE: f32 = 6.0;
+const LOD_DEP_HIDE: f32 = 10.0;
 /// Characters shown in the medium-zoom abbreviated label.
-const LOD_ABBREV_CHARS: usize = 3;
+const LOD_ABBREV_CHARS: usize = 8;
 
 /// Inline name label rendered inside a block bar.
 /// Stores the untruncated model name so `sync_block_labels` can recompute
