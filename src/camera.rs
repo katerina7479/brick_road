@@ -4,7 +4,7 @@ use bevy::{
 };
 
 use crate::{
-    constants::{PIXELS_PER_DAY, ROW_HEIGHT, SIDE_PANEL_WIDTH},
+    constants::{PIXELS_PER_DAY, ROW_HEIGHT},
     model::Model,
     schedule::{self, ViewScope},
 };
@@ -28,6 +28,22 @@ impl Default for CameraTarget {
             pos: Vec2::ZERO,
             zoom: 1.0,
         }
+    }
+}
+
+/// Camera target that anchors day-0 / row-0 to the upper-left of the timeline
+/// viewport with margins, at 1:1 zoom. Shared by the Home key and the Re-center
+/// button so they agree — centering on the world origin instead would waste the
+/// whole left half of the screen on pre-plan (negative-day) emptiness.
+pub fn home_target(window: &Window) -> CameraTarget {
+    let w = window.width();
+    let h = window.height();
+    CameraTarget {
+        zoom: 1.0,
+        pos: Vec2::new(
+            w * 0.5 - HOME_LEFT_MARGIN,
+            ROW_HEIGHT * 0.5 - (h * 0.5 - HOME_TOP_MARGIN),
+        ),
     }
 }
 
@@ -78,12 +94,7 @@ pub fn camera_nav_keys(
     }
     if keyboard.just_pressed(KeyCode::Home) {
         let Ok(window) = windows.single() else { return };
-        let w = window.width();
-        let h = window.height();
-        target.zoom = 1.0;
-        // Anchor day-0 / row-0 to the upper-left corner with margin.
-        target.pos.x = w * 0.5 - HOME_LEFT_MARGIN;
-        target.pos.y = ROW_HEIGHT * 0.5 - (h * 0.5 - HOME_TOP_MARGIN);
+        *target = home_target(window);
     }
     if keyboard.just_pressed(KeyCode::KeyF) {
         if let Some(new_target) = fit_to_blocks(&model, &scope, &windows) {
@@ -128,10 +139,14 @@ pub fn fit_to_blocks(
     let y_span = (y_max - y_min).max(1.0);
 
     const MARGIN: f32 = 1.15;
-    let avail_w = (window_w - SIDE_PANEL_WIDTH).max(1.0);
+    // The side panel is gone, so the whole window width is available (minus a
+    // symmetric margin matching the left anchor).
+    let avail_w = (window_w - 2.0 * HOME_LEFT_MARGIN).max(1.0);
     let avail_h = (window_h - HOME_TOP_MARGIN).max(1.0);
 
-    let zoom = ((x_span / avail_w).max(y_span / avail_h) * MARGIN).clamp(0.15, 6.0);
+    // Clamp the lower bound to 1.0 so fitting a sparse plan (e.g. a single small
+    // block) frames it at 1:1 instead of magnifying it to fill the screen.
+    let zoom = ((x_span / avail_w).max(y_span / avail_h) * MARGIN).clamp(1.0, 6.0);
 
     // Anchor plan start at the upper-left corner of the timeline viewport.
     // pos is the world-space point at the window centre.
