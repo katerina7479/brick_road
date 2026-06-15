@@ -673,10 +673,10 @@ pub struct ResizeDragState {
 /// Pixels from the right edge of a block that count as the resize handle.
 const EDGE_GRAB_PX: f32 = 8.0;
 
-/// World-space radius of the left/right dep-creation handles on block edges.
-const HANDLE_RADIUS: f32 = 8.0;
-/// Hit-test radius for dep handles — slightly larger than visual to aid clicking.
-const HANDLE_HIT_PX: f32 = 10.0;
+/// World-space radius of the small left/right edge dep-creation handles.
+const HANDLE_RADIUS: f32 = 4.0;
+/// Hit-test radius for the dep handle — slightly larger than visual to aid clicking.
+const HANDLE_HIT_PX: f32 = 8.0;
 
 /// Drag the right edge of a block to resize its `duration_days`.
 ///
@@ -1144,9 +1144,10 @@ pub fn draw_block_handles(
     let Some(cursor) = window.cursor_position() else { return };
     let Ok(world_pos) = cam.viewport_to_world_2d(cam_tr, cursor) else { return };
 
-    let cyan = Color::srgba(0.3, 0.9, 1.0, 0.9);   // left handle (incoming)
-    let amber = Color::srgba(1.0, 0.75, 0.2, 0.9);  // right handle (outgoing)
-    let white = Color::WHITE;
+    // One subtle connector dot; brightens slightly (no white, no big grow) when
+    // hovered or while it's the drag source.
+    let dot = Color::srgba(0.55, 0.62, 0.78, 0.65);
+    let dot_hi = Color::srgba(0.80, 0.86, 0.98, 0.95);
 
     for &id in &visible_blocks.ids {
         let Some(wb) = model.work_blocks.get(&id) else { continue };
@@ -1156,37 +1157,37 @@ pub fn draw_block_handles(
         let y = -(wb.row as f32) * ROW_HEIGHT;
         let xl = wb.start_day as f32 * PIXELS_PER_DAY;
         let xr = (wb.start_day + wb.duration_days) as f32 * PIXELS_PER_DAY;
+        let half_h = BLOCK_HEIGHT * 0.5;
 
         let is_source = drag.from == Some(wb.id);
 
-        // Show handles when hovering over this block or it is the drag source.
-        let half_h = BLOCK_HEIGHT * 0.5;
+        // Show the handle when hovering this block or while it's the drag source.
         let in_block = world_pos.x >= xl
             && world_pos.x <= xr
             && (world_pos.y - y).abs() <= half_h;
-
         if !in_block && !is_source {
             continue;
         }
 
+        // Small handles on the left (incoming) and right (outgoing) edges, both
+        // the same muted color. Small enough to leave the right edge grabbable
+        // for resizing above and below the dot.
         let left_pos = Vec2::new(xl, y);
         let right_pos = Vec2::new(xr, y);
         let near_left = (world_pos - left_pos).length() < HANDLE_HIT_PX;
         let near_right = (world_pos - right_pos).length() < HANDLE_HIT_PX;
 
-        // Left handle: cyan unless highlighted.
         let (lc, lr) = if near_left || (is_source && !drag.from_right) {
-            (white, HANDLE_RADIUS * 1.4)
+            (dot_hi, HANDLE_RADIUS + 1.0)
         } else {
-            (cyan, HANDLE_RADIUS)
+            (dot, HANDLE_RADIUS)
         };
         gizmos.circle_2d(left_pos, lr, lc);
 
-        // Right handle: amber unless highlighted.
         let (rc, rr) = if near_right || (is_source && drag.from_right) {
-            (white, HANDLE_RADIUS * 1.4)
+            (dot_hi, HANDLE_RADIUS + 1.0)
         } else {
-            (amber, HANDLE_RADIUS)
+            (dot, HANDLE_RADIUS)
         };
         gizmos.circle_2d(right_pos, rr, rc);
     }
@@ -1232,7 +1233,8 @@ pub fn handle_dep_drag(
         None
     };
 
-    // Left-click on a handle starts a dep drag (takes priority over block actions).
+    // Left-click on an edge handle starts a dep drag (right = outgoing, so source
+    // is the predecessor; left = incoming, so source is the successor).
     if mouse.just_pressed(MouseButton::Left) {
         for (bs, tr, sp) in &block_query {
             let Some(size) = sp.custom_size else { continue };
@@ -1240,7 +1242,6 @@ pub fn handle_dep_drag(
             let half = size * 0.5;
             let left_pos = Vec2::new(center.x - half.x, center.y);
             let right_pos = Vec2::new(center.x + half.x, center.y);
-
             if (world_pos - right_pos).length() < HANDLE_HIT_PX {
                 drag.from = Some(bs.work_block_id);
                 drag.from_right = true;
@@ -1265,16 +1266,20 @@ pub fn handle_dep_drag(
                     } else {
                         (to_id, from_id) // left handle → from is successor
                     };
-                    let already = model.dependencies.values().any(|d| {
-                        d.predecessor == pred
+                    // Re-dragging an existing connection toggles it off (delete).
+                    let existing = model.dependencies.iter().find_map(|(did, d)| {
+                        (d.predecessor == pred
                             && d.successor == succ
-                            && d.dependency_type == dep_type
+                            && d.dependency_type == dep_type)
+                            .then_some(*did)
                     });
-                    if !already {
+                    if let Some(did) = existing {
+                        model.dependencies.remove(&did);
+                    } else {
                         model.create_dependency(pred, succ, dep_type);
-                        if let Err(e) = crate::db::save_model(&conn, &model) {
-                            error!("save_model failed: {e}");
-                        }
+                    }
+                    if let Err(e) = crate::db::save_model(&conn, &model) {
+                        error!("save_model failed: {e}");
                     }
                 }
             }
@@ -1292,16 +1297,19 @@ pub fn handle_dep_drag(
             if let Some(to_id) = block_at(world_pos) {
                 if to_id != from_id {
                     let dep_type = dep_type_from_modifiers(&keyboard);
-                    let already = model.dependencies.values().any(|d| {
-                        d.predecessor == from_id
+                    let existing = model.dependencies.iter().find_map(|(did, d)| {
+                        (d.predecessor == from_id
                             && d.successor == to_id
-                            && d.dependency_type == dep_type
+                            && d.dependency_type == dep_type)
+                            .then_some(*did)
                     });
-                    if !already {
+                    if let Some(did) = existing {
+                        model.dependencies.remove(&did);
+                    } else {
                         model.create_dependency(from_id, to_id, dep_type);
-                        if let Err(e) = crate::db::save_model(&conn, &model) {
-                            error!("save_model failed: {e}");
-                        }
+                    }
+                    if let Err(e) = crate::db::save_model(&conn, &model) {
+                        error!("save_model failed: {e}");
                     }
                 }
             }
