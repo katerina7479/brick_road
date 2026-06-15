@@ -77,17 +77,22 @@ pub fn compute_nesting_depths(model: Res<Model>, mut depth_map: ResMut<NestingDe
 }
 
 /// Y position of day-number labels above the block rows.
-const DAY_LABEL_Y: f32 = 55.0;
+const DAY_LABEL_Y: f32 = 30.0;
 
 /// Maps orthographic zoom scale to (stride_days, use_month_format).
 /// `stride_days` is the gap between labels; `use_month_format` switches to
 /// "Mon YYYY" at far zoom where individual dates are too dense to read.
 fn day_step_for_zoom(scale: f32) -> (i32, bool) {
-    if scale < 0.5 {
+    // Thresholds tuned for PIXELS_PER_DAY=20:
+    //   scale < 0.25 → zoomed in enough that daily labels fit (1 day ≥ 80px)
+    //   scale < 1.0  → weekly stride (1 day 20–80px)
+    //   scale < 3.0  → bi-weekly stride
+    //   scale ≥ 3.0  → monthly (1 day < 7px, individual dates unreadable)
+    if scale < 0.25 {
         (1, false)
-    } else if scale < 2.0 {
+    } else if scale < 1.0 {
         (5, false)
-    } else if scale < 4.0 {
+    } else if scale < 3.0 {
         (10, false)
     } else {
         (30, true)
@@ -177,7 +182,7 @@ pub fn spawn_day_labels(
 #[derive(Component)]
 pub struct PeriodLabel;
 
-const PERIOD_LABEL_Y: f32 = 80.0;
+const PERIOD_LABEL_Y: f32 = 48.0;
 
 /// Spawns (or re-spawns) quarter labels ("Q1 '25", "Q2 '25") above the day labels.
 /// Fires when model or schedule changes.
@@ -521,7 +526,8 @@ mod tests {
 
     #[test]
     fn day_step_for_zoom_close_is_daily_no_month() {
-        let (step, month_only) = day_step_for_zoom(0.3);
+        // scale < 0.25 → daily labels (1 working day ≥ 80px at PIXELS_PER_DAY=20)
+        let (step, month_only) = day_step_for_zoom(0.1);
         assert_eq!(step, 1);
         assert!(!month_only);
     }
