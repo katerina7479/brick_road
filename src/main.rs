@@ -1194,8 +1194,9 @@ fn top_bar_ui(
                         }
                     }
                     if ui.small_button("Re-center [Home]").clicked() {
-                        target.pos = Vec2::ZERO;
-                        target.zoom = 1.0;
+                        if let Ok(window) = windows.single() {
+                            *target = camera::home_target(window);
+                        }
                     }
                 });
             });
