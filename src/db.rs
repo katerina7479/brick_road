@@ -37,11 +37,18 @@ pub fn create_tables(conn: &Connection) -> Result<()> {
     let count: i64 =
         conn.query_row("SELECT COUNT(*) FROM t_shirt_sizes", [], |r| r.get(0))?;
     if count == 0 {
+        // Week-based defaults (5 working days = 1 week). Editable in the size
+        // settings popup.
         conn.execute_batch(
-            "INSERT INTO t_shirt_sizes (label, days, sort_order) VALUES ('XS',  5, 0);
-             INSERT INTO t_shirt_sizes (label, days, sort_order) VALUES ('S',  10, 1);
-             INSERT INTO t_shirt_sizes (label, days, sort_order) VALUES ('M',  15, 2);
-             INSERT INTO t_shirt_sizes (label, days, sort_order) VALUES ('L',  25, 3);",
+            "INSERT INTO t_shirt_sizes (label, days, sort_order) VALUES ('XXS',   2, 0);
+             INSERT INTO t_shirt_sizes (label, days, sort_order) VALUES ('XS',    5, 1);
+             INSERT INTO t_shirt_sizes (label, days, sort_order) VALUES ('S',    10, 2);
+             INSERT INTO t_shirt_sizes (label, days, sort_order) VALUES ('M',    15, 3);
+             INSERT INTO t_shirt_sizes (label, days, sort_order) VALUES ('L',    25, 4);
+             INSERT INTO t_shirt_sizes (label, days, sort_order) VALUES ('XL',   40, 5);
+             INSERT INTO t_shirt_sizes (label, days, sort_order) VALUES ('XXL',  60, 6);
+             INSERT INTO t_shirt_sizes (label, days, sort_order) VALUES ('3XL',  80, 7);
+             INSERT INTO t_shirt_sizes (label, days, sort_order) VALUES ('4XL', 100, 8);",
         )?;
     }
     Ok(())

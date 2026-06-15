@@ -40,6 +40,7 @@ fn main() {
         .insert_resource(blocks::DepDragState::default())
         .insert_resource(blocks::UndoStack::default())
         .insert_resource(blocks::CreateModeState::default())
+        .insert_resource(blocks::SizePickerState::default())
         .insert_resource(schedule::ViewScope::default())
         .insert_resource(schedule::VisibleBlocks::default())
         .insert_resource(analysis::ScheduleAnalysis::default())
@@ -96,6 +97,7 @@ fn main() {
             blocks::handle_create_mode_toggle.after(blocks::handle_name_edit),
         )
         .add_systems(Update, blocks::handle_create_mode_click_exit)
+        .add_systems(Update, blocks::handle_size_picker_hotkey)
         .add_systems(
             Update,
             blocks::handle_block_selection.after(blocks::handle_name_edit),
@@ -189,6 +191,8 @@ fn main() {
         .add_systems(EguiPrimaryContextPass, blocks::draw_name_edit_overlay)
         .add_systems(EguiPrimaryContextPass, blocks::draw_create_mode_overlay)
         .add_systems(EguiPrimaryContextPass, blocks::draw_block_tooltip)
+        .add_systems(EguiPrimaryContextPass, blocks::draw_size_picker_popup)
+        .add_systems(EguiPrimaryContextPass, blocks::draw_size_settings_popup)
         .run();
 }
 

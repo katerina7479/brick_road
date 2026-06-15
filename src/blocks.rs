@@ -2032,3 +2032,202 @@ pub fn draw_block_tooltip(
         }
     }
 }
+
+// ── T-shirt size picker ──────────────────────────────────────────────────────
+
+/// State for the size picker: which block it targets (if open) and whether the
+/// editable size-map settings window is showing.
+#[derive(Resource, Default)]
+pub struct SizePickerState {
+    pub target: Option<WorkBlockId>,
+    pub settings_open: bool,
+}
+
+/// Opens the size picker for the selected block on `s` (and closes it / the
+/// settings on `Esc`). Guarded so it never fires while typing in an egui field.
+pub fn handle_size_picker_hotkey(
+    mut egui_ctx: EguiContexts,
+    keyboard: Res<ButtonInput<KeyCode>>,
+    selected: Res<SelectedBlock>,
+    name_edit: Res<NameEditState>,
+    mut picker: ResMut<SizePickerState>,
+) {
+    if name_edit.editing.is_some() {
+        return;
+    }
+    if let Ok(ctx) = egui_ctx.ctx_mut() {
+        if ctx.wants_keyboard_input() {
+            return;
+        }
+    }
+    if keyboard.just_pressed(KeyCode::Escape) {
+        picker.target = None;
+        picker.settings_open = false;
+        return;
+    }
+    if keyboard.just_pressed(KeyCode::KeyS) {
+        if let Some(id) = selected.0 {
+            // Toggle on the selected block.
+            picker.target = if picker.target == Some(id) { None } else { Some(id) };
+            picker.settings_open = false;
+        }
+    }
+}
+
+/// Renders the size picker anchored next to the target block. Clicking a size
+/// sets the block's duration and records the chosen size label.
+pub fn draw_size_picker_popup(
+    mut contexts: EguiContexts,
+    mut picker: ResMut<SizePickerState>,
+    mut model: ResMut<model::Model>,
+    conn: NonSend<rusqlite::Connection>,
+    camera: Query<(&Camera, &GlobalTransform), With<Camera2d>>,
+    block_query: Query<(&BlockSprite, &Transform)>,
+) {
+    // The settings window takes over while it's open.
+    if picker.settings_open {
+        return;
+    }
+    let Some(target) = picker.target else { return };
+    let Ok(ctx) = contexts.ctx_mut() else { return };
+
+    // Anchor to the block's screen position (fallback: upper-left).
+    let mut screen_pos = egui::pos2(80.0, 120.0);
+    if let Ok((cam, cam_tf)) = camera.single() {
+        for (bs, transform) in &block_query {
+            if bs.work_block_id == target {
+                if let Ok(vp) = cam.world_to_viewport(cam_tf, transform.translation) {
+                    screen_pos = egui::pos2(vp.x + 14.0, vp.y - 8.0);
+                }
+                break;
+            }
+        }
+    }
+
+    let current = model
+        .work_blocks
+        .get(&target)
+        .and_then(|wb| wb.t_shirt_size.clone());
+    let sizes = model.t_shirt_sizes.clone();
+
+    let mut chosen: Option<(String, Day)> = None;
+    let mut open_settings = false;
+    let mut close = false;
+
+    egui::Area::new(egui::Id::new("size_picker_popup"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(screen_pos)
+        .show(ctx, |ui| {
+            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                ui.set_min_width(116.0);
+                ui.label(egui::RichText::new("Size").strong());
+                for size in &sizes {
+                    let is_current = current.as_deref() == Some(size.label.as_str());
+                    let text = format!("{}   {} d", size.label, size.days);
+                    if ui.selectable_label(is_current, text).clicked() {
+                        chosen = Some((size.label.clone(), size.days));
+                    }
+                }
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui.small_button("⚙ Edit…").clicked() {
+                        open_settings = true;
+                    }
+                    if ui.small_button("Close").clicked() {
+                        close = true;
+                    }
+                });
+            });
+        });
+
+    if let Some((label, days)) = chosen {
+        if let Some(wb) = model.work_blocks.get_mut(&target) {
+            wb.duration_days = days;
+            wb.t_shirt_size = Some(label);
+        }
+        if let Err(e) = db::save_model(&conn, &model) {
+            error!("save_model failed: {e}");
+        }
+        picker.target = None;
+    } else if open_settings {
+        picker.settings_open = true;
+    } else if close {
+        picker.target = None;
+    }
+}
+
+/// Editable size-map window: rename, set days, add and remove sizes. Persists on
+/// every change so the picker reflects edits immediately.
+pub fn draw_size_settings_popup(
+    mut contexts: EguiContexts,
+    mut picker: ResMut<SizePickerState>,
+    mut model: ResMut<model::Model>,
+    conn: NonSend<rusqlite::Connection>,
+) {
+    if !picker.settings_open {
+        return;
+    }
+    let Ok(ctx) = contexts.ctx_mut() else { return };
+
+    let mut changed = false;
+    let mut remove: Option<usize> = None;
+    let mut add = false;
+    let mut done = false;
+
+    egui::Window::new("Edit sizes")
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .show(ctx, |ui| {
+            for (i, size) in model.t_shirt_sizes.iter_mut().enumerate() {
+                ui.horizontal(|ui| {
+                    if ui
+                        .add(egui::TextEdit::singleline(&mut size.label).desired_width(52.0))
+                        .changed()
+                    {
+                        changed = true;
+                    }
+                    if ui
+                        .add(egui::DragValue::new(&mut size.days).range(1..=400).suffix(" d"))
+                        .changed()
+                    {
+                        changed = true;
+                    }
+                    if ui.small_button("×").on_hover_text("Remove").clicked() {
+                        remove = Some(i);
+                    }
+                });
+            }
+            ui.separator();
+            ui.horizontal(|ui| {
+                if ui.button("＋ Add size").clicked() {
+                    add = true;
+                }
+                if ui.button("Done").clicked() {
+                    done = true;
+                }
+            });
+        });
+
+    if let Some(i) = remove {
+        if i < model.t_shirt_sizes.len() {
+            model.t_shirt_sizes.remove(i);
+            changed = true;
+        }
+    }
+    if add {
+        model.t_shirt_sizes.push(model::TShirtSize {
+            label: "New".to_string(),
+            days: 5,
+        });
+        changed = true;
+    }
+    if changed {
+        if let Err(e) = db::save_model(&conn, &model) {
+            error!("save_model failed: {e}");
+        }
+    }
+    if done {
+        picker.settings_open = false;
+    }
+}
