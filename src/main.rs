@@ -79,8 +79,9 @@ fn main() {
         .add_systems(Update, (camera_nav_keys, update_camera_target, smooth_camera).chain())
         .add_systems(Update, draw_grid)
         .add_systems(Update, schedule::update_today_marker)
-        .add_systems(Update, sync_weekend_bands)
-        .add_systems(Update, sync_period_bands)
+        .add_systems(Update, sync_total_duration)
+        .add_systems(Update, sync_weekend_bands.after(sync_total_duration))
+        .add_systems(Update, sync_period_bands.after(sync_total_duration))
         .add_systems(Update, update_analysis)
         .add_systems(
             Update,
@@ -439,6 +440,30 @@ fn sync_period_bands(
             },
             Transform::from_xyz(cx, 0.0, -1.0),
         ));
+    }
+}
+
+/// Keeps `Schedule.total_duration_days` in sync with the actual block extents.
+/// `forward_pass` is only run on plan switches / auto-schedule, so manually
+/// dragged or resized blocks leave `total_duration_days` stale. This system
+/// recomputes it from `model.work_blocks` on every frame the model changes so
+/// the background band and label systems always span the full timeline.
+fn sync_total_duration(
+    model: Res<model::Model>,
+    mut schedule: ResMut<schedule::Schedule>,
+) {
+    if !model.is_changed() {
+        return;
+    }
+    let computed = model
+        .work_blocks
+        .values()
+        .filter(|wb| wb.duration_days > 0)
+        .map(|wb| wb.start_day + wb.duration_days)
+        .max()
+        .unwrap_or(0);
+    if schedule.total_duration_days != computed {
+        schedule.total_duration_days = computed;
     }
 }
 
