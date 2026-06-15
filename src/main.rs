@@ -1710,10 +1710,17 @@ fn side_panel_ui(
                 .get(&plan_id)
                 .and_then(|p| p.selected_variants.get(&sel_id).copied());
 
-            let name_changed = ui.text_edit_singleline(&mut name).changed();
-            if name_changed && !name.trim().is_empty() {
+            let name_resp = ui.text_edit_singleline(&mut name);
+            if name_resp.changed() && !name.trim().is_empty() {
+                // Trim only on final commit; preserve interior/trailing spaces mid-edit
+                // so spaces aren't dropped while the user is still typing.
+                let new_name = if name_resp.lost_focus() {
+                    name.trim().to_string()
+                } else {
+                    name.clone()
+                };
                 if let Some(wb) = model.work_blocks.get_mut(&sel_id) {
-                    wb.name = name.trim().to_string();
+                    wb.name = new_name;
                 }
                 if let Err(e) = db::save_model(&conn, &model) {
                     error!("save_model failed: {e}");
