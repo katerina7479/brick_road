@@ -21,9 +21,11 @@ const LABEL_CHAR_WIDTH: f32 = 8.0;
 
 /// ortho.scale at or below this → show full block name (covers default zoom=1.0 and normal browsing).
 const LOD_CLOSE_MAX: f32 = 2.5;
-/// ortho.scale above this → hide block name entirely; also the start of dep-edge fade and the
-/// threshold at which uncertainty overlays and nesting brackets are hidden.
+/// ortho.scale above this → hide block name entirely; also the start of dep-edge fade.
 const LOD_FAR_MIN: f32 = 6.0;
+/// ortho.scale above this → hide uncertainty overlays (pessimistic tail, optimistic marker).
+/// Intentionally lower than LOD_FAR_MIN so overlays disappear before labels do.
+const LOD_OVERLAY_HIDE: f32 = 3.0;
 /// ortho.scale above this → dependency edges are fully hidden.
 const LOD_DEP_HIDE: f32 = 10.0;
 /// Characters shown in the medium-zoom abbreviated label.
@@ -1149,7 +1151,7 @@ pub fn sync_uncertainty_overlays(
     }
     let mut desired: Vec<Overlay> = Vec::new();
 
-    if ortho_scale <= LOD_FAR_MIN {
+    if ortho_scale <= LOD_OVERLAY_HIDE {
         for (row, &id) in visible_blocks.ids.iter().enumerate() {
             let Some(wb) = model.work_blocks.get(&id) else { continue };
             let y = -(row as f32) * ROW_HEIGHT;
@@ -1182,7 +1184,7 @@ pub fn sync_uncertainty_overlays(
             }
         }
     }
-    // At ortho_scale > LOD_FAR_MIN, desired stays empty → all overlays are despawned below.
+    // At ortho_scale > LOD_OVERLAY_HIDE, desired stays empty → all overlays are despawned below.
 
     // Update existing overlays in place; spawn new ones.
     let mut live: HashSet<Entity> = HashSet::with_capacity(desired.len());
