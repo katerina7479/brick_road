@@ -275,19 +275,10 @@ pub fn reconcile_block_sprites(
     sa: Res<ScheduleAnalysis>,
     model: Res<model::Model>,
     visible_blocks: Res<schedule::VisibleBlocks>,
-    mode: Res<schedule::TimelineViewMode>,
     mut sprite_map: ResMut<BlockSpriteMap>,
     mut sprite_q: Query<&mut BlockSprite>,
 ) {
-    if !visible_blocks.is_changed() && !mode.is_changed() {
-        return;
-    }
-    // In resource view the timeline shows resource rows instead of block rows.
-    // Despawn any existing block sprites so they don't bleed into the resource canvas.
-    if *mode == schedule::TimelineViewMode::Resource {
-        for (_, entity) in sprite_map.entities.drain() {
-            commands.entity(entity).despawn();
-        }
+    if !visible_blocks.is_changed() {
         return;
     }
 
@@ -715,7 +706,6 @@ pub fn handle_block_selection(
     mut last_empty_click: Local<f32>,
     dep_drag: Res<DepDragState>,
     active_schedule: Res<schedule::Schedule>,
-    mode: Res<schedule::TimelineViewMode>,
 ) {
     // Yield when a dep-handle drag is in progress.
     if dep_drag.from.is_some() {
@@ -748,74 +738,21 @@ pub fn handle_block_selection(
         return;
     };
 
-    // Hit-test: task view uses BlockSprite entities; resource view uses gizmo geometry.
+    // Hit-test against the block sprites.
     let mut clicked: Option<WorkBlockId> = None;
-    if *mode == schedule::TimelineViewMode::Task {
-        for (block_sprite, transform, sprite) in &block_query {
-            let Some(size) = sprite.custom_size else {
-                continue;
-            };
-            let center = transform.translation.truncate();
-            let half = size * 0.5;
-            if world_pos.x >= center.x - half.x
-                && world_pos.x <= center.x + half.x
-                && world_pos.y >= center.y - half.y
-                && world_pos.y <= center.y + half.y
-            {
-                clicked = Some(block_sprite.work_block_id);
-                break;
-            }
-        }
-    } else if *mode == schedule::TimelineViewMode::Resource {
-        // Replicate draw_resource_timeline geometry: allocated bars per resource row,
-        // then the unassigned row.
-        let bar_h = ROW_HEIGHT * 0.65;
-        if let Some(plan) = model.plans.get(&active_schedule.plan_id) {
-            let mut resources: Vec<_> = model.resource_blocks.values().collect();
-            resources.sort_by_key(|r| r.id.0);
-
-            'resource_rows: for (row_idx, resource) in resources.iter().enumerate() {
-                let row_y = -(row_idx as f32) * ROW_HEIGHT;
-                for alloc in &plan.allocations {
-                    if alloc.resource_id != resource.id {
-                        continue;
-                    }
-                    if let Some(wb) = model.work_blocks.get(&alloc.work_block_id) {
-                        let x0 = wb.start_day as f32 * PIXELS_PER_DAY;
-                        let x1 = (wb.start_day + wb.duration_days) as f32 * PIXELS_PER_DAY;
-                        if world_pos.x >= x0
-                            && world_pos.x <= x1.max(x0 + 4.0)
-                            && world_pos.y >= row_y - bar_h * 0.5
-                            && world_pos.y <= row_y + bar_h * 0.5
-                        {
-                            clicked = Some(alloc.work_block_id);
-                            break 'resource_rows;
-                        }
-                    }
-                }
-            }
-
-            // Unassigned row: placed blocks with no allocation in this plan.
-            if clicked.is_none() {
-                let allocated: HashSet<WorkBlockId> =
-                    plan.allocations.iter().map(|a| a.work_block_id).collect();
-                let unassigned_row = resources.len();
-                let row_y = -(unassigned_row as f32) * ROW_HEIGHT;
-                for wb in model.work_blocks.values() {
-                    if wb.duration_days > 0 && !allocated.contains(&wb.id) {
-                        let x0 = wb.start_day as f32 * PIXELS_PER_DAY;
-                        let x1 = (wb.start_day + wb.duration_days) as f32 * PIXELS_PER_DAY;
-                        if world_pos.x >= x0
-                            && world_pos.x <= x1.max(x0 + 4.0)
-                            && world_pos.y >= row_y - bar_h * 0.5
-                            && world_pos.y <= row_y + bar_h * 0.5
-                        {
-                            clicked = Some(wb.id);
-                            break;
-                        }
-                    }
-                }
-            }
+    for (block_sprite, transform, sprite) in &block_query {
+        let Some(size) = sprite.custom_size else {
+            continue;
+        };
+        let center = transform.translation.truncate();
+        let half = size * 0.5;
+        if world_pos.x >= center.x - half.x
+            && world_pos.x <= center.x + half.x
+            && world_pos.y >= center.y - half.y
+            && world_pos.y <= center.y + half.y
+        {
+            clicked = Some(block_sprite.work_block_id);
+            break;
         }
     }
 
