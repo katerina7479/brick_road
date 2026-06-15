@@ -18,14 +18,10 @@ const MIN_LABEL_WIDTH: f32 = 20.0;
 /// Approximate pixel width per character at font_size 13 (used for truncation).
 const LABEL_CHAR_WIDTH: f32 = 8.0;
 
-/// ortho.scale at or below this → show full block name (covers default zoom=1.0 and normal browsing).
-const LOD_CLOSE_MAX: f32 = 2.5;
 /// ortho.scale above this → hide block name entirely; also the start of dep-edge fade.
 const LOD_FAR_MIN: f32 = 6.0;
 /// ortho.scale above this → dependency edges are fully hidden.
 const LOD_DEP_HIDE: f32 = 10.0;
-/// Characters shown in the medium-zoom abbreviated label.
-const LOD_ABBREV_CHARS: usize = 8;
 
 /// Inline name label rendered inside a block bar.
 /// Stores the untruncated model name so `sync_block_labels` can recompute
@@ -473,8 +469,35 @@ pub fn sync_compare_overlays(
 /// Counter-scales both so labels remain at constant screen-space size.
 /// Applies LOD-based text and moves the shadow 1 screen-pixel down-right
 /// (shadow offset = scale world units, which equals 1 screen pixel at all zooms).
+/// Fits a block label to the block's on-screen width. Returns the text to show
+/// (truncated with "…" when needed) or `None` when the block is too narrow — or
+/// the view too zoomed out — to show any label. Hidden labels are still readable
+/// via the hover tooltip, so a label never spills past its block's edges.
+fn fit_label(full_name: &str, block_world_w: f32, scale: f32) -> Option<String> {
+    if scale > LOD_FAR_MIN {
+        return None;
+    }
+    // The label renders at a constant screen size, so compare against the block's
+    // width in screen pixels (world width / zoom scale).
+    let screen_w = block_world_w / scale;
+    let max_chars = ((screen_w - LABEL_CHAR_WIDTH) / LABEL_CHAR_WIDTH).floor();
+    if max_chars < 1.0 {
+        return None;
+    }
+    let max_chars = max_chars as usize;
+    if full_name.chars().count() <= max_chars {
+        Some(full_name.to_string())
+    } else if max_chars == 1 {
+        Some("…".to_string())
+    } else {
+        let kept: String = full_name.chars().take(max_chars - 1).collect();
+        Some(format!("{kept}…"))
+    }
+}
+
 pub fn sync_block_labels(
     cam_q: Query<&Projection, With<Camera2d>>,
+    model: Res<model::Model>,
     mut label_q: Query<(&BlockLabel, &mut Text2d, &mut Visibility, &mut Transform), Without<BlockLabelShadow>>,
     mut shadow_q: Query<(&BlockLabelShadow, &mut Text2d, &mut Visibility, &mut Transform), Without<BlockLabel>>,
 ) {
@@ -482,19 +505,23 @@ pub fn sync_block_labels(
     let Projection::Orthographic(ortho) = proj else { return };
     let scale = ortho.scale;
 
+    let block_width = |id: &WorkBlockId| -> f32 {
+        model
+            .work_blocks
+            .get(id)
+            .map(|wb| wb.duration_days as f32 * PIXELS_PER_DAY)
+            .unwrap_or(0.0)
+    };
+
     for (label, mut text2d, mut vis, mut transform) in &mut label_q {
         transform.scale = Vec3::splat(scale);
         transform.translation = Vec3::new(0.0, 0.0, 0.15);
-        if scale > LOD_FAR_MIN {
-            *vis = Visibility::Hidden;
-        } else {
-            *vis = Visibility::Inherited;
-            let display: String = if scale < LOD_CLOSE_MAX {
-                label.full_name.clone()
-            } else {
-                label.full_name.chars().take(LOD_ABBREV_CHARS).collect()
-            };
-            *text2d = Text2d::new(display);
+        match fit_label(&label.full_name, block_width(&label.work_block_id), scale) {
+            Some(display) => {
+                *vis = Visibility::Inherited;
+                *text2d = Text2d::new(display);
+            }
+            None => *vis = Visibility::Hidden,
         }
     }
 
@@ -502,16 +529,12 @@ pub fn sync_block_labels(
         transform.scale = Vec3::splat(scale);
         // Shift by 1 screen pixel — in local space that's `scale` world units.
         transform.translation = Vec3::new(scale, -scale, 0.08);
-        if scale > LOD_FAR_MIN {
-            *vis = Visibility::Hidden;
-        } else {
-            *vis = Visibility::Inherited;
-            let display: String = if scale < LOD_CLOSE_MAX {
-                shadow.full_name.clone()
-            } else {
-                shadow.full_name.chars().take(LOD_ABBREV_CHARS).collect()
-            };
-            *text2d = Text2d::new(display);
+        match fit_label(&shadow.full_name, block_width(&shadow.work_block_id), scale) {
+            Some(display) => {
+                *vis = Visibility::Inherited;
+                *text2d = Text2d::new(display);
+            }
+            None => *vis = Visibility::Hidden,
         }
     }
 }
@@ -616,7 +639,7 @@ pub fn handle_block_selection(
             let row = (-world_pos.y / ROW_HEIGHT).round() as i32;
             if let Some(wb) = model.work_blocks.get_mut(&new_id) {
                 wb.start_day = start_day;
-                wb.duration_days = 1;
+                wb.duration_days = 5;
                 wb.row = row;
             }
             let plan_id = active_schedule.plan_id;
@@ -1943,7 +1966,7 @@ pub fn draw_create_mode_overlay(
                 .unwrap_or(0);
             if let Some(wb) = model.work_blocks.get_mut(&new_id) {
                 wb.start_day = branch_min;
-                wb.duration_days = 1;
+                wb.duration_days = 5;
                 wb.row = new_row;
             }
             if let Some(plan) = model.plans.get_mut(&plan_id) {
