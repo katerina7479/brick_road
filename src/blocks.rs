@@ -1871,6 +1871,12 @@ pub fn draw_create_mode_overlay(
             };
             let new_id = model.create_work_block(name, est);
             let plan_id = active_schedule.plan_id;
+            // Place the new block at branch_min so it appears immediately on the timeline.
+            // For baseline plans (branch_start_day=None) branch_min is 0.0 — day 0 is the
+            // correct default since the user can drag to reposition. Leaving duration_days=0
+            // would make the block invisible, which is worse UX.
+            // For branch plans branch_min is the branch start day, keeping new work inside
+            // the branch window.
             let branch_min = model
                 .plans
                 .get(&plan_id)
