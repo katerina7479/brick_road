@@ -4,7 +4,6 @@ use bevy::prelude::*;
 use chrono::Datelike;
 
 use crate::{
-    analysis::ScheduleAnalysis,
     blocks::BlockSprite,
     calendar::{date_to_day, day_to_date, first_working_day_of_month},
     constants::{PIXELS_PER_DAY, ROW_HEIGHT},
@@ -464,51 +463,6 @@ pub fn scale_labels_to_zoom(
     }
 }
 
-
-/// Draws a red connecting line between each pair of blocks that violates a
-/// dependency constraint. The line runs from the predecessor's right edge to
-/// the successor's left edge, using live BlockSprite Y positions.
-pub fn draw_violation_indicators(
-    model: Res<Model>,
-    analysis: Res<ScheduleAnalysis>,
-    mut gizmos: Gizmos,
-    block_q: Query<(&BlockSprite, &Transform)>,
-) {
-    if analysis.violations.is_empty() {
-        return;
-    }
-
-    let violation_color = Color::from(LinearRgba::new(3.0, 0.1, 0.1, 1.0));
-
-    let row_y: HashMap<WorkBlockId, f32> = block_q
-        .iter()
-        .map(|(bs, t)| (bs.work_block_id, t.translation.y))
-        .collect();
-
-    for v in &analysis.violations {
-        let Some(pred) = model.work_blocks.get(&v.predecessor) else {
-            continue;
-        };
-        let Some(succ) = model.work_blocks.get(&v.successor) else {
-            continue;
-        };
-        let Some(&pred_y) = row_y.get(&v.predecessor) else {
-            continue;
-        };
-        let Some(&succ_y) = row_y.get(&v.successor) else {
-            continue;
-        };
-
-        let pred_x = (pred.start_day + pred.duration_days) as f32 * PIXELS_PER_DAY;
-        let succ_x = succ.start_day as f32 * PIXELS_PER_DAY;
-
-        gizmos.line_2d(
-            Vec2::new(pred_x, pred_y),
-            Vec2::new(succ_x, succ_y),
-            violation_color,
-        );
-    }
-}
 
 #[cfg(test)]
 mod tests {

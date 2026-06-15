@@ -47,7 +47,6 @@ fn main() {
         .insert_resource(blocks::BlockSpriteMap::default())
         .insert_resource(blocks::ComparePlanState::default())
         .insert_resource(blocks::CompareBlockSpriteMap::default())
-        .insert_resource(blocks::BranchGhostMap::default())
         .insert_resource(labels::NestingDepthMap::default())
         .insert_resource(ForkHoverState::default())
         .add_systems(Startup, (setup_db, setup_camera))
@@ -62,7 +61,6 @@ fn main() {
             schedule::update_visible_blocks.before(blocks::reconcile_block_sprites),
         )
         .add_systems(PostStartup, blocks::reconcile_block_sprites)
-        .add_systems(PostStartup, blocks::sync_branch_ghosts.after(blocks::reconcile_block_sprites))
         .add_systems(PostStartup, sync_weekend_bands.after(blocks::reconcile_block_sprites))
         .add_systems(PostStartup, sync_period_bands.after(blocks::reconcile_block_sprites))
         .add_systems(
@@ -80,13 +78,8 @@ fn main() {
         .add_systems(Update, update_analysis)
         .add_systems(
             Update,
-            blocks::sync_branch_ghosts.after(blocks::reconcile_block_sprites),
-        )
-        .add_systems(
-            Update,
             schedule::update_visible_blocks
                 .before(blocks::reconcile_block_sprites)
-                .before(blocks::sync_conflict_overlays)
                 .before(blocks::sync_uncertainty_overlays)
                 .before(blocks::draw_dependency_edges)
                 .before(blocks::draw_block_handles)
@@ -127,12 +120,6 @@ fn main() {
             blocks::sync_block_sprites
                 .after(blocks::handle_block_drag)
                 .after(blocks::reconcile_block_sprites)
-                ,
-        )
-        .add_systems(
-            Update,
-            blocks::sync_conflict_overlays
-                .after(update_analysis)
                 ,
         )
         .add_systems(
@@ -185,7 +172,6 @@ fn main() {
             labels::compute_nesting_depths.before(labels::draw_nesting_indicators),
         )
         .add_systems(Update, labels::draw_nesting_indicators)
-        .add_systems(Update, labels::draw_violation_indicators)
         .add_systems(
             Update,
             blocks::sync_block_labels

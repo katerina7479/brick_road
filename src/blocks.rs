@@ -9,7 +9,7 @@ use crate::{
     analysis::ScheduleAnalysis,
     constants::{PIXELS_PER_DAY, ROW_HEIGHT},
     db, graph,
-    model::{self, Day, DependencyId, DependencyType, Estimate, PlanId, WorkBlockId},
+    model::{self, Day, DependencyType, Estimate, PlanId, WorkBlockId},
     schedule::{self, ViewScope},
 };
 
@@ -101,23 +101,6 @@ pub struct CompareBlockSprite {
     pub work_block_id: WorkBlockId,
 }
 
-/// Ghost sprite rendered in a branch plan lane for a non-active plan's block.
-#[derive(Component)]
-pub struct BranchGhostSprite {
-    pub work_block_id: WorkBlockId,
-    pub plan_id: PlanId,
-}
-
-/// Tracks ghost sprite entities for all non-active (branch) plan lanes.
-/// Keyed by (plan_id, work_block_id) so individual ghosts can be found.
-#[derive(Resource, Default)]
-pub struct BranchGhostMap {
-    pub entities: HashMap<(PlanId, WorkBlockId), Entity>,
-}
-
-/// How many extra ROW_HEIGHT units to leave between plan lanes (includes
-/// space for the separator label).
-const BRANCH_LANE_GAP: f32 = 3.0;
 
 /// Faded palette for branch ghost lanes — distinct colors, lower saturation
 /// than the main block palette so they read as "alternative" rather than active.
@@ -128,120 +111,6 @@ pub const BRANCH_PALETTE: &[LinearRgba] = &[
     LinearRgba::new(1.60, 1.20, 0.30, 1.0), // gold
 ];
 
-/// Spawns / despawns ghost sprites representing non-active plan blocks in
-/// their own horizontal lanes below the active plan rows.
-///
-/// Lane layout (top to bottom):
-///   Active plan rows   (managed by `reconcile_block_sprites`)
-///   ── separator ──
-///   Branch plan A rows
-///   ── separator ──
-///   Branch plan B rows …
-///
-/// Ghost blocks are rendered at z = -0.3 (behind active blocks) with reduced
-/// alpha so they read as "alternative futures" rather than the current plan.
-pub fn sync_branch_ghosts(
-    mut commands: Commands,
-    model: Res<model::Model>,
-    schedule: Res<schedule::Schedule>,
-    visible: Res<schedule::VisibleBlocks>,
-    mut ghost_map: ResMut<BranchGhostMap>,
-) {
-    if !model.is_changed() && !schedule.is_changed() && !visible.is_changed() {
-        return;
-    }
-
-    // Despawn all existing ghosts.
-    for (_, entity) in ghost_map.entities.drain() {
-        commands.entity(entity).despawn();
-    }
-
-    // Compute how many rows the active plan occupies via greedy interval packing.
-    let active_row_count = {
-        let mut row_ends: Vec<Day> = Vec::new();
-        for &id in &visible.ids {
-            if let Some(wb) = model.work_blocks.get(&id) {
-                let row = row_ends.iter().position(|&e| wb.start_day >= e).unwrap_or(row_ends.len());
-                let end = wb.start_day + wb.duration_days;
-                if row < row_ends.len() { row_ends[row] = end; } else { row_ends.push(end); }
-            }
-        }
-        row_ends.len().max(1)
-    };
-
-    // Collect non-active plans sorted by branch_start_day then id for stable ordering.
-    let active_id = schedule.plan_id;
-    let mut branch_plans: Vec<&model::Plan> = model.plans.values()
-        .filter(|p| p.id != active_id)
-        .collect();
-    branch_plans.sort_by_key(|p| (p.branch_start_day.unwrap_or(i32::MAX), p.id.0));
-
-    let mut lane_top_rows = active_row_count as f32 + BRANCH_LANE_GAP;
-
-    for (lane_idx, plan) in branch_plans.iter().enumerate() {
-        // Collect all visible blocks for this plan (root blocks + their variant descendants
-        // via the plan's selected variants, filtered to placed blocks only).
-        let mut plan_block_ids: Vec<WorkBlockId> = Vec::new();
-        let mut stack: Vec<WorkBlockId> = plan.root_blocks.clone();
-        let mut seen: HashSet<WorkBlockId> = HashSet::new();
-        while let Some(id) = stack.pop() {
-            if !seen.insert(id) { continue; }
-            plan_block_ids.push(id);
-            if let Some(wb) = model.work_blocks.get(&id) {
-                // Follow the selected variant for this plan (or first if none selected).
-                let var_id = plan.selected_variants.get(&id)
-                    .copied()
-                    .or_else(|| wb.variants.first().copied());
-                if let Some(vid) = var_id {
-                    if let Some(var) = model.variants.get(&vid) {
-                        for &child in &var.children { stack.push(child); }
-                    }
-                }
-            }
-        }
-
-        // Filter to placed blocks and sort by start_day for greedy packing.
-        let mut plan_blocks: Vec<&model::WorkBlock> = plan_block_ids.iter()
-            .filter_map(|&id| model.work_blocks.get(&id))
-            .filter(|wb| wb.duration_days > 0)
-            .collect();
-        plan_blocks.sort_by_key(|wb| wb.start_day);
-
-        // Greedy row packing.
-        let mut row_ends: Vec<Day> = Vec::new();
-        let mut id_to_row: HashMap<WorkBlockId, usize> = HashMap::new();
-        for wb in &plan_blocks {
-            let row = row_ends.iter().position(|&e| wb.start_day >= e).unwrap_or(row_ends.len());
-            let end = wb.start_day + wb.duration_days;
-            if row < row_ends.len() { row_ends[row] = end; } else { row_ends.push(end); }
-            id_to_row.insert(wb.id, row);
-        }
-        let this_lane_rows = row_ends.len().max(1);
-
-        // Spawn ghost sprites for this lane.
-        let lc = BRANCH_PALETTE[lane_idx % BRANCH_PALETTE.len()];
-        for wb in &plan_blocks {
-            let row = id_to_row.get(&wb.id).copied().unwrap_or(0);
-            let width = wb.duration_days as f32 * PIXELS_PER_DAY;
-            let x = wb.start_day as f32 * PIXELS_PER_DAY + width * 0.5;
-            let y = -(lane_top_rows + row as f32) * ROW_HEIGHT;
-
-            let entity = commands.spawn((
-                BranchGhostSprite { work_block_id: wb.id, plan_id: plan.id },
-                Sprite {
-                    color: Color::from(LinearRgba::new(lc.red, lc.green, lc.blue, 0.40)),
-                    custom_size: Some(Vec2::new(width, BLOCK_HEIGHT * 0.70)),
-                    ..default()
-                },
-                Transform::from_xyz(x, y, -0.3),
-            )).id();
-
-            ghost_map.entities.insert((plan.id, wb.id), entity);
-        }
-
-        lane_top_rows += this_lane_rows as f32 + BRANCH_LANE_GAP;
-    }
-}
 
 /// Tracks inline name-edit state: which block is being renamed and the live text buffer.
 #[derive(Resource, Default)]
@@ -997,82 +866,6 @@ pub fn handle_block_drag(
     }
 }
 
-/// Marker: this sprite visualises one `ResourceConflict` window.
-#[derive(Component)]
-pub struct ConflictOverlay;
-
-/// Translucent red used for conflict overlays (behind blocks at z = −0.5).
-const CONFLICT_COLOR: Color = Color::srgba(1.0, 0.12, 0.05, 0.38);
-
-/// Vertical padding above/below the block height when sizing conflict overlays.
-const CONFLICT_PADDING: f32 = 5.0;
-
-/// Despawns all existing `ConflictOverlay` entities and re-spawns one per
-/// `ResourceConflict` in `ScheduleAnalysis`. Each overlay is a translucent red
-/// sprite placed behind blocks (z = −0.5) that spans the conflict time window
-/// in x and the contributing blocks' row range in y.
-pub fn sync_conflict_overlays(
-    mut commands: Commands,
-    sa: Res<ScheduleAnalysis>,
-    model: Res<model::Model>,
-    visible_blocks: Res<schedule::VisibleBlocks>,
-    existing: Query<Entity, With<ConflictOverlay>>,
-) {
-    for entity in &existing {
-        commands.entity(entity).despawn();
-    }
-
-    if sa.resource_conflicts.is_empty() {
-        return;
-    }
-
-    // Row lookup: WorkBlockId → its explicit lane.
-    let row_of: HashMap<WorkBlockId, i32> = visible_blocks
-        .ids
-        .iter()
-        .filter_map(|&id| model.work_blocks.get(&id).map(|wb| (id, wb.row)))
-        .collect();
-    let total_rows = visible_blocks.ids.len().max(1);
-
-    for conflict in &sa.resource_conflicts {
-        let width = (conflict.window_end - conflict.window_start) as f32 * PIXELS_PER_DAY;
-        if width <= 0.0 {
-            continue;
-        }
-
-        // Compute the y-center and height to cover contributing block rows.
-        let rows: Vec<i32> = conflict
-            .contributing_blocks
-            .iter()
-            .filter_map(|id| row_of.get(id).copied())
-            .collect();
-
-        let (y_center, height) = if rows.is_empty() {
-            // Fall back to covering all rows.
-            let h = (total_rows as f32) * ROW_HEIGHT + CONFLICT_PADDING * 2.0;
-            (-(total_rows as f32 - 1.0) * 0.5 * ROW_HEIGHT, h)
-        } else {
-            let min_row = *rows.iter().min().unwrap() as f32;
-            let max_row = *rows.iter().max().unwrap() as f32;
-            let y_top = -min_row * ROW_HEIGHT + BLOCK_HEIGHT * 0.5 + CONFLICT_PADDING;
-            let y_bot = -max_row * ROW_HEIGHT - BLOCK_HEIGHT * 0.5 - CONFLICT_PADDING;
-            let h = (y_top - y_bot).abs().max(BLOCK_HEIGHT + CONFLICT_PADDING * 2.0);
-            ((y_top + y_bot) * 0.5, h)
-        };
-
-        let x_center = conflict.window_start as f32 * PIXELS_PER_DAY + width * 0.5;
-
-        commands.spawn((
-            ConflictOverlay,
-            Sprite {
-                color: CONFLICT_COLOR,
-                custom_size: Some(Vec2::new(width, height)),
-                ..default()
-            },
-            Transform::from_xyz(x_center, y_center, -0.5),
-        ));
-    }
-}
 
 // ── Estimate uncertainty overlays ────────────────────────────────────────────
 
@@ -1338,13 +1131,11 @@ struct BlockGeom {
 /// Draw all model dependency edges as arrows, plus the in-progress drag line.
 ///
 /// Colors:
-///   Violated   — red/orange
-///   Satisfied  — dim cyan
+///   Edge — dim cyan
 ///   In-progress drag — white
 pub fn draw_dependency_edges(
     mut gizmos: Gizmos,
     model: Res<model::Model>,
-    sa: Res<ScheduleAnalysis>,
     drag: Res<DepDragState>,
     visible_blocks: Res<schedule::VisibleBlocks>,
     windows: Query<&Window>,
@@ -1366,9 +1157,6 @@ pub fn draw_dependency_edges(
             ))
         })
         .collect();
-
-    let violated: std::collections::HashSet<DependencyId> =
-        sa.violations.iter().map(|v| v.dependency_id).collect();
 
     let ortho_scale = cam_proj
         .single()
@@ -1396,11 +1184,7 @@ pub fn draw_dependency_edges(
                 DependencyType::StartToFinish => (Vec2::new(pg.xl, pg.y), Vec2::new(sg.xr, sg.y)),
             };
 
-            let color = if violated.contains(&dep.id) {
-                Color::srgba(1.0, 0.25, 0.1, 0.9 * edge_alpha)
-            } else {
-                Color::srgba(0.35, 0.85, 0.85, 0.65 * edge_alpha)
-            };
+            let color = Color::srgba(0.35, 0.85, 0.85, 0.65 * edge_alpha);
 
             gizmos.line_2d(src, dst, color);
             draw_arrowhead(&mut gizmos, src, dst, color);
