@@ -71,14 +71,6 @@ fn main() {
             PostStartup,
             labels::spawn_labels.after(blocks::reconcile_block_sprites),
         )
-        .add_systems(
-            PostStartup,
-            labels::spawn_day_labels.after(labels::spawn_labels),
-        )
-        .add_systems(
-            PostStartup,
-            labels::spawn_period_labels.after(labels::spawn_day_labels),
-        )
         .add_systems(Update, (camera_nav_keys, update_camera_target, smooth_camera).chain())
         .add_systems(Update, draw_grid)
         .add_systems(Update, draw_branch_markers)
@@ -192,22 +184,10 @@ fn main() {
         )
         .add_systems(
             Update,
-            labels::spawn_day_labels
-                .after(update_camera_target)
-                .after(smooth_camera),
-        )
-        .add_systems(
-            Update,
-            labels::spawn_period_labels
-                .after(smooth_camera),
-        )
-        .add_systems(
-            Update,
             labels::compute_nesting_depths.before(labels::draw_nesting_indicators),
         )
         .add_systems(Update, labels::draw_nesting_indicators.run_if(task_view_active))
         .add_systems(Update, labels::draw_violation_indicators.run_if(task_view_active))
-        .add_systems(Update, labels::scale_labels_to_zoom)
         .add_systems(
             Update,
             blocks::sync_block_labels
@@ -230,6 +210,7 @@ fn main() {
         .add_systems(Update, draw_resource_timeline)
         .add_systems(Update, handle_resource_drag)
         .add_systems(EguiPrimaryContextPass, top_bar_ui)
+        .add_systems(EguiPrimaryContextPass, calendar_ruler_ui.after(top_bar_ui))
         .add_systems(EguiPrimaryContextPass, side_panel_ui)
         .add_systems(EguiPrimaryContextPass, resource_row_labels_ui)
         .add_systems(EguiPrimaryContextPass, blocks::draw_name_edit_overlay)
@@ -1053,6 +1034,108 @@ fn draw_branch_markers(
         gizmos.line_2d(Vec2::new(x, fork_y), Vec2::new(x - arm, fork_y + arm), ghost);
         gizmos.line_2d(Vec2::new(x, fork_y), Vec2::new(x + arm, fork_y + arm), ghost);
     }
+}
+
+/// Fixed calendar ruler docked directly under the top bar. Unlike the old
+/// world-space day/period labels (which panned and zoomed with the canvas and
+/// "slipped" off the top), this is screen-space: it maps each day to a screen X
+/// from the camera (`x` + zoom) and the window width, painting day ticks and
+/// quarter labels at a constant Y and constant font size. The timeline body
+/// scrolls underneath while the calendar header stays put.
+fn calendar_ruler_ui(
+    mut contexts: EguiContexts,
+    schedule: Res<schedule::Schedule>,
+    model: Res<model::Model>,
+    today: Res<schedule::TodayMarker>,
+    cam_q: Query<(&Transform, &Projection), With<Camera2d>>,
+    windows: Query<&Window>,
+) {
+    let Ok(ctx) = contexts.ctx_mut() else { return };
+    let Ok((cam_t, proj)) = cam_q.single() else { return };
+    let Projection::Orthographic(ortho) = proj else { return };
+    let Ok(window) = windows.single() else { return };
+
+    let scale = ortho.scale;
+    let cam_x = cam_t.translation.x;
+    let win_w = window.width();
+    let world_to_screen_x = |wx: f32| win_w * 0.5 + (wx - cam_x) / scale;
+
+    // Visible world-x extents, with a one-day margin so labels don't pop at edges.
+    let half_w = win_w * 0.5 * scale + PIXELS_PER_DAY;
+    let x_left = cam_x - half_w;
+    let x_right = cam_x + half_w;
+
+    egui::TopBottomPanel::top("calendar_ruler")
+        .exact_height(38.0)
+        .frame(
+            egui::Frame::new()
+                .fill(egui::Color32::from_rgb(22, 17, 12))
+                .inner_margin(egui::Margin::same(0)),
+        )
+        .show(ctx, |ui| {
+            let rect = ui.max_rect();
+            let painter = ui.painter_at(rect);
+
+            let quarter_y = rect.top() + 9.0;
+            let tick_top = rect.top() + 19.0;
+            let tick_bottom = rect.bottom() - 2.0;
+            let day_label_y = rect.top() + 28.0;
+
+            // Quarter labels — clamped to the visible portion of their span so the
+            // label stays readable while the quarter scrolls (sticky-header feel).
+            for span in labels::quarter_label_spans(&schedule, &model) {
+                let vis_start = span.world_x_start.max(x_left);
+                let vis_end = span.world_x_end.min(x_right);
+                if vis_end <= vis_start {
+                    continue;
+                }
+                let cx = world_to_screen_x((vis_start + vis_end) * 0.5);
+                painter.text(
+                    egui::Pos2::new(cx, quarter_y),
+                    egui::Align2::CENTER_CENTER,
+                    span.label,
+                    egui::FontId::proportional(11.0),
+                    egui::Color32::from_rgb(196, 162, 110),
+                );
+            }
+
+            // Day ticks + date labels.
+            let tick_stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(70, 74, 92));
+            for tick in labels::day_tick_labels(scale, x_left, x_right, &model, today.day) {
+                let sx = world_to_screen_x(tick.world_x);
+                painter.line_segment(
+                    [
+                        egui::Pos2::new(sx, tick_top),
+                        egui::Pos2::new(sx, tick_bottom),
+                    ],
+                    tick_stroke,
+                );
+                let color = if tick.is_past {
+                    egui::Color32::from_rgb(120, 120, 140)
+                } else {
+                    egui::Color32::from_rgb(212, 214, 228)
+                };
+                painter.text(
+                    egui::Pos2::new(sx, day_label_y),
+                    egui::Align2::CENTER_CENTER,
+                    tick.label,
+                    egui::FontId::proportional(12.0),
+                    color,
+                );
+            }
+
+            // Today marker tick — warm accent, matching the canvas today line.
+            let today_x = world_to_screen_x(today.day as f32 * PIXELS_PER_DAY);
+            if today_x >= rect.left() && today_x <= rect.right() {
+                painter.line_segment(
+                    [
+                        egui::Pos2::new(today_x, rect.top()),
+                        egui::Pos2::new(today_x, rect.bottom()),
+                    ],
+                    egui::Stroke::new(2.0, egui::Color32::from_rgb(250, 196, 92)),
+                );
+            }
+        });
 }
 
 /// Renders Re-center and Fit-to-view buttons in a small floating area
