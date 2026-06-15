@@ -62,6 +62,10 @@ const PALETTE: &[LinearRgba] = &[
 #[derive(Resource, Default)]
 pub struct SelectedBlock(pub Option<WorkBlockId>);
 
+/// Tracks the currently selected dependency edge (for click-to-delete).
+#[derive(Resource, Default)]
+pub struct SelectedDependency(pub Option<model::DependencyId>);
+
 /// Maps each currently-visible `WorkBlockId` to its `BlockSprite` entity.
 ///
 /// Maintained by `reconcile_block_sprites` to allow incremental ECS updates:
@@ -549,8 +553,10 @@ pub fn handle_block_selection(
     mut egui_ctx: EguiContexts,
     windows: Query<&Window>,
     camera: Query<(&Camera, &GlobalTransform)>,
+    cam_proj: Query<&Projection, With<Camera2d>>,
     mouse: Res<ButtonInput<MouseButton>>,
     mut selected: ResMut<SelectedBlock>,
+    mut selected_dep: ResMut<SelectedDependency>,
     block_query: Query<(&BlockSprite, &Transform, &Sprite)>,
     name_edit: Res<NameEditState>,
     mut model: ResMut<model::Model>,
@@ -614,7 +620,22 @@ pub fn handle_block_selection(
         *last_empty_click = 0.0;
         // Re-clicking the selected block toggles it off; otherwise select it.
         selected.0 = if Some(id) == selected.0 { None } else { Some(id) };
+        selected_dep.0 = None;
     } else {
+        // A dependency edge under the cursor takes priority — select it (for delete).
+        let scale = cam_proj
+            .single()
+            .ok()
+            .and_then(|p| if let Projection::Orthographic(o) = p { Some(o.scale) } else { None })
+            .unwrap_or(1.0);
+        if let Some(dep_id) = nearest_dep_edge(&model, world_pos, 7.0 * scale) {
+            selected_dep.0 = Some(dep_id);
+            selected.0 = None;
+            *last_empty_click = 0.0;
+            return;
+        }
+        selected_dep.0 = None;
+
         // Empty space: single click deselects, double-click (≤350 ms) creates a block.
         let now = time.elapsed_secs();
         let is_double_click = now - *last_empty_click < 0.35;
@@ -1026,6 +1047,7 @@ pub fn draw_dependency_edges(
     mut gizmos: Gizmos,
     model: Res<model::Model>,
     drag: Res<DepDragState>,
+    selected_dep: Res<SelectedDependency>,
     visible_blocks: Res<schedule::VisibleBlocks>,
     windows: Query<&Window>,
     camera: Query<(&Camera, &GlobalTransform)>,
@@ -1061,7 +1083,7 @@ pub fn draw_dependency_edges(
     };
 
     if edge_alpha > 0.0 {
-        for dep in model.dependencies.values() {
+        for (dep_id, dep) in &model.dependencies {
             let (Some(pg), Some(sg)) = (geom.get(&dep.predecessor), geom.get(&dep.successor)) else {
                 continue;
             };
@@ -1073,10 +1095,22 @@ pub fn draw_dependency_edges(
                 DependencyType::StartToFinish => (Vec2::new(pg.xl, pg.y), Vec2::new(sg.xr, sg.y)),
             };
 
-            let color = Color::srgba(0.35, 0.85, 0.85, 0.65 * edge_alpha);
+            let is_selected = selected_dep.0 == Some(*dep_id);
+            let color = if is_selected {
+                Color::srgba(1.7, 1.2, 0.25, edge_alpha.max(0.9)) // bright selection highlight
+            } else {
+                Color::srgba(0.35, 0.85, 0.85, 0.65 * edge_alpha)
+            };
 
             gizmos.line_2d(src, dst, color);
             draw_arrowhead(&mut gizmos, src, dst, color);
+            if is_selected {
+                // Thicken by drawing offset parallels (gizmo lines are 1px).
+                let n = (dst - src).normalize_or_zero();
+                let off = Vec2::new(-n.y, n.x);
+                gizmos.line_2d(src + off, dst + off, color);
+                gizmos.line_2d(src - off, dst - off, color);
+            }
         }
     }
 
@@ -1114,6 +1148,61 @@ fn draw_arrowhead(gizmos: &mut Gizmos, src: Vec2, dst: Vec2, color: Color) {
     let perp = Vec2::new(-dir.y, dir.x);
     gizmos.line_2d(dst, dst - dir * 8.0 + perp * 4.0, color);
     gizmos.line_2d(dst, dst - dir * 8.0 - perp * 4.0, color);
+}
+
+/// World-space endpoints (predecessor anchor → successor anchor) of a dependency
+/// edge, mirroring `draw_dependency_edges`. `None` if a block is missing/unplaced.
+fn dep_endpoints(model: &model::Model, dep: &model::Dependency) -> Option<(Vec2, Vec2)> {
+    let pred = model.work_blocks.get(&dep.predecessor)?;
+    let succ = model.work_blocks.get(&dep.successor)?;
+    if pred.duration_days <= 0 || succ.duration_days <= 0 {
+        return None;
+    }
+    let p_xl = pred.start_day as f32 * PIXELS_PER_DAY;
+    let p_xr = (pred.start_day + pred.duration_days) as f32 * PIXELS_PER_DAY;
+    let p_y = -(pred.row as f32) * ROW_HEIGHT;
+    let s_xl = succ.start_day as f32 * PIXELS_PER_DAY;
+    let s_xr = (succ.start_day + succ.duration_days) as f32 * PIXELS_PER_DAY;
+    let s_y = -(succ.row as f32) * ROW_HEIGHT;
+    let (src, dst) = match dep.dependency_type {
+        DependencyType::FinishToStart => (Vec2::new(p_xr, p_y), Vec2::new(s_xl, s_y)),
+        DependencyType::StartToStart => (Vec2::new(p_xl, p_y), Vec2::new(s_xl, s_y)),
+        DependencyType::FinishToFinish => (Vec2::new(p_xr, p_y), Vec2::new(s_xr, s_y)),
+        DependencyType::StartToFinish => (Vec2::new(p_xl, p_y), Vec2::new(s_xr, s_y)),
+    };
+    Some((src, dst))
+}
+
+/// Distance from point `p` to segment `a`–`b`.
+fn point_segment_dist(p: Vec2, a: Vec2, b: Vec2) -> f32 {
+    let ab = b - a;
+    let len2 = ab.length_squared();
+    let t = if len2 > 0.0 {
+        ((p - a).dot(ab) / len2).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    (p - (a + ab * t)).length()
+}
+
+/// Id of the dependency whose edge is nearest `world_pos`, within `threshold`
+/// world units (closest wins).
+fn nearest_dep_edge(
+    model: &model::Model,
+    world_pos: Vec2,
+    threshold: f32,
+) -> Option<model::DependencyId> {
+    let mut best: Option<(model::DependencyId, f32)> = None;
+    for (id, dep) in &model.dependencies {
+        let Some((src, dst)) = dep_endpoints(model, dep) else {
+            continue;
+        };
+        let d = point_segment_dist(world_pos, src, dst);
+        if d <= threshold && best.map(|(_, bd)| d < bd).unwrap_or(true) {
+            best = Some((*id, d));
+        }
+    }
+    best.map(|(id, _)| id)
 }
 
 fn dep_type_from_modifiers(keys: &ButtonInput<KeyCode>) -> DependencyType {
@@ -1266,20 +1355,17 @@ pub fn handle_dep_drag(
                     } else {
                         (to_id, from_id) // left handle → from is successor
                     };
-                    // Re-dragging an existing connection toggles it off (delete).
-                    let existing = model.dependencies.iter().find_map(|(did, d)| {
-                        (d.predecessor == pred
+                    // Create only (idempotent); deletion is click-the-edge + Delete.
+                    let exists = model.dependencies.values().any(|d| {
+                        d.predecessor == pred
                             && d.successor == succ
-                            && d.dependency_type == dep_type)
-                            .then_some(*did)
+                            && d.dependency_type == dep_type
                     });
-                    if let Some(did) = existing {
-                        model.dependencies.remove(&did);
-                    } else {
+                    if !exists {
                         model.create_dependency(pred, succ, dep_type);
-                    }
-                    if let Err(e) = crate::db::save_model(&conn, &model) {
-                        error!("save_model failed: {e}");
+                        if let Err(e) = crate::db::save_model(&conn, &model) {
+                            error!("save_model failed: {e}");
+                        }
                     }
                 }
             }
@@ -1297,19 +1383,16 @@ pub fn handle_dep_drag(
             if let Some(to_id) = block_at(world_pos) {
                 if to_id != from_id {
                     let dep_type = dep_type_from_modifiers(&keyboard);
-                    let existing = model.dependencies.iter().find_map(|(did, d)| {
-                        (d.predecessor == from_id
+                    let exists = model.dependencies.values().any(|d| {
+                        d.predecessor == from_id
                             && d.successor == to_id
-                            && d.dependency_type == dep_type)
-                            .then_some(*did)
+                            && d.dependency_type == dep_type
                     });
-                    if let Some(did) = existing {
-                        model.dependencies.remove(&did);
-                    } else {
+                    if !exists {
                         model.create_dependency(from_id, to_id, dep_type);
-                    }
-                    if let Err(e) = crate::db::save_model(&conn, &model) {
-                        error!("save_model failed: {e}");
+                        if let Err(e) = crate::db::save_model(&conn, &model) {
+                            error!("save_model failed: {e}");
+                        }
                     }
                 }
             }
@@ -1646,6 +1729,7 @@ pub fn handle_block_delete(
     mut egui_ctx: EguiContexts,
     keyboard: Res<ButtonInput<KeyCode>>,
     mut selected: ResMut<SelectedBlock>,
+    mut selected_dep: ResMut<SelectedDependency>,
     name_edit: Res<NameEditState>,
     mut model: ResMut<model::Model>,
     mut undo: ResMut<UndoStack>,
@@ -1660,7 +1744,13 @@ pub fn handle_block_delete(
         }
     }
     if keyboard.just_pressed(KeyCode::Delete) || keyboard.just_pressed(KeyCode::Backspace) {
-        if let Some(id) = selected.0 {
+        // A selected dependency edge deletes first; otherwise delete the block.
+        if let Some(dep_id) = selected_dep.0.take() {
+            model.dependencies.remove(&dep_id);
+            if let Err(e) = db::save_model(&conn, &model) {
+                error!("save_model failed: {e}");
+            }
+        } else if let Some(id) = selected.0 {
             undo.last_deletion = Some(build_deletion_snapshot(&model, id));
             delete_work_block(&mut model, id);
             if let Err(e) = db::save_model(&conn, &model) {
