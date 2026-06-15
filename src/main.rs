@@ -1660,6 +1660,107 @@ fn side_panel_ui(
 
             ui.separator();
 
+            // Batch edit panel when ≥2 blocks are multi-selected.
+            if multi.0.len() >= 2 {
+                let ids: Vec<_> = multi.0.iter().copied().collect();
+                ui.strong(format!("{} blocks selected", ids.len()));
+                let names: Vec<_> = ids
+                    .iter()
+                    .filter_map(|id| model.work_blocks.get(id).map(|wb| wb.name.clone()))
+                    .take(5)
+                    .collect();
+                for name in &names {
+                    ui.weak(format!("· {}", name));
+                }
+                if ids.len() > 5 {
+                    ui.weak(format!("  … and {} more", ids.len() - 5));
+                }
+
+                ui.separator();
+                ui.label("Color (apply to all)");
+
+                const MULTI_PRESETS: &[(&str, [f32; 3])] = &[
+                    ("Amber", [2.0, 0.5, 0.1]),
+                    ("Green", [0.2, 1.8, 0.5]),
+                    ("Cyan", [0.2, 0.8, 3.0]),
+                    ("Magenta", [2.2, 0.3, 1.5]),
+                    ("Yellow", [2.5, 1.8, 0.1]),
+                    ("Blue", [0.5, 0.5, 3.0]),
+                    ("Pink", [2.5, 0.3, 2.0]),
+                    ("Teal", [0.2, 2.5, 1.5]),
+                    ("Orange", [3.0, 1.0, 0.1]),
+                    ("Purple", [1.2, 0.2, 2.5]),
+                ];
+
+                let mut batch_color: Option<Option<[f32; 3]>> = None;
+                ui.horizontal_wrapped(|ui| {
+                    for (label, rgb) in MULTI_PRESETS {
+                        let [r, g, b] = *rgb;
+                        let fill = egui::Color32::from_rgb(
+                            ((r / 3.5).min(1.0) * 220.0) as u8,
+                            ((g / 3.5).min(1.0) * 220.0) as u8,
+                            ((b / 3.5).min(1.0) * 220.0) as u8,
+                        );
+                        if ui
+                            .add(
+                                egui::Button::new("")
+                                    .fill(fill)
+                                    .min_size(egui::Vec2::splat(18.0)),
+                            )
+                            .on_hover_text(*label)
+                            .clicked()
+                        {
+                            batch_color = Some(Some(*rgb));
+                        }
+                    }
+                    if ui
+                        .small_button("×")
+                        .on_hover_text("Reset to palette colors")
+                        .clicked()
+                    {
+                        batch_color = Some(None);
+                    }
+                });
+
+                if let Some(color) = batch_color {
+                    for id in &ids {
+                        if let Some(wb) = model.work_blocks.get_mut(id) {
+                            wb.color = color;
+                        }
+                    }
+                    if let Err(e) = db::save_model(&conn, &model) {
+                        error!("save_model failed: {e}");
+                    }
+                }
+
+                ui.separator();
+                ui.label("Priority (apply to all)");
+                let mut batch_priority: Option<u8> = None;
+                ui.horizontal(|ui| {
+                    for (label, val) in [("Low", 0u8), ("Normal", 1), ("High", 2), ("Critical", 3)] {
+                        if ui.button(label).clicked() {
+                            batch_priority = Some(val);
+                        }
+                    }
+                });
+                if let Some(prio) = batch_priority {
+                    for id in &ids {
+                        if let Some(wb) = model.work_blocks.get_mut(id) {
+                            wb.priority = prio;
+                        }
+                    }
+                    if let Err(e) = db::save_model(&conn, &model) {
+                        error!("save_model failed: {e}");
+                    }
+                }
+
+                if ui.button("Deselect all").clicked() {
+                    multi.0.clear();
+                    selected.0 = None;
+                }
+                return;
+            }
+
             let Some(sel_id) = selected.0 else {
                 ui.label("Click a block to inspect.");
                 return;
