@@ -370,19 +370,19 @@ pub fn reconcile_block_sprites(
 
             // Inline name label — only when the bar is wide enough to be readable.
             if width >= MIN_LABEL_WIDTH {
+                let full = block_label_text(wb);
                 let available_chars = ((width - 8.0) / LABEL_CHAR_WIDTH) as usize;
-                let display = if wb.name.chars().count() > available_chars && available_chars > 0 {
+                let display = if full.chars().count() > available_chars && available_chars > 0 {
                     let truncated: String =
-                        wb.name.chars().take(available_chars.saturating_sub(1)).collect();
+                        full.chars().take(available_chars.saturating_sub(1)).collect();
                     format!("{truncated}…")
                 } else {
-                    wb.name.clone()
+                    full.clone()
                 };
-                let name = wb.name.clone();
                 block_cmd.with_children(|parent| {
                     // Dark shadow for contrast — 1 screen-pixel offset (updated by sync_block_labels).
                     parent.spawn((
-                        BlockLabelShadow { full_name: name.clone(), work_block_id: id },
+                        BlockLabelShadow { full_name: full.clone(), work_block_id: id },
                         Text2d::new(display.clone()),
                         TextFont { font_size: 13.0, ..default() },
                         TextColor(Color::srgba(0.0, 0.0, 0.0, 0.6)),
@@ -391,7 +391,7 @@ pub fn reconcile_block_sprites(
                     ));
                     // White main label centered in the block.
                     parent.spawn((
-                        BlockLabel { full_name: name, work_block_id: id },
+                        BlockLabel { full_name: full, work_block_id: id },
                         Text2d::new(display),
                         TextFont { font_size: 13.0, ..default() },
                         TextColor(Color::srgba(1.0, 1.0, 1.0, 1.0)),
@@ -420,10 +420,19 @@ pub fn reconcile_block_sprites(
     }
 }
 
+/// Returns the text shown on a block sprite: `"Name [S]"` when a t-shirt size
+/// is selected, or just `"Name"` when the duration is a custom value.
+fn block_label_text(wb: &model::WorkBlock) -> String {
+    match &wb.t_shirt_size {
+        Some(size) => format!("{} [{}]", wb.name, size),
+        None => wb.name.clone(),
+    }
+}
+
 /// Keeps `BlockLabel::full_name` and `BlockLabelShadow::full_name` current when
-/// a block is renamed in the model. `sync_block_labels` drives displayed text
-/// from `full_name`; without this system a rename would not reflect until the
-/// next `reconcile_block_sprites` fires (only on visible-set/order changes).
+/// a block is renamed or its t-shirt size changes. `sync_block_labels` drives
+/// displayed text from `full_name`; without this system changes would not
+/// reflect until the next `reconcile_block_sprites` fires.
 pub fn sync_block_label_names(
     model: Res<model::Model>,
     mut label_q: Query<&mut BlockLabel>,
@@ -434,15 +443,17 @@ pub fn sync_block_label_names(
     }
     for mut label in &mut label_q {
         if let Some(wb) = model.work_blocks.get(&label.work_block_id) {
-            if label.full_name != wb.name {
-                label.full_name = wb.name.clone();
+            let expected = block_label_text(wb);
+            if label.full_name != expected {
+                label.full_name = expected;
             }
         }
     }
     for mut shadow in &mut shadow_q {
         if let Some(wb) = model.work_blocks.get(&shadow.work_block_id) {
-            if shadow.full_name != wb.name {
-                shadow.full_name = wb.name.clone();
+            let expected = block_label_text(wb);
+            if shadow.full_name != expected {
+                shadow.full_name = expected;
             }
         }
     }
