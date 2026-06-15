@@ -139,7 +139,11 @@ pub fn reconcile_block_sprites(
         return;
     }
     // In resource view the timeline shows resource rows instead of block rows.
+    // Despawn any existing block sprites so they don't bleed into the resource canvas.
     if *mode == schedule::TimelineViewMode::Resource {
+        for (_, entity) in sprite_map.entities.drain() {
+            commands.entity(entity).despawn();
+        }
         return;
     }
 
