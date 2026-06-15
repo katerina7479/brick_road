@@ -462,10 +462,6 @@ struct ForkHoverState {
     hovered_day: Option<model::Day>,
 }
 
-/// Marker component for horizontal separator sprites drawn between plan lanes.
-#[derive(Component)]
-struct BranchLaneSeparator;
-
 /// Tracks an in-progress drag in the resource timeline view.
 #[derive(Resource, Default)]
 struct ResourceDragState {
