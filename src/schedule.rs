@@ -701,8 +701,8 @@ pub fn resource_leveled_pass(
     // O(m log m) one-time cost per resource (m = segment count).
     let resource_blocks: HashMap<ResourceBlockId, Vec<AvailabilitySegment>> = model
         .resource_blocks
-        .iter()
-        .map(|(_, rb)| {
+        .values()
+        .map(|rb| {
             let mut segs = rb.availability.segments.clone();
             segs.sort_unstable_by_key(|seg| seg.start);
             (rb.id, segs)

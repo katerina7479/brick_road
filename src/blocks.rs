@@ -1058,7 +1058,7 @@ pub fn sync_uncertainty_overlays(
     }
 
     // Despawn stale overlays (removed blocks, or tail/marker no longer warranted).
-    for (_, entity) in &existing {
+    for entity in existing.values() {
         if !live.contains(entity) {
             commands.entity(*entity).despawn();
         }
@@ -1216,6 +1216,7 @@ struct BlockGeom {
 ///   Violated   — red/orange
 ///   Satisfied  — dim cyan
 ///   In-progress drag — white
+#[allow(clippy::too_many_arguments)]
 pub fn draw_dependency_edges(
     mut gizmos: Gizmos,
     model: Res<model::Model>,
@@ -1517,6 +1518,7 @@ pub fn handle_dep_drag(
 ///
 /// Must run before `handle_block_selection` so the guard there sees the updated
 /// `editing` flag on the same frame the double-click fires.
+#[allow(clippy::too_many_arguments)]
 pub fn handle_name_edit(
     mut egui_ctx: EguiContexts,
     windows: Query<&Window>,
@@ -1591,6 +1593,7 @@ pub fn handle_name_edit(
 /// focus-loss; cancels on Escape. On commit, persists to model + DB; the model
 /// change triggers `sync_block_label_names` which updates `BlockLabel::full_name`
 /// so the display text reflects the new name on the next frame.
+#[allow(clippy::too_many_arguments)]
 pub fn draw_name_edit_overlay(
     mut contexts: EguiContexts,
     mut name_edit: ResMut<NameEditState>,

@@ -481,6 +481,7 @@ struct ResourceDragState {
 /// Handles block dragging in resource view: horizontal drag reschedules (changes
 /// `start_day`), vertical drag to a different row reassigns the resource allocation.
 /// Both can happen in the same drag. Dependencies are cascaded on release.
+#[allow(clippy::too_many_arguments)]
 fn handle_resource_drag(
     mode: Res<schedule::TimelineViewMode>,
     mut model: ResMut<model::Model>,
@@ -613,6 +614,7 @@ fn handle_resource_drag(
 /// Draws one row per resource block when `TimelineViewMode::Resource` is active.
 /// Each row shows bars for every work block allocated to that resource, coloured
 /// red if the window overlaps a detected resource conflict.
+#[allow(clippy::too_many_arguments)]
 fn draw_resource_timeline(
     mode: Res<schedule::TimelineViewMode>,
     model: Res<model::Model>,
@@ -975,6 +977,7 @@ fn confidence_to_factors(confidence: f32, cf: &model::ConfidenceFactors) -> (f32
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn side_panel_ui(
     mut contexts: EguiContexts,
     mut selected: ResMut<blocks::SelectedBlock>,

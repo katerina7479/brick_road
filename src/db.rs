@@ -386,8 +386,7 @@ fn delete_stale(
         tx.execute_batch(&format!("DELETE FROM {table}"))?;
         return Ok(());
     }
-    let placeholders = std::iter::repeat("?")
-        .take(current_ids.len())
+    let placeholders = std::iter::repeat_n("?", current_ids.len())
         .collect::<Vec<_>>()
         .join(",");
     let sql = format!("DELETE FROM {table} WHERE id NOT IN ({placeholders})");
@@ -837,7 +836,7 @@ pub fn load_model(conn: &Connection) -> Result<Model> {
         })?;
         for row in rows {
             let (q, r, g, b, a) = row?;
-            if q >= 0 && q < 4 {
+            if (0..4).contains(&q) {
                 model.calendar.quarter_colors[q as usize] =
                     [r as f32, g as f32, b as f32, a as f32];
             }

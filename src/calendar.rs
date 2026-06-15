@@ -86,7 +86,7 @@ pub fn first_working_day_of_month(year: i32, month: u32, config: &CalendarConfig
         config.non_working_dates.iter().copied().collect();
     let mut day = NaiveDate::from_ymd_opt(year, month, 1)?;
     loop {
-        if day.month() != month as u32 {
+        if day.month() != month {
             return None;
         }
         if is_working_day(day, config.working_days_per_week, &non_working) {
