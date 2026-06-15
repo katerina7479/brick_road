@@ -501,7 +501,7 @@ mod tests {
     fn format_day_label_day_zero_shows_start_date() {
         let mut model = Model::default();
         model.calendar = mon_config();
-        assert_eq!(format_day_label(0, false, &model), "Jun 16");
+        assert_eq!(format_day_label(0, false, &model), "Jun 16 '25");
     }
 
     #[test]
@@ -509,14 +509,14 @@ mod tests {
         let mut model = Model::default();
         model.calendar = mon_config();
         // 5 working days from Mon Jun 16 = Mon Jun 23
-        assert_eq!(format_day_label(5, false, &model), "Jun 23");
+        assert_eq!(format_day_label(5, false, &model), "Jun 23 '25");
     }
 
     #[test]
     fn format_day_label_month_only_shows_abbreviated_month_and_year() {
         let mut model = Model::default();
         model.calendar = mon_config();
-        assert_eq!(format_day_label(0, true, &model), "Jun '25");
+        assert_eq!(format_day_label(0, true, &model), "Jun 2025");
     }
 
     #[test]
