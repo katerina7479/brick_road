@@ -18,10 +18,9 @@ id_newtype!(MilestoneId);
 id_newtype!(WorldId);
 id_newtype!(PlanId);
 
-/// A duration or position on the timeline, measured in working days from the plan origin.
-/// Phase 1 of the f32→i32 migration: tagging all day-valued fields as `Day` makes
-/// Phase 2 (flipping the alias to `i32`) a focused mechanical change.
-pub type Day = f32;
+/// Timeline position or duration in whole working days from the plan origin.
+/// Rendering boundaries must cast: `day as f32 * PIXELS_PER_DAY`.
+pub type Day = i32;
 
 /// Three-point effort estimate in workdays.
 #[derive(Debug, Clone, PartialEq)]
@@ -134,7 +133,7 @@ pub struct Variant {
     /// Saved (start_day, duration_days) for each child, snapshotted when this
     /// variant is deactivated and restored when it is re-activated. Only
     /// entries for blocks that were placed (duration_days > 0) are stored.
-    pub block_positions: HashMap<WorkBlockId, (f32, f32)>,
+    pub block_positions: HashMap<WorkBlockId, (Day, Day)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -231,7 +230,7 @@ pub struct Plan {
     /// When `Some(d)`, this plan is a future branch: block start_day is
     /// clamped to ≥ d (the working-day offset of "today" at branch creation).
     /// `None` for the baseline plan, which may contain historical blocks.
-    pub branch_start_day: Option<f32>,
+    pub branch_start_day: Option<Day>,
 }
 
 /// Central data store. All entities are keyed by their ID type.
@@ -273,8 +272,8 @@ impl Model {
                 name: name.into(),
                 estimate,
                 variants: vec![],
-                start_day: 0.0,
-                duration_days: 0.0,
+                start_day: 0,
+                duration_days: 0,
                 color: None,
                 description: String::new(),
                 priority: 1,
@@ -331,7 +330,7 @@ impl Model {
                 predecessor,
                 successor,
                 dependency_type,
-                lag: 0.0,
+                lag: 0,
             },
         );
         id
@@ -367,7 +366,7 @@ impl Model {
         &mut self,
         name: impl Into<String>,
         world_id: WorldId,
-        branch_start_day: Option<f32>,
+        branch_start_day: Option<Day>,
     ) -> PlanId {
         let id = PlanId(self.alloc_id());
         self.plans.insert(
@@ -428,9 +427,9 @@ mod tests {
 
     fn est() -> Estimate {
         Estimate {
-            most_likely: 3.0,
-            optimistic: 1.0,
-            pessimistic: 7.0,
+            most_likely: 3,
+            optimistic: 1,
+            pessimistic: 7,
             confidence: 0.8,
         }
     }
@@ -505,7 +504,7 @@ mod tests {
         let world_id = m.create_world("baseline");
         let plan_id = m.create_plan("plan A", world_id, None);
         let res_id = m.create_resource_block("Alice", ResourceType::Person);
-        let ms_id = m.create_milestone("launch", 90.0);
+        let ms_id = m.create_milestone("launch", 90);
         let block_a = m.create_work_block("a", est());
         let block_b = m.create_work_block("b", est());
         let dep_id = m.create_dependency(block_a, block_b, DependencyType::FinishToStart);
@@ -513,7 +512,7 @@ mod tests {
         assert_eq!(m.get_world(world_id).unwrap().name, "baseline");
         assert_eq!(m.get_plan(plan_id).unwrap().world_id, world_id);
         assert_eq!(m.get_resource_block(res_id).unwrap().name, "Alice");
-        assert_eq!(m.get_milestone(ms_id).unwrap().date, 90.0);
+        assert_eq!(m.get_milestone(ms_id).unwrap().date, 90);
         let dep = m.get_dependency(dep_id).unwrap();
         assert_eq!(dep.predecessor, block_a);
         assert_eq!(dep.successor, block_b);

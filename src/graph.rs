@@ -168,9 +168,9 @@ mod tests {
 
     fn est() -> Estimate {
         Estimate {
-            most_likely: 1.0,
-            optimistic: 1.0,
-            pessimistic: 1.0,
+            most_likely: 1,
+            optimistic: 1,
+            pessimistic: 1,
             confidence: 1.0,
         }
     }

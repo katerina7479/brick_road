@@ -4,7 +4,7 @@ use chrono::NaiveDate;
 use rusqlite::{Connection, Result};
 
 use crate::model::{
-    AvailabilitySegment, AvailabilityTimeline, ConfidenceFactors, Dependency, DependencyId,
+    AvailabilitySegment, AvailabilityTimeline, ConfidenceFactors, Day, Dependency, DependencyId,
     DependencyType, Estimate, Milestone, MilestoneId, Model, Plan, PlanId, ResourceAllocation,
     ResourceBlock, ResourceBlockId, ResourceType, TShirtSize, Variant, VariantId, WorkBlock,
     WorkBlockId, World, WorldId,
@@ -16,15 +16,15 @@ pub fn create_tables(conn: &Connection) -> Result<()> {
     // SQLite has no ADD COLUMN IF NOT EXISTS. Run each migration and ignore
     // the "duplicate column name" error that fires when it already exists.
     for sql in [
-        "ALTER TABLE work_blocks ADD COLUMN start_day REAL NOT NULL DEFAULT 0",
-        "ALTER TABLE work_blocks ADD COLUMN duration_days REAL NOT NULL DEFAULT 0",
+        "ALTER TABLE work_blocks ADD COLUMN start_day INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE work_blocks ADD COLUMN duration_days INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE work_blocks ADD COLUMN color_r REAL",
         "ALTER TABLE work_blocks ADD COLUMN color_g REAL",
         "ALTER TABLE work_blocks ADD COLUMN color_b REAL",
         "ALTER TABLE work_blocks ADD COLUMN description TEXT NOT NULL DEFAULT ''",
         "ALTER TABLE work_blocks ADD COLUMN priority INTEGER NOT NULL DEFAULT 1",
         "ALTER TABLE work_blocks ADD COLUMN t_shirt_size TEXT",
-        "ALTER TABLE plans ADD COLUMN branch_start_day REAL",
+        "ALTER TABLE plans ADD COLUMN branch_start_day INTEGER",
     ] {
         match conn.execute_batch(sql) {
             Ok(()) => {}
@@ -37,11 +37,11 @@ pub fn create_tables(conn: &Connection) -> Result<()> {
         conn.query_row("SELECT COUNT(*) FROM t_shirt_sizes", [], |r| r.get(0))?;
     if count == 0 {
         conn.execute_batch(
-            "INSERT INTO t_shirt_sizes (label, days, sort_order) VALUES ('XS',  1.0, 0);
-             INSERT INTO t_shirt_sizes (label, days, sort_order) VALUES ('S',   3.0, 1);
-             INSERT INTO t_shirt_sizes (label, days, sort_order) VALUES ('M',   5.0, 2);
-             INSERT INTO t_shirt_sizes (label, days, sort_order) VALUES ('L',  10.0, 3);
-             INSERT INTO t_shirt_sizes (label, days, sort_order) VALUES ('XL', 20.0, 4);",
+            "INSERT INTO t_shirt_sizes (label, days, sort_order) VALUES ('XS',  1, 0);
+             INSERT INTO t_shirt_sizes (label, days, sort_order) VALUES ('S',   3, 1);
+             INSERT INTO t_shirt_sizes (label, days, sort_order) VALUES ('M',   5, 2);
+             INSERT INTO t_shirt_sizes (label, days, sort_order) VALUES ('L',  10, 3);
+             INSERT INTO t_shirt_sizes (label, days, sort_order) VALUES ('XL', 20, 4);",
         )?;
     }
     Ok(())
@@ -53,7 +53,7 @@ pub fn create_tables(conn: &Connection) -> Result<()> {
 pub fn record_estimate_snapshot(
     conn: &Connection,
     work_block_id: u64,
-    duration_days: f32,
+    duration_days: Day,
     confidence: f32,
 ) -> Result<()> {
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -65,7 +65,7 @@ pub fn record_estimate_snapshot(
         "INSERT INTO estimate_snapshots
              (work_block_id, duration_days, confidence, recorded_at)
          VALUES (?1, ?2, ?3, ?4)",
-        (work_block_id as i64, duration_days as f64, confidence as f64, ts),
+        (work_block_id as i64, duration_days as i64, confidence as f64, ts),
     )?;
     Ok(())
 }
@@ -167,12 +167,12 @@ pub fn save_model(conn: &Connection, model: &Model) -> Result<()> {
             (
                 wb.id.0 as i64,
                 &wb.name,
-                wb.estimate.most_likely as f64,
-                wb.estimate.optimistic as f64,
-                wb.estimate.pessimistic as f64,
+                wb.estimate.most_likely as i64,
+                wb.estimate.optimistic as i64,
+                wb.estimate.pessimistic as i64,
                 wb.estimate.confidence as f64,
-                wb.start_day as f64,
-                wb.duration_days as f64,
+                wb.start_day as i64,
+                wb.duration_days as i64,
                 wb.color.map(|c| c[0] as f64),
                 wb.color.map(|c| c[1] as f64),
                 wb.color.map(|c| c[2] as f64),
@@ -218,7 +218,7 @@ pub fn save_model(conn: &Connection, model: &Model) -> Result<()> {
                 dep.predecessor.0 as i64,
                 dep.successor.0 as i64,
                 dependency_type_str(dep.dependency_type),
-                dep.lag as f64,
+                dep.lag as i64,
             ),
         )?;
     }
@@ -227,7 +227,7 @@ pub fn save_model(conn: &Connection, model: &Model) -> Result<()> {
         tx.execute(
             "INSERT INTO milestones (id, name, date_day) VALUES (?1, ?2, ?3)
              ON CONFLICT(id) DO UPDATE SET name = excluded.name, date_day = excluded.date_day",
-            (ms.id.0 as i64, &ms.name, ms.date as f64),
+            (ms.id.0 as i64, &ms.name, ms.date as i64),
         )?;
     }
 
@@ -303,7 +303,7 @@ pub fn save_model(conn: &Connection, model: &Model) -> Result<()> {
                 "INSERT INTO availability_segments
                      (resource_block_id, start_day, end_day, factor, sort_order)
                  VALUES (?1, ?2, ?3, ?4, ?5)",
-                (rb.id.0 as i64, seg.start as f64, seg.end as f64, seg.factor as f64, order as i64),
+                (rb.id.0 as i64, seg.start as i64, seg.end as i64, seg.factor as f64, order as i64),
             )?;
         }
     }
@@ -367,7 +367,7 @@ pub fn save_model(conn: &Connection, model: &Model) -> Result<()> {
     for (order, size) in model.t_shirt_sizes.iter().enumerate() {
         tx.execute(
             "INSERT INTO t_shirt_sizes (label, days, sort_order) VALUES (?1, ?2, ?3)",
-            (&size.label, size.days as f64, order as i64),
+            (&size.label, size.days as i64, order as i64),
         )?;
     }
 
@@ -477,8 +477,8 @@ pub fn load_model(conn: &Connection) -> Result<Model> {
         let rows = stmt.query_map([], |row| {
             Ok((
                 row.get::<_, i64>(0)?,
-                row.get::<_, f64>(1)?,
-                row.get::<_, f64>(2)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
                 row.get::<_, f64>(3)?,
             ))
         })?;
@@ -489,8 +489,8 @@ pub fn load_model(conn: &Connection) -> Result<Model> {
                 .get_mut(&ResourceBlockId(rb_id as u64))
             {
                 rb.availability.segments.push(AvailabilitySegment {
-                    start: start as f32,
-                    end: end as f32,
+                    start: start as i32,
+                    end: end as i32,
                     factor: factor as f32,
                 });
             }
@@ -510,12 +510,12 @@ pub fn load_model(conn: &Connection) -> Result<Model> {
             Ok((
                 row.get::<_, i64>(0)?,
                 row.get::<_, String>(1)?,
-                row.get::<_, f64>(2)?,
-                row.get::<_, f64>(3)?,
-                row.get::<_, f64>(4)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, i64>(4)?,
                 row.get::<_, f64>(5)?,
-                row.get::<_, f64>(6)?,
-                row.get::<_, f64>(7)?,
+                row.get::<_, i64>(6)?,
+                row.get::<_, i64>(7)?,
                 row.get::<_, Option<f64>>(8)?,
                 row.get::<_, Option<f64>>(9)?,
                 row.get::<_, Option<f64>>(10)?,
@@ -537,14 +537,14 @@ pub fn load_model(conn: &Connection) -> Result<Model> {
                     id: WorkBlockId(id as u64),
                     name,
                     estimate: Estimate {
-                        most_likely: ml as f32,
-                        optimistic: opt as f32,
-                        pessimistic: pes as f32,
+                        most_likely: ml as i32,
+                        optimistic: opt as i32,
+                        pessimistic: pes as i32,
                         confidence: conf as f32,
                     },
                     variants: vec![],
-                    start_day: start_day as f32,
-                    duration_days: duration_days as f32,
+                    start_day: start_day as i32,
+                    duration_days: duration_days as i32,
                     color,
                     description,
                     priority: priority.clamp(0, 3) as u8,
@@ -623,7 +623,7 @@ pub fn load_model(conn: &Connection) -> Result<Model> {
             let (var_id, wb_id, sd, dd) = row?;
             if let Some(v) = model.variants.get_mut(&VariantId(var_id as u64)) {
                 v.block_positions
-                    .insert(WorkBlockId(wb_id as u64), (sd as f32, dd as f32));
+                    .insert(WorkBlockId(wb_id as u64), (sd as i32, dd as i32));
             }
         }
     }
@@ -640,7 +640,7 @@ pub fn load_model(conn: &Connection) -> Result<Model> {
                 row.get::<_, i64>(1)?,
                 row.get::<_, i64>(2)?,
                 row.get::<_, String>(3)?,
-                row.get::<_, f64>(4)?,
+                row.get::<_, i64>(4)?,
             ))
         })?;
         for row in rows {
@@ -654,7 +654,7 @@ pub fn load_model(conn: &Connection) -> Result<Model> {
                     predecessor: WorkBlockId(pred as u64),
                     successor: WorkBlockId(succ as u64),
                     dependency_type,
-                    lag: lag as f32,
+                    lag: lag as i32,
                 },
             );
         }
@@ -667,7 +667,7 @@ pub fn load_model(conn: &Connection) -> Result<Model> {
             Ok((
                 row.get::<_, i64>(0)?,
                 row.get::<_, String>(1)?,
-                row.get::<_, f64>(2)?,
+                row.get::<_, i64>(2)?,
             ))
         })?;
         for row in rows {
@@ -678,7 +678,7 @@ pub fn load_model(conn: &Connection) -> Result<Model> {
                 Milestone {
                     id: MilestoneId(id as u64),
                     name,
-                    date: date as f32,
+                    date: date as i32,
                 },
             );
         }
@@ -708,7 +708,7 @@ pub fn load_model(conn: &Connection) -> Result<Model> {
                     root_blocks: vec![],
                     selected_variants: HashMap::new(),
                     allocations: vec![],
-                    branch_start_day: branch_start_day.map(|d| d as f32),
+                    branch_start_day: branch_start_day.map(|d| d as i32),
                 },
             );
         }
@@ -862,13 +862,13 @@ pub fn load_model(conn: &Connection) -> Result<Model> {
         let mut stmt =
             conn.prepare("SELECT label, days FROM t_shirt_sizes ORDER BY sort_order")?;
         let rows = stmt.query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?))
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
         })?;
         for row in rows {
             let (label, days) = row?;
             model.t_shirt_sizes.push(TShirtSize {
                 label,
-                days: days as f32,
+                days: days as i32,
             });
         }
     }
@@ -1052,7 +1052,7 @@ mod tests {
         conn
     }
 
-    fn est(ml: f32, opt: f32, pes: f32, conf: f32) -> Estimate {
+    fn est(ml: Day, opt: Day, pes: Day, conf: f32) -> Estimate {
         Estimate {
             most_likely: ml,
             optimistic: opt,
@@ -1074,9 +1074,9 @@ mod tests {
     fn sparse_model_round_trip() {
         let conn = open_in_memory();
         let mut m = Model::default();
-        m.create_milestone("kickoff", 0.0);
-        m.create_milestone("launch", 120.0);
-        m.create_work_block("prep", est(5.0, 3.0, 10.0, 0.8));
+        m.create_milestone("kickoff", 0);
+        m.create_milestone("launch", 120);
+        m.create_work_block("prep", est(5, 3, 10, 0.8));
 
         save_model(&conn, &m).unwrap();
         let loaded = load_model(&conn).unwrap();
@@ -1105,8 +1105,8 @@ mod tests {
             .availability
             .segments
             .push(AvailabilitySegment {
-                start: 0.0,
-                end: 100.0,
+                start: 0,
+                end: 100,
                 factor: 1.0,
             });
         m.resource_blocks
@@ -1115,17 +1115,17 @@ mod tests {
             .availability
             .segments
             .push(AvailabilitySegment {
-                start: 100.0,
-                end: 200.0,
+                start: 100,
+                end: 200,
                 factor: 0.5,
             });
         let rb2 = m.create_resource_block("Team Alpha", ResourceType::Team);
         m.worlds.get_mut(&world_id).unwrap().resource_ids.push(rb1);
         m.worlds.get_mut(&world_id).unwrap().resource_ids.push(rb2);
 
-        let wb_a = m.create_work_block("Design", est(3.0, 1.0, 7.0, 0.75));
-        let wb_b = m.create_work_block("Implement", est(10.0, 5.0, 20.0, 0.5));
-        let wb_child = m.create_work_block("Sub-task", est(4.0, 2.0, 8.0, 0.75));
+        let wb_a = m.create_work_block("Design", est(3, 1, 7, 0.75));
+        let wb_b = m.create_work_block("Implement", est(10, 5, 20, 0.5));
+        let wb_child = m.create_work_block("Sub-task", est(4, 2, 8, 0.75));
 
         let v1 = m.create_variant("fast", wb_b);
         let v2 = m.create_variant("thorough", wb_b);
@@ -1134,9 +1134,9 @@ mod tests {
         m.variants.get_mut(&v1).unwrap().children.push(wb_child);
 
         let dep_id = m.create_dependency(wb_a, wb_b, DependencyType::FinishToStart);
-        m.dependencies.get_mut(&dep_id).unwrap().lag = 1.5;
+        m.dependencies.get_mut(&dep_id).unwrap().lag = 1;
 
-        m.create_milestone("launch", 90.0);
+        m.create_milestone("launch", 90);
 
         let plan_id = m.create_plan("alpha", world_id, None);
         m.plans.get_mut(&plan_id).unwrap().root_blocks.push(wb_a);
@@ -1199,17 +1199,17 @@ mod tests {
         // persistence path for user-defined placement values.
         let conn = open_in_memory();
         let mut m = Model::default();
-        let id = m.create_work_block("task", est(5.0, 3.0, 8.0, 0.9));
+        let id = m.create_work_block("task", est(5, 3, 8, 0.9));
         let wb = m.work_blocks.get_mut(&id).unwrap();
-        wb.start_day = 7.5;
-        wb.duration_days = 3.0;
+        wb.start_day = 7;
+        wb.duration_days = 3;
 
         save_model(&conn, &m).unwrap();
         let loaded = load_model(&conn).unwrap();
 
         let loaded_wb = loaded.work_blocks.get(&id).unwrap();
-        assert_eq!(loaded_wb.start_day, 7.5);
-        assert_eq!(loaded_wb.duration_days, 3.0);
+        assert_eq!(loaded_wb.start_day, 7);
+        assert_eq!(loaded_wb.duration_days, 3);
         assert_eq!(m.work_blocks, loaded.work_blocks);
     }
 
@@ -1217,17 +1217,17 @@ mod tests {
     fn nonzero_start_day_and_duration_round_trip() {
         let conn = open_in_memory();
         let mut m = Model::default();
-        let id = m.create_work_block("placed task", est(4.0, 2.0, 8.0, 0.8));
+        let id = m.create_work_block("placed task", est(4, 2, 8, 0.8));
         let wb = m.work_blocks.get_mut(&id).unwrap();
-        wb.start_day = 3.5;
-        wb.duration_days = 7.0;
+        wb.start_day = 3;
+        wb.duration_days = 7;
 
         save_model(&conn, &m).unwrap();
         let loaded = load_model(&conn).unwrap();
 
         let loaded_wb = loaded.work_blocks.get(&id).unwrap();
-        assert_eq!(loaded_wb.start_day, 3.5);
-        assert_eq!(loaded_wb.duration_days, 7.0);
+        assert_eq!(loaded_wb.start_day, 3);
+        assert_eq!(loaded_wb.duration_days, 7);
     }
 
     #[test]
@@ -1240,13 +1240,14 @@ mod tests {
         conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
 
         // Old schema: work_blocks without placement columns.
+        // Estimate columns are INTEGER to match the br-146 schema expectation.
         conn.execute_batch(
             "CREATE TABLE work_blocks (
                 id                   INTEGER PRIMARY KEY,
                 name                 TEXT NOT NULL,
-                estimate_most_likely REAL NOT NULL,
-                estimate_optimistic  REAL NOT NULL,
-                estimate_pessimistic REAL NOT NULL,
+                estimate_most_likely INTEGER NOT NULL,
+                estimate_optimistic  INTEGER NOT NULL,
+                estimate_pessimistic INTEGER NOT NULL,
                 estimate_confidence  REAL NOT NULL
             );",
         )
@@ -1257,7 +1258,7 @@ mod tests {
             "INSERT INTO work_blocks
                  (id, name, estimate_most_likely, estimate_optimistic,
                   estimate_pessimistic, estimate_confidence)
-             VALUES (1, 'legacy task', 5.0, 3.5, 8.0, 0.8)",
+             VALUES (1, 'legacy task', 5, 4, 8, 0.8)",
             [],
         )
         .unwrap();
@@ -1270,8 +1271,8 @@ mod tests {
         let wb_id = WorkBlockId(1);
         let wb = model.work_blocks.get(&wb_id).expect("legacy block loaded");
         assert_eq!(wb.name, "legacy task");
-        assert_eq!(wb.start_day, 0.0, "start_day should default to 0.0");
-        assert_eq!(wb.duration_days, 0.0, "duration_days should default to 0.0");
+        assert_eq!(wb.start_day, 0, "start_day should default to 0");
+        assert_eq!(wb.duration_days, 0, "duration_days should default to 0");
     }
 
     #[test]
@@ -1280,8 +1281,8 @@ mod tests {
         let w = m.create_world("w");
         let rb = m.create_resource_block("Alice", ResourceType::Person);
         m.worlds.get_mut(&w).unwrap().resource_ids.push(rb);
-        let wb_a = m.create_work_block("a", est(1.0, 0.5, 2.0, 1.0));
-        let wb_b = m.create_work_block("b", est(1.0, 0.5, 2.0, 1.0));
+        let wb_a = m.create_work_block("a", est(1, 1, 2, 1.0));
+        let wb_b = m.create_work_block("b", est(1, 1, 2, 1.0));
         let v = m.create_variant("v", wb_a);
         m.work_blocks.get_mut(&wb_a).unwrap().variants.push(v);
         let _dep = m.create_dependency(wb_a, wb_b, DependencyType::FinishToStart);
@@ -1307,7 +1308,7 @@ mod tests {
     #[test]
     fn validate_catches_orphan_variant_parent() {
         let mut m = Model::default();
-        let wb_id = m.create_work_block("wb", est(1.0, 0.5, 2.0, 1.0));
+        let wb_id = m.create_work_block("wb", est(1, 1, 2, 1.0));
         let v_id = m.create_variant("v", wb_id);
         m.work_blocks.get_mut(&wb_id).unwrap().variants.push(v_id);
         m.variants.insert(
@@ -1354,8 +1355,8 @@ mod tests {
     fn validate_catches_mismatched_variant_selection() {
         let mut m = Model::default();
         let world_id = m.create_world("w");
-        let wb_a = m.create_work_block("a", est(1.0, 0.5, 2.0, 1.0));
-        let wb_b = m.create_work_block("b", est(1.0, 0.5, 2.0, 1.0));
+        let wb_a = m.create_work_block("a", est(1, 1, 2, 1.0));
+        let wb_b = m.create_work_block("b", est(1, 1, 2, 1.0));
         let v = m.create_variant("v", wb_a);
         m.work_blocks.get_mut(&wb_a).unwrap().variants.push(v);
         let plan_id = m.create_plan("p", world_id, None);
@@ -1380,7 +1381,7 @@ mod tests {
         // Save with block A, then remove it, save again, and verify it is gone.
         let conn = open_in_memory();
         let mut m = Model::default();
-        let wb_id = m.create_work_block("to-be-removed", est(3.0, 2.0, 5.0, 0.9));
+        let wb_id = m.create_work_block("to-be-removed", est(3, 2, 5, 0.9));
 
         save_model(&conn, &m).unwrap();
         // Confirm it is present after the first save.
@@ -1404,7 +1405,7 @@ mod tests {
         // reflects the new field values on the second load.
         let conn = open_in_memory();
         let mut m = Model::default();
-        let wb_id = m.create_work_block("original", est(5.0, 3.0, 8.0, 0.8));
+        let wb_id = m.create_work_block("original", est(5, 3, 8, 0.8));
 
         save_model(&conn, &m).unwrap();
 
@@ -1424,8 +1425,8 @@ mod tests {
         // `DELETE FROM <table> WHERE id NOT IN (…)`.
         let conn = open_in_memory();
         let mut m = Model::default();
-        m.create_work_block("block-a", est(2.0, 1.0, 4.0, 1.0));
-        m.create_work_block("block-b", est(3.0, 2.0, 5.0, 0.9));
+        m.create_work_block("block-a", est(2, 1, 4, 1.0));
+        m.create_work_block("block-b", est(3, 2, 5, 0.9));
 
         save_model(&conn, &m).unwrap();
         assert_eq!(load_model(&conn).unwrap().work_blocks.len(), 2);
@@ -1449,10 +1450,10 @@ mod tests {
         let world_id = m.create_world("w");
         let rb_id = m.create_resource_block("Alice", ResourceType::Person);
         m.worlds.get_mut(&world_id).unwrap().resource_ids.push(rb_id);
-        let wb_a = m.create_work_block("A", est(2.0, 1.0, 3.0, 1.0));
-        let wb_b = m.create_work_block("B", est(3.0, 2.0, 5.0, 0.9));
+        let wb_a = m.create_work_block("A", est(2, 1, 3, 1.0));
+        let wb_b = m.create_work_block("B", est(3, 2, 5, 0.9));
         let dep = m.create_dependency(wb_a, wb_b, DependencyType::FinishToStart);
-        let ms_id = m.create_milestone("launch", 10.0);
+        let ms_id = m.create_milestone("launch", 10);
 
         save_model(&conn, &m).unwrap();
 
@@ -1479,19 +1480,19 @@ mod tests {
     fn variant_block_positions_round_trip() {
         let conn = open_in_memory();
         let mut m = Model::default();
-        let wb_parent = m.create_work_block("parent", est(3.0, 2.0, 5.0, 0.8));
-        let wb_child = m.create_work_block("child", est(2.0, 1.0, 4.0, 0.8));
+        let wb_parent = m.create_work_block("parent", est(3, 2, 5, 0.8));
+        let wb_child = m.create_work_block("child", est(2, 1, 4, 0.8));
         let vid = m.create_variant("fast", wb_parent);
         m.work_blocks.get_mut(&wb_parent).unwrap().variants.push(vid);
         m.variants.get_mut(&vid).unwrap().children.push(wb_child);
         // Store a position snapshot on the variant.
-        m.variants.get_mut(&vid).unwrap().block_positions.insert(wb_child, (5.0, 3.0));
+        m.variants.get_mut(&vid).unwrap().block_positions.insert(wb_child, (5, 3));
 
         save_model(&conn, &m).unwrap();
         let loaded = load_model(&conn).unwrap();
 
         let loaded_v = loaded.variants.get(&vid).unwrap();
-        assert_eq!(loaded_v.block_positions.get(&wb_child), Some(&(5.0, 3.0)));
+        assert_eq!(loaded_v.block_positions.get(&wb_child), Some(&(5, 3)));
     }
 
     #[test]
@@ -1551,21 +1552,21 @@ CREATE TABLE IF NOT EXISTS resource_blocks (
 CREATE TABLE IF NOT EXISTS availability_segments (
     id                INTEGER PRIMARY KEY,
     resource_block_id INTEGER NOT NULL REFERENCES resource_blocks(id),
-    start_day         REAL    NOT NULL,
-    end_day           REAL    NOT NULL,
+    start_day         INTEGER NOT NULL,
+    end_day           INTEGER NOT NULL,
     factor            REAL    NOT NULL,
     sort_order        INTEGER NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS work_blocks (
     id                   INTEGER PRIMARY KEY,
-    name                 TEXT NOT NULL,
-    estimate_most_likely REAL NOT NULL,
-    estimate_optimistic  REAL NOT NULL,
-    estimate_pessimistic REAL NOT NULL,
-    estimate_confidence  REAL NOT NULL,
-    start_day            REAL NOT NULL DEFAULT 0,
-    duration_days        REAL NOT NULL DEFAULT 0,
+    name                 TEXT    NOT NULL,
+    estimate_most_likely INTEGER NOT NULL,
+    estimate_optimistic  INTEGER NOT NULL,
+    estimate_pessimistic INTEGER NOT NULL,
+    estimate_confidence  REAL    NOT NULL,
+    start_day            INTEGER NOT NULL DEFAULT 0,
+    duration_days        INTEGER NOT NULL DEFAULT 0,
     color_r              REAL,
     color_g              REAL,
     color_b              REAL
@@ -1589,8 +1590,8 @@ CREATE TABLE IF NOT EXISTS variant_children (
 CREATE TABLE IF NOT EXISTS variant_block_positions (
     variant_id    INTEGER NOT NULL REFERENCES variants(id),
     work_block_id INTEGER NOT NULL REFERENCES work_blocks(id),
-    start_day     REAL    NOT NULL,
-    duration_days REAL    NOT NULL,
+    start_day     INTEGER NOT NULL,
+    duration_days INTEGER NOT NULL,
     PRIMARY KEY (variant_id, work_block_id)
 );
 
@@ -1599,13 +1600,13 @@ CREATE TABLE IF NOT EXISTS dependencies (
     predecessor_id  INTEGER NOT NULL REFERENCES work_blocks(id),
     successor_id    INTEGER NOT NULL REFERENCES work_blocks(id),
     dependency_type TEXT    NOT NULL,
-    lag_days        REAL    NOT NULL DEFAULT 0.0
+    lag_days        INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS milestones (
     id       INTEGER PRIMARY KEY,
     name     TEXT NOT NULL,
-    date_day REAL NOT NULL
+    date_day INTEGER NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS plans (
@@ -1646,7 +1647,7 @@ CREATE TABLE IF NOT EXISTS plan_milestone_targets (
 CREATE TABLE IF NOT EXISTS estimate_snapshots (
     id             INTEGER PRIMARY KEY,
     work_block_id  INTEGER NOT NULL REFERENCES work_blocks(id),
-    duration_days  REAL    NOT NULL,
+    duration_days  INTEGER NOT NULL,
     confidence     REAL    NOT NULL,
     recorded_at    INTEGER NOT NULL
 );
@@ -1663,7 +1664,7 @@ CREATE TABLE IF NOT EXISTS calendar_non_working_dates (
 
 CREATE TABLE IF NOT EXISTS t_shirt_sizes (
     label      TEXT    PRIMARY KEY,
-    days       REAL    NOT NULL,
+    days       INTEGER NOT NULL,
     sort_order INTEGER NOT NULL DEFAULT 0
 );
 

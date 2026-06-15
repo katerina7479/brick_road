@@ -97,7 +97,7 @@ fn day_step_for_zoom(scale: f32) -> (i32, bool) {
 /// Formats a timeline day number as a human-readable date label.
 /// `month_only` → "Jun '25";  otherwise → "Jun 16".
 fn format_day_label(day: i32, month_only: bool, model: &Model) -> String {
-    let date = day_to_date(day as f32, &model.calendar);
+    let date = day_to_date(day, &model.calendar);
     if month_only {
         format!("{} '{:02}", date.format("%b"), date.year() % 100)
     } else {
@@ -155,10 +155,10 @@ pub fn spawn_day_labels(
         commands.entity(e).despawn();
     }
 
-    let span = schedule.total_duration_days.ceil() as i32 + step;
+    let span = schedule.total_duration_days + step;
     for day in (0..=span).step_by(step as usize) {
         let x = day as f32 * PIXELS_PER_DAY;
-        let alpha = if (day as f32) < today.day { 0.3 } else { 0.75 };
+        let alpha = if day < today.day { 0.3 } else { 0.75 };
         let label = format_day_label(day, month_only, &model);
         commands.spawn((
             DayLabel,
@@ -303,7 +303,7 @@ pub fn draw_nesting_indicators(
             .children
             .iter()
             .filter_map(|id| schedule.blocks.get(id))
-            .map(|b| b.start_day * PIXELS_PER_DAY)
+            .map(|b| b.start_day as f32 * PIXELS_PER_DAY)
             .fold(f32::INFINITY, f32::min);
 
         if !left_x.is_finite() {
@@ -377,8 +377,8 @@ pub fn draw_violation_indicators(
             continue;
         };
 
-        let pred_x = (pred.start_day + pred.duration_days) * PIXELS_PER_DAY;
-        let succ_x = succ.start_day * PIXELS_PER_DAY;
+        let pred_x = (pred.start_day + pred.duration_days) as f32 * PIXELS_PER_DAY;
+        let succ_x = succ.start_day as f32 * PIXELS_PER_DAY;
 
         gizmos.line_2d(
             Vec2::new(pred_x, pred_y),
@@ -394,7 +394,7 @@ mod tests {
     use crate::model::{Estimate, Model};
 
     fn est() -> Estimate {
-        Estimate { most_likely: 3.0, optimistic: 2.0, pessimistic: 5.0, confidence: 0.8 }
+        Estimate { most_likely: 3, optimistic: 2, pessimistic: 5, confidence: 0.8 }
     }
 
     #[test]
