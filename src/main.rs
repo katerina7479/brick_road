@@ -164,8 +164,7 @@ fn main() {
         .add_systems(
             Update,
             blocks::sync_compare_overlays
-                .after(blocks::reconcile_block_sprites)
-                .run_if(task_view_active),
+                .after(blocks::reconcile_block_sprites),
         )
         .add_systems(
             Update,

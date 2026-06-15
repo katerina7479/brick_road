@@ -579,10 +579,19 @@ pub fn sync_compare_overlays(
     mut commands: Commands,
     model: Res<model::Model>,
     compare_state: Res<ComparePlanState>,
+    view_mode: Res<schedule::TimelineViewMode>,
     mut map: ResMut<CompareBlockSpriteMap>,
     block_sprites: Query<&BlockSprite>,
 ) {
-    if !compare_state.is_changed() && !model.is_changed() {
+    // When not in task view, despawn any lingering ghosts and bail out.
+    if *view_mode != schedule::TimelineViewMode::Task {
+        for (_, entity) in map.entities.drain() {
+            commands.entity(entity).despawn();
+        }
+        return;
+    }
+
+    if !compare_state.is_changed() && !model.is_changed() && !view_mode.is_changed() {
         return;
     }
 
