@@ -34,6 +34,7 @@ fn main() {
         .insert_resource(ClearColor(Color::srgb(0.07, 0.08, 0.11)))
         .insert_resource(CameraTarget::default())
         .insert_resource(blocks::SelectedBlock::default())
+        .insert_resource(blocks::MultiSelection::default())
         .insert_resource(blocks::NameEditState::default())
         .insert_resource(blocks::DragState::default())
         .insert_resource(blocks::ResizeDragState::default())
