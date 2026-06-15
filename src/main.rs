@@ -208,9 +208,8 @@ fn main() {
         )
         .add_systems(Update, draw_resource_timeline)
         .add_systems(Update, handle_resource_drag)
+        .add_systems(EguiPrimaryContextPass, top_bar_ui)
         .add_systems(EguiPrimaryContextPass, side_panel_ui)
-        .add_systems(EguiPrimaryContextPass, camera_nav_ui)
-        .add_systems(EguiPrimaryContextPass, logo_ui)
         .add_systems(EguiPrimaryContextPass, resource_row_labels_ui)
         .add_systems(EguiPrimaryContextPass, blocks::draw_name_edit_overlay)
         .add_systems(EguiPrimaryContextPass, blocks::draw_delete_confirm_overlay)
@@ -844,7 +843,10 @@ fn update_analysis(
 /// Renders Re-center and Fit-to-view buttons in a small floating area
 /// anchored to the top-right of the window. Keyboard shortcuts (Home / F)
 /// are handled by `camera_nav_keys` in `camera.rs`.
-fn camera_nav_ui(
+/// Renders a fixed top bar containing the brand logo and camera/view navigation
+/// buttons. Using TopBottomPanel reserves space so block labels and side panel
+/// content cannot render behind the controls.
+fn top_bar_ui(
     mut contexts: EguiContexts,
     mut target: ResMut<CameraTarget>,
     model: Res<model::Model>,
@@ -853,63 +855,48 @@ fn camera_nav_ui(
     mut view_mode: ResMut<schedule::TimelineViewMode>,
 ) {
     let Ok(ctx) = contexts.ctx_mut() else { return };
-    egui::Area::new(egui::Id::new("camera_nav"))
-        .anchor(egui::Align2::RIGHT_TOP, egui::Vec2::new(-8.0, 8.0))
+    egui::TopBottomPanel::top("top_bar")
+        .frame(
+            egui::Frame::new()
+                .fill(egui::Color32::from_rgba_unmultiplied(18, 12, 4, 230))
+                .inner_margin(egui::Margin::symmetric(8, 4)),
+        )
         .show(ctx, |ui| {
             ui.horizontal(|ui| {
-                if ui.small_button("Re-center [Home]").clicked() {
-                    target.pos = Vec2::ZERO;
-                    target.zoom = 1.0;
-                }
-                if ui.small_button("Fit to view [F]").clicked() {
+                let text = egui::RichText::new("brick_road")
+                    .size(18.0)
+                    .color(egui::Color32::from_rgb(250, 165, 40));
+                let btn = egui::Button::new(text)
+                    .fill(egui::Color32::TRANSPARENT)
+                    .stroke(egui::Stroke::NONE);
+                if ui.add(btn).on_hover_text("Fit to view [F]").clicked() {
                     if let Some(new_target) = camera::fit_to_blocks(&model, &scope, &windows) {
                         *target = new_target;
                     }
                 }
-                ui.separator();
-                let (label, next) = match *view_mode {
-                    schedule::TimelineViewMode::Task =>
-                        ("Resource View", schedule::TimelineViewMode::Resource),
-                    schedule::TimelineViewMode::Resource =>
-                        ("Task View", schedule::TimelineViewMode::Task),
-                };
-                if ui.small_button(label).clicked() {
-                    *view_mode = next;
-                }
-            });
-        });
-}
 
-/// Renders the brick_road logo as a floating button anchored to the upper-left
-/// corner of the window. The logo renders on top of the side panel and serves
-/// as a persistent home/brand button — clicking it triggers fit-to-view,
-/// identical to the keyboard shortcut `F`.
-///
-/// The amber warm-glow styling complements the HDR bloom aesthetic of the
-/// main timeline canvas.
-fn logo_ui(
-    mut contexts: EguiContexts,
-    mut target: ResMut<CameraTarget>,
-    model: Res<model::Model>,
-    scope: Res<schedule::ViewScope>,
-    windows: Query<&Window>,
-) {
-    let Ok(ctx) = contexts.ctx_mut() else { return };
-    egui::Area::new(egui::Id::new("brick_road_logo"))
-        .anchor(egui::Align2::LEFT_TOP, egui::Vec2::new(8.0, 8.0))
-        .interactable(true)
-        .show(ctx, |ui| {
-            let text = egui::RichText::new("brick_road")
-                .size(18.0)
-                .color(egui::Color32::from_rgb(250, 165, 40));
-            let btn = egui::Button::new(text)
-                .fill(egui::Color32::from_rgba_unmultiplied(22, 14, 4, 215))
-                .stroke(egui::Stroke::new(1.5, egui::Color32::from_rgb(180, 105, 25)));
-            if ui.add(btn).on_hover_text("Fit to view [F]").clicked() {
-                if let Some(new_target) = camera::fit_to_blocks(&model, &scope, &windows) {
-                    *target = new_target;
-                }
-            }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let (label, next) = match *view_mode {
+                        schedule::TimelineViewMode::Task =>
+                            ("Resource View", schedule::TimelineViewMode::Resource),
+                        schedule::TimelineViewMode::Resource =>
+                            ("Task View", schedule::TimelineViewMode::Task),
+                    };
+                    if ui.small_button(label).clicked() {
+                        *view_mode = next;
+                    }
+                    ui.separator();
+                    if ui.small_button("Fit to view [F]").clicked() {
+                        if let Some(new_target) = camera::fit_to_blocks(&model, &scope, &windows) {
+                            *target = new_target;
+                        }
+                    }
+                    if ui.small_button("Re-center [Home]").clicked() {
+                        target.pos = Vec2::ZERO;
+                        target.zoom = 1.0;
+                    }
+                });
+            });
         });
 }
 
