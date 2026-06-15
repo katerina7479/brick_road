@@ -419,7 +419,7 @@ fn sync_period_bands(
     for e in &band_q {
         commands.entity(e).despawn();
     }
-    let span = schedule.total_duration_days.ceil() as i32 + 30;
+    let span = schedule.total_duration_days + 30;
     for (cx, w, color) in period_band_spans(&model.calendar, span) {
         commands.spawn((
             PeriodBand,
