@@ -709,7 +709,9 @@ pub fn handle_block_selection(
     windows: Query<&Window>,
     camera: Query<(&Camera, &GlobalTransform)>,
     mouse: Res<ButtonInput<MouseButton>>,
+    keyboard: Res<ButtonInput<KeyCode>>,
     mut selected: ResMut<SelectedBlock>,
+    mut multi: ResMut<MultiSelection>,
     block_query: Query<(&BlockSprite, &Transform, &Sprite)>,
     name_edit: Res<NameEditState>,
     mut model: ResMut<model::Model>,
@@ -750,6 +752,10 @@ pub fn handle_block_selection(
         return;
     };
 
+    let additive = keyboard.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight])
+        || keyboard.any_pressed([KeyCode::ControlLeft, KeyCode::ControlRight])
+        || keyboard.any_pressed([KeyCode::SuperLeft, KeyCode::SuperRight]);
+
     // Hit-test each block sprite against its axis-aligned bounding rect.
     let mut clicked: Option<WorkBlockId> = None;
     for (block_sprite, transform, sprite) in &block_query {
@@ -769,12 +775,36 @@ pub fn handle_block_selection(
     }
 
     if let Some(id) = clicked {
-        // Reset so a later empty-space click doesn't inherit a stale timestamp.
         *last_empty_click = 0.0;
-        // Re-clicking the selected block toggles it off; otherwise select it.
-        selected.0 = if Some(id) == selected.0 { None } else { Some(id) };
+        if additive {
+            // Seed multi from the current single selection on the first additive click.
+            if multi.0.is_empty() {
+                if let Some(cur) = selected.0 {
+                    multi.0.insert(cur);
+                }
+            }
+            // Toggle the clicked block in/out of the multi-set.
+            if !multi.0.remove(&id) {
+                multi.0.insert(id);
+            }
+            // If the set collapses to ≤1, promote back to single selection.
+            if multi.0.len() <= 1 {
+                selected.0 = multi.0.iter().next().copied();
+                multi.0.clear();
+            } else {
+                selected.0 = None;
+            }
+        } else {
+            multi.0.clear();
+            selected.0 = if Some(id) == selected.0 { None } else { Some(id) };
+        }
     } else {
+        // Additive click on empty space is a no-op.
+        if additive {
+            return;
+        }
         // Empty space: single click deselects, double-click (≤350 ms) creates a block.
+        multi.0.clear();
         let now = time.elapsed_secs();
         let is_double_click = now - *last_empty_click < 0.35;
         if is_double_click {
