@@ -95,13 +95,13 @@ fn day_step_for_zoom(scale: f32) -> (i32, bool) {
 }
 
 /// Formats a timeline day number as a human-readable date label.
-/// `month_only` → "Jun '25";  otherwise → "Jun 16".
+/// `month_only` → "Jun 2025";  otherwise → "Jun 16 '25".
 fn format_day_label(day: i32, month_only: bool, model: &Model) -> String {
     let date = day_to_date(day, &model.calendar);
     if month_only {
-        format!("{} '{:02}", date.format("%b"), date.year() % 100)
+        format!("{} {}", date.format("%b"), date.year())
     } else {
-        format!("{} {}", date.format("%b"), date.day())
+        format!("{} {} '{:02}", date.format("%b"), date.day(), date.year() % 100)
     }
 }
 
@@ -164,7 +164,7 @@ pub fn spawn_day_labels(
             DayLabel,
             Text2d::new(label),
             TextFont {
-                font_size: 11.0,
+                font_size: 13.0,
                 ..default()
             },
             TextColor(Color::srgba(0.6, 0.6, 0.9, alpha)),
@@ -501,7 +501,7 @@ mod tests {
     fn format_day_label_day_zero_shows_start_date() {
         let mut model = Model::default();
         model.calendar = mon_config();
-        assert_eq!(format_day_label(0, false, &model), "Jun 16");
+        assert_eq!(format_day_label(0, false, &model), "Jun 16 '25");
     }
 
     #[test]
@@ -509,14 +509,14 @@ mod tests {
         let mut model = Model::default();
         model.calendar = mon_config();
         // 5 working days from Mon Jun 16 = Mon Jun 23
-        assert_eq!(format_day_label(5, false, &model), "Jun 23");
+        assert_eq!(format_day_label(5, false, &model), "Jun 23 '25");
     }
 
     #[test]
     fn format_day_label_month_only_shows_abbreviated_month_and_year() {
         let mut model = Model::default();
         model.calendar = mon_config();
-        assert_eq!(format_day_label(0, true, &model), "Jun '25");
+        assert_eq!(format_day_label(0, true, &model), "Jun 2025");
     }
 
     #[test]
