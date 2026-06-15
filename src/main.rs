@@ -1148,6 +1148,19 @@ fn side_panel_ui(
                 *buf = cal_start.format("%Y-%m-%d").to_string();
             }
 
+            ui.horizontal(|ui| {
+                ui.label("Working Days/Week");
+                let mut wdpw = model.calendar.working_days_per_week as i32;
+                if ui
+                    .add(egui::DragValue::new(&mut wdpw).range(1..=7).speed(0.05))
+                    .changed()
+                {
+                    model.calendar.working_days_per_week = wdpw.clamp(1, 7) as u8;
+                    if let Err(e) = db::save_model(&conn, &model) {
+                        error!("save_model failed: {e}");
+                    }
+                }
+            });
 
             ui.separator();
 
