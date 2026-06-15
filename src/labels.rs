@@ -110,6 +110,110 @@ fn format_day_label(day: i32, month_only: bool, model: &Model) -> String {
     }
 }
 
+/// One day-number tick for the fixed calendar ruler: world-space x position,
+/// formatted date label, and whether the day falls before "today". Pure data so
+/// `calendar_ruler_ui` can paint it in screen space.
+pub(crate) struct DayTick {
+    pub world_x: f32,
+    pub label: String,
+    pub is_past: bool,
+}
+
+/// Computes the day-number ticks visible in the world-x range `[x_left, x_right]`
+/// at the current zoom. Stride and month-vs-day formatting follow
+/// `day_step_for_zoom`; ticks align to whole multiples of the stride and never go
+/// negative (the plan origin is day 0).
+pub(crate) fn day_tick_labels(
+    scale: f32,
+    x_left: f32,
+    x_right: f32,
+    model: &Model,
+    today_day: i32,
+) -> Vec<DayTick> {
+    let (step, month_only) = day_step_for_zoom(scale);
+    let day_min = ((x_left / PIXELS_PER_DAY).floor() as i32).max(0);
+    let day_max = (x_right / PIXELS_PER_DAY).ceil() as i32;
+    // Align the first tick up to the next whole multiple of `step`.
+    // (`day_min >= 0` and `step > 0`, so this ceiling division is safe.)
+    let start = ((day_min + step - 1) / step) * step;
+
+    let mut ticks = Vec::new();
+    let mut day = start;
+    while day <= day_max {
+        ticks.push(DayTick {
+            world_x: day as f32 * PIXELS_PER_DAY,
+            label: format_day_label(day, month_only, model),
+            is_past: day < today_day,
+        });
+        day += step;
+    }
+    ticks
+}
+
+/// One quarter span for the calendar ruler: world-space x start/end and label.
+pub(crate) struct QuarterSpan {
+    pub world_x_start: f32,
+    pub world_x_end: f32,
+    pub label: String,
+}
+
+/// Computes quarter spans ("Q1 '25", "Q2 '25") across the plan span. Pure data so
+/// `calendar_ruler_ui` can clamp each label to its visible portion (sticky header).
+pub(crate) fn quarter_label_spans(schedule: &Schedule, model: &Model) -> Vec<QuarterSpan> {
+    let span_days = schedule.total_duration_days + 30;
+    let span_px = span_days as f32 * PIXELS_PER_DAY;
+    let config = &model.calendar;
+
+    let start_year = config.start_date.year();
+    let start_month = config.start_date.month();
+
+    let mut year = start_year;
+    let mut month = start_month;
+    let mut spans = Vec::new();
+
+    loop {
+        let x_start = match first_working_day_of_month(year, month, config) {
+            Some(d) => (date_to_day(d, config) as f32 * PIXELS_PER_DAY).max(0.0),
+            None => {
+                let (ny, nm) = next_ym(year, month);
+                year = ny;
+                month = nm;
+                if year > start_year + 50 {
+                    break;
+                }
+                continue;
+            }
+        };
+
+        if x_start >= span_px {
+            break;
+        }
+
+        let quarter = (month - 1) / 3 + 1;
+        let q_end_month = quarter * 3 + 1;
+        let (q_end_year, q_end_mon) = if q_end_month > 12 {
+            (year + 1, 1)
+        } else {
+            (year, q_end_month)
+        };
+        let x_end = match first_working_day_of_month(q_end_year, q_end_mon, config) {
+            Some(d) => (date_to_day(d, config) as f32 * PIXELS_PER_DAY).min(span_px),
+            None => span_px,
+        };
+
+        spans.push(QuarterSpan {
+            world_x_start: x_start,
+            world_x_end: x_end,
+            label: format!("Q{} '{:02}", quarter, year % 100),
+        });
+
+        month = q_end_mon;
+        year = q_end_year;
+    }
+
+    spans
+}
+
 /// Marker for day-number `Text2d` entities.
 #[derive(Component)]
 pub struct DayLabel;
