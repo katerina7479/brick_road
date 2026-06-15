@@ -510,9 +510,13 @@ pub fn load_model(conn: &Connection) -> Result<Model> {
             Ok((
                 row.get::<_, i64>(0)?,
                 row.get::<_, String>(1)?,
-                row.get::<_, i64>(2)?,
-                row.get::<_, i64>(3)?,
-                row.get::<_, i64>(4)?,
+                // Pre-br-146 databases have REAL affinity on these three columns
+                // (Day was f32 when the table was first created). SQLite preserves
+                // affinity so even integer values written later are stored as REAL.
+                // Reading as f64 works for both REAL and INTEGER column types.
+                row.get::<_, f64>(2)?,
+                row.get::<_, f64>(3)?,
+                row.get::<_, f64>(4)?,
                 row.get::<_, f64>(5)?,
                 row.get::<_, i64>(6)?,
                 row.get::<_, i64>(7)?,
@@ -537,9 +541,9 @@ pub fn load_model(conn: &Connection) -> Result<Model> {
                     id: WorkBlockId(id as u64),
                     name,
                     estimate: Estimate {
-                        most_likely: ml as i32,
-                        optimistic: opt as i32,
-                        pessimistic: pes as i32,
+                        most_likely: ml.round() as i32,
+                        optimistic: opt.round() as i32,
+                        pessimistic: pes.round() as i32,
                         confidence: conf as f32,
                     },
                     variants: vec![],
@@ -1273,6 +1277,48 @@ mod tests {
         assert_eq!(wb.name, "legacy task");
         assert_eq!(wb.start_day, 0, "start_day should default to 0");
         assert_eq!(wb.duration_days, 0, "duration_days should default to 0");
+    }
+
+    #[test]
+    fn load_model_handles_pre_br146_real_estimate_columns() {
+        // Pre-br-146 databases have REAL affinity on estimate columns because
+        // Day was f32 when the table was first created. SQLite preserves affinity,
+        // so even integer writes are stored as REAL. Verify that load_model does
+        // not panic with InvalidColumnType when reading these databases.
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+
+        // Old schema: estimate columns with REAL affinity (pre-br-146).
+        conn.execute_batch(
+            "CREATE TABLE work_blocks (
+                id                   INTEGER PRIMARY KEY,
+                name                 TEXT NOT NULL,
+                estimate_most_likely REAL NOT NULL,
+                estimate_optimistic  REAL NOT NULL,
+                estimate_pessimistic REAL NOT NULL,
+                estimate_confidence  REAL NOT NULL
+            );",
+        )
+        .unwrap();
+
+        // Insert a row with REAL values (as the old f32 code would have written).
+        conn.execute(
+            "INSERT INTO work_blocks
+                 (id, name, estimate_most_likely, estimate_optimistic,
+                  estimate_pessimistic, estimate_confidence)
+             VALUES (1, 'pre-br146 task', 5.0, 3.0, 8.0, 0.8)",
+            [],
+        )
+        .unwrap();
+
+        create_tables(&conn).unwrap();
+
+        let model = load_model(&conn).unwrap();
+        let wb = model.work_blocks.get(&WorkBlockId(1)).expect("block loaded");
+        assert_eq!(wb.name, "pre-br146 task");
+        assert_eq!(wb.estimate.most_likely, 5);
+        assert_eq!(wb.estimate.optimistic, 3);
+        assert_eq!(wb.estimate.pessimistic, 8);
     }
 
     #[test]
