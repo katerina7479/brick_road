@@ -965,6 +965,7 @@ fn side_panel_ui(
     mut compare_state: ResMut<blocks::ComparePlanState>,
     today: Res<schedule::TodayMarker>,
     mut date_edit_buf: Local<Option<String>>,
+    mut new_resource_name: Local<String>,
 ) {
     let Ok(ctx) = contexts.ctx_mut() else { return };
     egui::SidePanel::right("side_panel")
@@ -1424,6 +1425,51 @@ fn side_panel_ui(
                         ui.weak("same duration");
                         ui.end_row();
                     });
+            });
+
+            ui.separator();
+            ui.collapsing("Resources", |ui| {
+                let mut resource_changed = false;
+                let mut to_remove: Option<model::ResourceBlockId> = None;
+                let mut sorted_resources: Vec<model::ResourceBlockId> =
+                    model.resource_blocks.keys().copied().collect();
+                sorted_resources.sort_by_key(|id| id.0);
+                for &rid in &sorted_resources {
+                    let Some(res) = model.resource_blocks.get_mut(&rid) else { continue };
+                    let row = ui.horizontal(|ui| {
+                        let name_changed = ui
+                            .add(egui::TextEdit::singleline(&mut res.name).desired_width(120.0))
+                            .lost_focus();
+                        let removed = ui.small_button("×").clicked();
+                        if removed { to_remove = Some(rid); }
+                        name_changed || removed
+                    });
+                    if row.inner { resource_changed = true; }
+                }
+                if let Some(rid) = to_remove {
+                    for plan in model.plans.values_mut() {
+                        plan.allocations.retain(|a| a.resource_id != rid);
+                    }
+                    model.resource_blocks.remove(&rid);
+                    resource_changed = true;
+                }
+                ui.horizontal(|ui| {
+                    ui.add(egui::TextEdit::singleline(&mut *new_resource_name)
+                        .hint_text("Name…").desired_width(120.0));
+                    if ui.button("Add").clicked() && !new_resource_name.trim().is_empty() {
+                        model.create_resource_block(
+                            new_resource_name.trim(),
+                            model::ResourceType::Person,
+                        );
+                        new_resource_name.clear();
+                        resource_changed = true;
+                    }
+                });
+                if resource_changed {
+                    if let Err(e) = db::save_model(&conn, &model) {
+                        error!("save_model failed: {e}");
+                    }
+                }
             });
 
             ui.separator();
