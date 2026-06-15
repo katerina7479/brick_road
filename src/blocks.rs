@@ -510,6 +510,7 @@ pub fn sync_block_sprites(
     sa: Res<ScheduleAnalysis>,
     model: Res<model::Model>,
     selected: Res<SelectedBlock>,
+    multi: Res<MultiSelection>,
     today: Res<schedule::TodayMarker>,
     camera_q: Query<&Projection, With<Camera2d>>,
     mut query: Query<(&BlockSprite, &mut Transform, &mut Sprite)>,
@@ -545,7 +546,7 @@ pub fn sync_block_sprites(
             Color::from(LinearRgba::new(r, g, b, 1.0))
         } else if on_critical.contains(&id) {
             Color::from(CRITICAL_PATH_COLOR)
-        } else if selected.0 == Some(id) {
+        } else if selected.0 == Some(id) || multi.0.contains(&id) {
             Color::from(LinearRgba::new(
                 base.red * 2.0,
                 base.green * 2.0,
