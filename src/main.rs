@@ -1176,6 +1176,7 @@ fn side_panel_ui(
                     }
                     scope.scope_stack.clear();
                     selected.0 = None;
+                    multi.0.clear();
                 }
 
                 if create_plan {
@@ -1191,6 +1192,7 @@ fn side_panel_ui(
                         *schedule = schedule::Schedule::new(new_id);
                         scope.scope_stack.clear();
                         selected.0 = None;
+                        multi.0.clear();
                         if let Err(e) = db::save_model(&conn, &model) {
                             error!("save_model failed: {e}");
                         }
