@@ -194,7 +194,7 @@ pub fn spawn_period_labels(
         commands.entity(e).despawn();
     }
 
-    let span_days = schedule.total_duration_days.ceil() as i32 + 30;
+    let span_days = schedule.total_duration_days + 30;
     let span_px = span_days as f32 * PIXELS_PER_DAY;
     let config = &model.calendar;
 
