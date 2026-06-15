@@ -139,8 +139,33 @@ pub fn reconcile_block_sprites(
         }
     }
 
+    // Packed row assignment: greedy interval scheduling so non-overlapping
+    // blocks share a row instead of cascading into a diagonal staircase.
+    // Blocks in visible_blocks.ids are already sorted by start_day, which
+    // satisfies the greedy-earliest-start precondition.
+    let mut row_ends: Vec<Day> = Vec::new();
+    let id_to_row: HashMap<WorkBlockId, usize> = visible_blocks
+        .ids
+        .iter()
+        .filter_map(|&id| {
+            let wb = model.work_blocks.get(&id)?;
+            let row = row_ends
+                .iter()
+                .position(|&end| wb.start_day >= end)
+                .unwrap_or(row_ends.len());
+            let block_end = wb.start_day + wb.duration_days;
+            if row < row_ends.len() {
+                row_ends[row] = block_end;
+            } else {
+                row_ends.push(block_end);
+            }
+            Some((id, row))
+        })
+        .collect();
+
     // Reconcile each visible block in row order.
-    for (row, &id) in visible_blocks.ids.iter().enumerate() {
+    for &id in &visible_blocks.ids {
+        let row = id_to_row.get(&id).copied().unwrap_or(0);
         let Some(wb) = model.work_blocks.get(&id) else {
             continue;
         };
