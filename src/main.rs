@@ -80,7 +80,6 @@ fn main() {
             Update,
             schedule::update_visible_blocks
                 .before(blocks::reconcile_block_sprites)
-                .before(blocks::sync_uncertainty_overlays)
                 .before(blocks::draw_dependency_edges)
                 .before(blocks::draw_block_handles)
                 .after(blocks::handle_block_delete)
@@ -126,12 +125,6 @@ fn main() {
             Update,
             blocks::draw_block_borders
                 .after(blocks::sync_block_sprites)
-                ,
-        )
-        .add_systems(
-            Update,
-            blocks::sync_uncertainty_overlays
-                .after(blocks::reconcile_block_sprites)
                 ,
         )
         .add_systems(

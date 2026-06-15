@@ -23,9 +23,6 @@ const LABEL_CHAR_WIDTH: f32 = 8.0;
 const LOD_CLOSE_MAX: f32 = 2.5;
 /// ortho.scale above this → hide block name entirely; also the start of dep-edge fade.
 const LOD_FAR_MIN: f32 = 6.0;
-/// ortho.scale above this → hide uncertainty overlays (pessimistic tail, optimistic marker).
-/// Intentionally lower than LOD_FAR_MIN so overlays disappear before labels do.
-const LOD_OVERLAY_HIDE: f32 = 3.0;
 /// ortho.scale above this → dependency edges are fully hidden.
 const LOD_DEP_HIDE: f32 = 10.0;
 /// Characters shown in the medium-zoom abbreviated label.
@@ -866,122 +863,6 @@ pub fn handle_block_drag(
     }
 }
 
-
-// ── Estimate uncertainty overlays ────────────────────────────────────────────
-
-/// Identifies which kind of uncertainty visual an entity represents and which
-/// work block it belongs to. Used as the reconciliation key so the system can
-/// update existing sprites in place rather than despawn-all/respawn-all.
-#[derive(Component, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum UncertaintyOverlay {
-    /// Translucent warm-glow tail extending past the block's right edge to the
-    /// pessimistic estimate end. Opacity scales with `(1 − confidence)`.
-    PessimisticTail(WorkBlockId),
-    /// Narrow white vertical bar inside the block at the optimistic estimate end.
-    OptimisticMarker(WorkBlockId),
-}
-
-/// Reconciles uncertainty overlay sprites with the current visible-block state.
-///
-/// Updates existing overlay transforms/sizes/colors in place. Spawns overlays
-/// for newly visible blocks and despawns overlays for blocks that are no longer
-/// visible or whose geometry no longer warrants a tail or marker.
-pub fn sync_uncertainty_overlays(
-    mut commands: Commands,
-    model: Res<model::Model>,
-    visible_blocks: Res<schedule::VisibleBlocks>,
-    mut overlay_q: Query<(Entity, &UncertaintyOverlay, &mut Transform, &mut Sprite)>,
-    cam_q: Query<&Projection, With<Camera2d>>,
-    mut prev_scale: Local<f32>,
-) {
-    let ortho_scale = cam_q
-        .single()
-        .ok()
-        .and_then(|p| if let Projection::Orthographic(o) = p { Some(o.scale) } else { None })
-        .unwrap_or(1.0);
-    let scale_changed = (ortho_scale - *prev_scale).abs() > 0.001;
-    *prev_scale = ortho_scale;
-
-    if !model.is_changed() && !visible_blocks.is_changed() && !scale_changed {
-        return;
-    }
-
-    // Build an index of existing overlay entities by key.
-    let existing: HashMap<UncertaintyOverlay, Entity> = overlay_q
-        .iter()
-        .map(|(e, k, _, _)| (*k, e))
-        .collect();
-
-    // Compute the desired set of overlays.
-    struct Overlay {
-        key: UncertaintyOverlay,
-        pos: Vec3,
-        size: Vec2,
-        color: Color,
-    }
-    let mut desired: Vec<Overlay> = Vec::new();
-
-    if ortho_scale <= LOD_OVERLAY_HIDE {
-        for &id in &visible_blocks.ids {
-            let Some(wb) = model.work_blocks.get(&id) else { continue };
-            let y = -(wb.row as f32) * ROW_HEIGHT;
-            let confidence = wb.estimate.confidence.clamp(0.0, 1.0);
-            let tail_alpha = (1.0 - confidence) * 0.55;
-
-            // Pessimistic tail — extends past the right edge to the pessimistic end.
-            let x_right = (wb.start_day + wb.duration_days) as f32 * PIXELS_PER_DAY;
-            let x_pes  = (wb.start_day + wb.estimate.pessimistic) as f32 * PIXELS_PER_DAY;
-            let tail_w = (x_pes - x_right).max(0.0);
-            if tail_w > 0.5 && tail_alpha > 0.01 {
-                desired.push(Overlay {
-                    key:   UncertaintyOverlay::PessimisticTail(id),
-                    pos:   Vec3::new(x_right + tail_w * 0.5, y, -0.1),
-                    size:  Vec2::new(tail_w, BLOCK_HEIGHT * 0.65),
-                    color: Color::from(LinearRgba::new(1.8, 1.3, 0.5, tail_alpha)),
-                });
-            }
-
-            // Optimistic marker — narrow bar at the optimistic estimate end.
-            let x_left    = wb.start_day as f32 * PIXELS_PER_DAY;
-            let x_opt_end = (wb.start_day + wb.estimate.optimistic) as f32 * PIXELS_PER_DAY;
-            if x_opt_end > x_left + 1.0 && x_opt_end < x_right - 1.0 {
-                desired.push(Overlay {
-                    key:   UncertaintyOverlay::OptimisticMarker(id),
-                    pos:   Vec3::new(x_opt_end, y, 0.3),
-                    size:  Vec2::new(2.0, BLOCK_HEIGHT * 0.9),
-                    color: Color::from(LinearRgba::new(1.4, 1.4, 1.4, 0.55)),
-                });
-            }
-        }
-    }
-    // At ortho_scale > LOD_OVERLAY_HIDE, desired stays empty → all overlays are despawned below.
-
-    // Update existing overlays in place; spawn new ones.
-    let mut live: HashSet<Entity> = HashSet::with_capacity(desired.len());
-    for ov in &desired {
-        if let Some(&entity) = existing.get(&ov.key) {
-            if let Ok((_, _, mut t, mut s)) = overlay_q.get_mut(entity) {
-                t.translation  = ov.pos;
-                s.custom_size  = Some(ov.size);
-                s.color        = ov.color;
-            }
-            live.insert(entity);
-        } else {
-            commands.spawn((
-                ov.key,
-                Sprite { color: ov.color, custom_size: Some(ov.size), ..default() },
-                Transform::from_translation(ov.pos),
-            ));
-        }
-    }
-
-    // Despawn stale overlays (removed blocks, or tail/marker no longer warranted).
-    for (_, entity) in &existing {
-        if !live.contains(entity) {
-            commands.entity(*entity).despawn();
-        }
-    }
-}
 
 // ── Past-portion overlay ──────────────────────────────────────────────────────
 
