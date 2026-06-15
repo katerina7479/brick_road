@@ -50,6 +50,7 @@ fn main() {
         .insert_resource(blocks::CompareBlockSpriteMap::default())
         .insert_resource(labels::NestingDepthMap::default())
         .insert_resource(ResourceDragState::default())
+        .insert_resource(ForceRefreshFlag::default())
         .add_systems(Startup, (setup_db, setup_camera))
         .add_systems(Startup, setup_demo_schedule.after(setup_db))
         .add_systems(PostStartup, update_analysis.before(blocks::reconcile_block_sprites))
@@ -78,6 +79,14 @@ fn main() {
         )
         .add_systems(Update, (camera_nav_keys, update_camera_target, smooth_camera).chain())
         .add_systems(Update, draw_grid)
+        .add_systems(Update, handle_force_refresh)
+        .add_systems(
+            Update,
+            apply_force_refresh
+                .after(handle_force_refresh)
+                .before(schedule::update_visible_blocks)
+                .before(blocks::reconcile_block_sprites),
+        )
         .add_systems(Update, schedule::update_today_marker)
         .add_systems(Update, sync_total_duration)
         .add_systems(Update, sync_weekend_bands.after(sync_total_duration))
@@ -469,6 +478,76 @@ fn sync_total_duration(
 
 fn task_view_active(mode: Res<schedule::TimelineViewMode>) -> bool {
     *mode == schedule::TimelineViewMode::Task
+}
+
+/// Set to true for one frame when the user triggers a force-refresh (F5 / Ctrl+R).
+#[derive(Resource, Default)]
+struct ForceRefreshFlag(bool);
+
+/// Detects F5 or Ctrl+R and sets `ForceRefreshFlag`. Skipped while egui
+/// owns keyboard input or an inline block rename is in progress.
+fn handle_force_refresh(
+    keyboard: Res<ButtonInput<KeyCode>>,
+    name_edit: Res<blocks::NameEditState>,
+    mut egui_ctx: EguiContexts,
+    mut flag: ResMut<ForceRefreshFlag>,
+) {
+    flag.0 = false;
+    if name_edit.editing.is_some() {
+        return;
+    }
+    if let Ok(ctx) = egui_ctx.ctx_mut() {
+        if ctx.wants_keyboard_input() {
+            return;
+        }
+    }
+    let ctrl = keyboard.pressed(KeyCode::ControlLeft) || keyboard.pressed(KeyCode::ControlRight);
+    if keyboard.just_pressed(KeyCode::F5) || (ctrl && keyboard.just_pressed(KeyCode::KeyR)) {
+        flag.0 = true;
+    }
+}
+
+/// When `ForceRefreshFlag` is set, despawns all block sprites and clears the
+/// sprite maps, then recomputes `VisibleBlocks` so `reconcile_block_sprites`
+/// respawns everything fresh from the model in the same frame. Also marks
+/// `Schedule` as changed so day/period label systems re-run.
+fn apply_force_refresh(
+    flag: Res<ForceRefreshFlag>,
+    mut commands: Commands,
+    mut sprite_map: ResMut<blocks::BlockSpriteMap>,
+    mut compare_map: ResMut<blocks::CompareBlockSpriteMap>,
+    mut visible: ResMut<schedule::VisibleBlocks>,
+    model: Res<model::Model>,
+    scope: Res<schedule::ViewScope>,
+    mut active_schedule: ResMut<schedule::Schedule>,
+    block_q: Query<Entity, With<blocks::BlockSprite>>,
+    compare_q: Query<Entity, With<blocks::CompareBlockSprite>>,
+) {
+    if !flag.0 {
+        return;
+    }
+    // Despawn all block sprites (children — labels, dots — are despawned recursively).
+    for entity in &block_q {
+        commands.entity(entity).despawn();
+    }
+    sprite_map.entities.clear();
+
+    // Despawn compare-plan ghost sprites.
+    for entity in &compare_q {
+        commands.entity(entity).despawn();
+    }
+    compare_map.entities.clear();
+
+    // Recompute visible blocks directly so reconcile_block_sprites can spawn
+    // the full fresh set in this same frame (marks VisibleBlocks as changed).
+    let new_ids: Vec<model::WorkBlockId> = schedule::visible_blocks(&model, &scope)
+        .into_iter()
+        .map(|wb| wb.id)
+        .collect();
+    visible.ids = new_ids;
+
+    // Mark Schedule changed so spawn_day_labels / spawn_period_labels re-run.
+    active_schedule.set_changed();
 }
 
 /// Tracks an in-progress drag in the resource timeline view.
