@@ -1658,18 +1658,20 @@ pub fn handle_dep_drag(
     }
 }
 
-/// Detects double-click on a block sprite and enters inline name-edit mode
-/// by populating `NameEditState`.
+/// Detects double-click on a block sprite and drills into its children on the
+/// timeline. If the block has no variants yet, a default one is created so the
+/// user can immediately start placing child blocks.
 ///
 /// Must run before `handle_block_selection` so the guard there sees the updated
-/// `editing` flag on the same frame the double-click fires.
+/// scope on the same frame the double-click fires.
 pub fn handle_name_edit(
     mut egui_ctx: EguiContexts,
     windows: Query<&Window>,
     camera: Query<(&Camera, &GlobalTransform)>,
     mouse: Res<ButtonInput<MouseButton>>,
     time: Res<Time>,
-    model: Res<model::Model>,
+    mut model: ResMut<model::Model>,
+    conn: NonSend<rusqlite::Connection>,
     mut name_edit: ResMut<NameEditState>,
     mut scope: ResMut<ViewScope>,
     block_query: Query<(&BlockSprite, &Transform, &Sprite)>,
@@ -1695,9 +1697,6 @@ pub fn handle_name_edit(
 
     let now = time.elapsed_secs();
 
-    // Double-click on a block sprite.
-    // If the block has variants → drill into its children.
-    // If the block has no variants → enter inline name-edit mode.
     for (block_sprite, transform, sprite) in &block_query {
         let Some(size) = sprite.custom_size else { continue };
         let center = transform.translation.truncate();
@@ -1711,16 +1710,22 @@ pub fn handle_name_edit(
             if let Some((last_id, last_time)) = name_edit.last_click {
                 if last_id == id && now - last_time < 0.4 {
                     name_edit.last_click = None;
-                    if let Some(wb) = model.work_blocks.get(&id) {
-                        if !wb.variants.is_empty() {
-                            // Push onto the stack to drill into this block's children.
-                            scope.scope_stack.push(schedule::ScopeEntry::Block(id));
-                        } else {
-                            // Rename the block inline.
-                            name_edit.editing = Some(id);
-                            name_edit.text_buf = wb.name.clone();
+                    // Double-click always drills in. Create a default variant if none exists.
+                    let has_variants = model
+                        .work_blocks
+                        .get(&id)
+                        .map(|wb| !wb.variants.is_empty())
+                        .unwrap_or(false);
+                    if !has_variants {
+                        let vid = model.create_variant("Plan", id);
+                        if let Some(wb) = model.work_blocks.get_mut(&id) {
+                            wb.variants.push(vid);
+                        }
+                        if let Err(e) = db::save_model(&conn, &model) {
+                            error!("save_model failed: {e}");
                         }
                     }
+                    scope.scope_stack.push(schedule::ScopeEntry::Block(id));
                     return;
                 }
             }

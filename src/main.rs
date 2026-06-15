@@ -102,6 +102,7 @@ fn main() {
                 .before(blocks::draw_block_handles),
         )
         .add_systems(Update, blocks::handle_name_edit)
+        .add_systems(Update, auto_fit_on_drill_in.after(blocks::handle_name_edit))
         .add_systems(
             Update,
             blocks::handle_block_delete.after(blocks::handle_name_edit),
@@ -1052,7 +1053,7 @@ fn top_bar_ui(
     mut contexts: EguiContexts,
     mut target: ResMut<CameraTarget>,
     model: Res<model::Model>,
-    scope: Res<schedule::ViewScope>,
+    mut scope: ResMut<schedule::ViewScope>,
     windows: Query<&Window>,
     mut view_mode: ResMut<schedule::TimelineViewMode>,
     today: Res<schedule::TodayMarker>,
@@ -1104,7 +1105,79 @@ fn top_bar_ui(
                     }
                 });
             });
+
+            // Breadcrumb navigation bar — shown only when drilled into a block's children.
+            if !scope.scope_stack.is_empty() {
+                ui.separator();
+                let stack_len = scope.scope_stack.len();
+                let names: Vec<String> = scope
+                    .scope_stack
+                    .iter()
+                    .map(|entry| match entry {
+                        schedule::ScopeEntry::Block(id) => model
+                            .work_blocks
+                            .get(id)
+                            .map(|wb| wb.name.clone())
+                            .unwrap_or_else(|| "?".to_string()),
+                        schedule::ScopeEntry::Variant(vid) => model
+                            .variants
+                            .get(vid)
+                            .map(|v| v.name.clone())
+                            .unwrap_or_else(|| "?".to_string()),
+                    })
+                    .collect();
+                let mut truncate_to: Option<usize> = None;
+                ui.horizontal(|ui| {
+                    let back_text = egui::RichText::new("‹ Back")
+                        .color(egui::Color32::from_rgb(180, 140, 80));
+                    if ui.small_button(back_text).on_hover_text("Go up one level").clicked() {
+                        truncate_to = Some(stack_len.saturating_sub(1));
+                    }
+                    ui.separator();
+                    let root_text = egui::RichText::new("Root")
+                        .color(egui::Color32::from_rgb(150, 150, 170));
+                    if ui.small_button(root_text).clicked() {
+                        truncate_to = Some(0);
+                    }
+                    for (i, name) in names.iter().enumerate() {
+                        ui.label(
+                            egui::RichText::new(" › ")
+                                .color(egui::Color32::from_rgb(100, 100, 120)),
+                        );
+                        if i + 1 < stack_len {
+                            if ui.small_button(name.as_str()).clicked() {
+                                truncate_to = Some(i + 1);
+                            }
+                        } else {
+                            ui.label(
+                                egui::RichText::new(name.as_str())
+                                    .color(egui::Color32::from_rgb(250, 165, 40))
+                                    .strong(),
+                            );
+                        }
+                    }
+                });
+                if let Some(depth) = truncate_to {
+                    scope.scope_stack.truncate(depth);
+                }
+            }
         });
+}
+
+/// Fits the camera to the current scope's visible blocks whenever the drill-in
+/// scope changes (push or pop). Skips the initial resource insertion.
+fn auto_fit_on_drill_in(
+    scope: Res<schedule::ViewScope>,
+    model: Res<model::Model>,
+    mut target: ResMut<CameraTarget>,
+    windows: Query<&Window>,
+) {
+    if !scope.is_changed() || scope.is_added() {
+        return;
+    }
+    if let Some(new_target) = camera::fit_to_blocks(&model, &scope, &windows) {
+        *target = new_target;
+    }
 }
 
 /// Maps a confidence level to (optimistic_factor, pessimistic_factor) using
@@ -1196,46 +1269,6 @@ fn side_panel_ui(
                 }
             }
 
-            // Breadcrumb: show full navigation path when drilled in.
-            // Clicking an ancestor segment truncates the stack back to that level.
-            if !scope.scope_stack.is_empty() {
-                let stack_len = scope.scope_stack.len();
-                let names: Vec<String> = scope
-                    .scope_stack
-                    .iter()
-                    .map(|entry| match entry {
-                        schedule::ScopeEntry::Block(id) => model
-                            .work_blocks
-                            .get(id)
-                            .map(|wb| wb.name.clone())
-                            .unwrap_or_else(|| "?".to_string()),
-                        schedule::ScopeEntry::Variant(vid) => model
-                            .variants
-                            .get(vid)
-                            .map(|v| format!("⬡ {}", v.name))
-                            .unwrap_or_else(|| "?".to_string()),
-                    })
-                    .collect();
-                let mut truncate_to: Option<usize> = None;
-                ui.horizontal(|ui| {
-                    if ui.small_button("Root").clicked() {
-                        truncate_to = Some(0);
-                    }
-                    for (i, name) in names.iter().enumerate() {
-                        ui.label("›");
-                        if i + 1 < stack_len {
-                            if ui.small_button(name.as_str()).clicked() {
-                                truncate_to = Some(i + 1);
-                            }
-                        } else {
-                            ui.label(name.as_str());
-                        }
-                    }
-                });
-                if let Some(depth) = truncate_to {
-                    scope.scope_stack.truncate(depth);
-                }
-            }
             ui.separator();
 
             if ui.button("Auto-schedule").clicked() {
