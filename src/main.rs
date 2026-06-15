@@ -766,6 +766,10 @@ fn resource_row_labels_ui(
 
 fn setup_demo_schedule(mut model: ResMut<model::Model>, mut commands: Commands) {
     use model::{DependencyType, Estimate};
+    // Skip seeding if the DB already has plans — prevents duplicate Demo Plan on every restart.
+    if !model.plans.is_empty() {
+        return;
+    }
 
     let est = |d: Day| Estimate {
         most_likely: d,
