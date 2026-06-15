@@ -439,17 +439,13 @@ fn task_view_active(mode: Res<schedule::TimelineViewMode>) -> bool {
 /// Tracks an in-progress drag in the resource timeline view.
 #[derive(Resource, Default)]
 struct ResourceDragState {
-    /// The block being dragged and the resource row it came from.
-    dragging: Option<(model::WorkBlockId, model::ResourceBlockId)>,
+    /// Block being dragged, its original resource row, and the X grab offset (px).
+    dragging: Option<(model::WorkBlockId, model::ResourceBlockId, f32)>,
 }
 
-/// Handles drag-to-reassign in the resource view: the user presses on an
-/// allocated block bar and releases over a different resource row to change
-/// which resource that block is assigned to.
-///
-/// Hit-test geometry mirrors `draw_resource_timeline` (same row Y and bar
-/// height). On release, the matching `ResourceAllocation` in the current plan
-/// has its `resource_id` updated and the model is persisted.
+/// Handles block dragging in resource view: horizontal drag reschedules (changes
+/// `start_day`), vertical drag to a different row reassigns the resource allocation.
+/// Both can happen in the same drag. Dependencies are cascaded on release.
 fn handle_resource_drag(
     mode: Res<schedule::TimelineViewMode>,
     mut model: ResMut<model::Model>,
@@ -515,25 +511,47 @@ fn handle_resource_drag(
                 && world_pos.y >= y - bar_h * 0.5
                 && world_pos.y <= y + bar_h * 0.5
             {
-                drag.dragging = Some((block_id, resource_id));
+                // Record how far from the block's left edge the cursor landed.
+                let offset_px = world_pos.x - x0;
+                drag.dragging = Some((block_id, resource_id, offset_px));
                 break 'hit;
             }
         }
         return;
     }
 
+    // Held: slide start_day in real time so the bar tracks the cursor.
+    if mouse.pressed(MouseButton::Left) {
+        if let Some((block_id, _, offset_px)) = drag.dragging {
+            let branch_min = model
+                .plans
+                .get(&schedule.plan_id)
+                .and_then(|p| p.branch_start_day)
+                .unwrap_or(0);
+            let new_start = ((world_pos.x - offset_px) / PIXELS_PER_DAY)
+                .max(0.0)
+                .round() as Day;
+            let new_start = new_start.max(branch_min);
+            if let Some(wb) = model.work_blocks.get_mut(&block_id) {
+                wb.start_day = new_start;
+            }
+        }
+        return;
+    }
+
+    // Release: cascade deps, optionally reassign resource row, and persist.
     if mouse.just_released(MouseButton::Left) {
-        if let Some((block_id, old_resource_id)) = drag.dragging.take() {
-            // Determine which resource row the cursor is over on release.
-            let new_resource_id =
-                resource_ids.iter().enumerate().find_map(|(row, &rid)| {
-                    let y = -(row as f32) * constants::ROW_HEIGHT;
-                    if (world_pos.y - y).abs() <= constants::ROW_HEIGHT * 0.5 {
-                        Some(rid)
-                    } else {
-                        None
-                    }
-                });
+        if let Some((block_id, old_resource_id, _)) = drag.dragging.take() {
+            schedule::cascade_dependencies(&mut model, block_id);
+
+            let new_resource_id = resource_ids.iter().enumerate().find_map(|(row, &rid)| {
+                let y = -(row as f32) * constants::ROW_HEIGHT;
+                if (world_pos.y - y).abs() <= constants::ROW_HEIGHT * 0.5 {
+                    Some(rid)
+                } else {
+                    None
+                }
+            });
 
             if let Some(new_rid) = new_resource_id {
                 if new_rid != old_resource_id {
@@ -547,10 +565,11 @@ fn handle_resource_drag(
                             alloc.resource_id = new_rid;
                         }
                     }
-                    if let Err(e) = db::save_model(&conn, &model) {
-                        error!("save_model failed: {e}");
-                    }
                 }
+            }
+
+            if let Err(e) = db::save_model(&conn, &model) {
+                error!("save_model failed: {e}");
             }
         }
     }
@@ -632,7 +651,7 @@ fn draw_resource_timeline(
 
             let is_dragged = drag
                 .dragging
-                .is_some_and(|(bid, rid)| bid == alloc.work_block_id && rid == alloc.resource_id);
+                .is_some_and(|(bid, rid, _)| bid == alloc.work_block_id && rid == alloc.resource_id);
             let color = if is_conflicted { alloc_conflict } else { alloc_ok };
             let (x_lo, x_hi) = (cx - w * 0.5, cx + w * 0.5);
             let (y_lo, y_hi) = (y - bar_h * 0.5, y + bar_h * 0.5);
