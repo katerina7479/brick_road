@@ -1125,8 +1125,15 @@ fn side_panel_ui(
             ui.collapsing("Size Mapping", |ui| {
                 let mut mapping_changed = false;
                 let mut to_remove: Option<usize> = None;
+                let mut swap_with_prev: Option<usize> = None;
+                let mut swap_with_next: Option<usize> = None;
+                let n = model.t_shirt_sizes.len();
                 for (i, size) in model.t_shirt_sizes.iter_mut().enumerate() {
                     let row = ui.horizontal(|ui| {
+                        let up = ui.add_enabled(i > 0, egui::Button::new("↑").small()).clicked();
+                        let dn = ui.add_enabled(i + 1 < n, egui::Button::new("↓").small()).clicked();
+                        if up { swap_with_prev = Some(i); }
+                        if dn { swap_with_next = Some(i); }
                         let label_changed = ui
                             .add(egui::TextEdit::singleline(&mut size.label).desired_width(36.0))
                             .lost_focus();
@@ -1142,7 +1149,7 @@ fn side_panel_ui(
                         if removed {
                             to_remove = Some(i);
                         }
-                        label_changed || days_changed || removed
+                        up || dn || label_changed || days_changed || removed
                     });
                     if row.inner {
                         mapping_changed = true;
@@ -1150,6 +1157,12 @@ fn side_panel_ui(
                 }
                 if let Some(idx) = to_remove {
                     model.t_shirt_sizes.remove(idx);
+                }
+                if let Some(idx) = swap_with_prev {
+                    model.t_shirt_sizes.swap(idx - 1, idx);
+                }
+                if let Some(idx) = swap_with_next {
+                    model.t_shirt_sizes.swap(idx, idx + 1);
                 }
 
                 // New-size input row: validate uniqueness before inserting.
