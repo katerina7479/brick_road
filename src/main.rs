@@ -835,36 +835,224 @@ fn resource_row_labels_ui(
 }
 
 fn setup_demo_schedule(mut model: ResMut<model::Model>, mut commands: Commands) {
-    use model::{DependencyType, Estimate};
-    // Skip seeding if the DB already has plans — prevents duplicate Demo Plan on every restart.
+    use model::{DependencyType, Estimate, ResourceAllocation, ResourceType};
+    // Skip seeding if the DB already has plans — prevents duplicate on every restart.
     if !model.plans.is_empty() {
         return;
     }
 
+    // Three-point estimate with 80% confidence defaults.
     let est = |d: Day| Estimate {
         most_likely: d,
-        optimistic: (d as f32 * 0.7).round() as Day,
-        pessimistic: (d as f32 * 1.5).round() as Day,
+        optimistic: (d as f32 * 0.75).round() as Day,
+        pessimistic: (d as f32 * 1.4).round() as Day,
         confidence: 0.8,
     };
 
-    let world_id = model.create_world("Demo");
-    let plan_id = model.create_plan("Demo Plan", world_id, None);
+    // HDR palette colors: indigo, emerald, orange, violet, teal, gold.
+    let indigo = [0.25_f32, 0.65, 2.80];
+    let emerald = [0.20_f32, 1.70, 0.80];
+    let orange = [2.20_f32, 0.55, 0.15];
+    let violet = [1.50_f32, 0.30, 2.20];
+    let teal = [0.15_f32, 1.50, 1.60];
+    let gold = [2.40_f32, 1.60, 0.10];
 
-    let design = model.create_work_block("Design", est(5));
-    let build = model.create_work_block("Build", est(8));
-    let test = model.create_work_block("Test", est(4));
-    let review = model.create_work_block("Review", est(2));
-    let deploy = model.create_work_block("Deploy", est(1));
+    let world_id = model.create_world("Acme Software");
+    let plan_id = model.create_plan("Customer Portal v2.0", world_id, None);
 
-    model.create_dependency(design, build, DependencyType::FinishToStart);
-    model.create_dependency(build, test, DependencyType::FinishToStart);
-    model.create_dependency(test, review, DependencyType::FinishToStart);
-    model.create_dependency(review, deploy, DependencyType::FinishToStart);
+    // ── Resources ────────────────────────────────────────────────────────────
+    let alice = model.create_resource_block("Alice Chen (PM)", ResourceType::Person);
+    let bob = model.create_resource_block("Bob Nakamura (Lead Eng)", ResourceType::Person);
+    let carol = model.create_resource_block("Carol Rivera (Backend)", ResourceType::Person);
+    let diana = model.create_resource_block("Diana Park (Frontend)", ResourceType::Person);
+    let eve = model.create_resource_block("Eve Osei (QA)", ResourceType::Person);
+    let frank = model.create_resource_block("Frank Wu (Designer)", ResourceType::Person);
+
+    if let Some(w) = model.worlds.get_mut(&world_id) {
+        w.resource_ids = vec![alice, bob, carol, diana, eve, frank];
+    }
+
+    // ── Work blocks ──────────────────────────────────────────────────────────
+    // Phase 1 — Discovery
+    let discovery = model.create_work_block("Discovery & Scoping", est(5));
+    let architecture = model.create_work_block("Technical Architecture", est(5));
+
+    // Phase 2 — Design
+    let ux_research = model.create_work_block("UX Research", est(8));
+    let ui_design = model.create_work_block("UI/UX Design", est(10));
+
+    // Phase 3 — Backend
+    let db_schema = model.create_work_block("Database Schema", est(4));
+    let api_design = model.create_work_block("API Design & Documentation", est(5));
+    let auth = model.create_work_block("Auth & User Management", est(7));
+    let core_data = model.create_work_block("Core Data Services", est(10));
+    let notifications = model.create_work_block("Notification System", est(5));
+
+    // Phase 4 — Frontend
+    let component_lib = model.create_work_block("Frontend Component Library", est(5));
+    let dashboard = model.create_work_block("User Dashboard", est(8));
+    let admin = model.create_work_block("Admin Console", est(8));
+
+    // Phase 5 — QA
+    let integration_test = model.create_work_block("Integration Testing", est(8));
+    let perf_test = model.create_work_block("Performance Testing", est(5));
+    let security = model.create_work_block("Security Review", est(4));
+
+    // Phase 6 — Launch
+    let beta = model.create_work_block("Beta Testing", est(7));
+    let deploy = model.create_work_block("Production Deployment", est(2));
+
+    // Assign colors by phase.
+    for (id, color) in [
+        (discovery, indigo),
+        (architecture, indigo),
+        (ux_research, emerald),
+        (ui_design, emerald),
+        (db_schema, orange),
+        (api_design, teal),
+        (auth, violet),
+        (core_data, orange),
+        (notifications, orange),
+        (component_lib, emerald),
+        (dashboard, teal),
+        (admin, violet),
+        (integration_test, gold),
+        (perf_test, gold),
+        (security, gold),
+        (beta, gold),
+        (deploy, gold),
+    ] {
+        if let Some(wb) = model.work_blocks.get_mut(&id) {
+            wb.color = Some(color);
+        }
+    }
+
+    // Assign descriptions.
+    let descriptions: &[(model::WorkBlockId, &str)] = &[
+        (discovery, "Define MVP scope, stakeholder requirements, and project timeline with engineering leads."),
+        (architecture, "Design system architecture, select technology stack, and define service boundaries."),
+        (ux_research, "Conduct user interviews, analyze competitive landscape, and define personas."),
+        (ui_design, "Create wireframes, high-fidelity mockups, and an interactive prototype."),
+        (db_schema, "Design relational schema, migration strategy, and indexing plan."),
+        (api_design, "Define RESTful API contracts, authentication flows, and versioning strategy."),
+        (auth, "Implement OAuth 2.0, session management, roles, and permission scopes."),
+        (core_data, "Build CRUD layer, data validation, caching strategy, and business logic."),
+        (notifications, "Email, in-app, and webhook notification delivery with user preferences."),
+        (component_lib, "Design system tokens, reusable component kit, and Storybook documentation."),
+        (dashboard, "Analytics overview, account management UI, and activity feed."),
+        (admin, "User administration, system configuration panel, and audit log viewer."),
+        (integration_test, "End-to-end API contract tests, browser automation, and regression suite."),
+        (perf_test, "Load testing, p99 latency profiling, and database query optimization."),
+        (security, "Penetration test critical flows, dependency audit, and OWASP Top 10 checklist."),
+        (beta, "Controlled rollout to 50 beta users; collect feedback and triage critical issues."),
+        (deploy, "Blue-green deployment, smoke tests, monitoring dashboards, and rollback plan."),
+    ];
+    for (id, desc) in descriptions {
+        if let Some(wb) = model.work_blocks.get_mut(id) {
+            wb.description = desc.to_string();
+        }
+    }
+
+    // ── Dependencies ─────────────────────────────────────────────────────────
+    let fts = DependencyType::FinishToStart;
+
+    // Phase 1 → 2/3
+    model.create_dependency(discovery, architecture, fts);
+    model.create_dependency(discovery, ux_research, fts);
+
+    // Phase 2 → 4
+    model.create_dependency(ux_research, ui_design, fts);
+    model.create_dependency(ui_design, component_lib, fts);
+
+    // Phase 3 pipeline
+    model.create_dependency(architecture, db_schema, fts);
+    model.create_dependency(db_schema, api_design, fts);
+    model.create_dependency(api_design, auth, fts);
+    model.create_dependency(api_design, core_data, fts);
+    model.create_dependency(core_data, notifications, fts);
+
+    // Frontend needs both design and APIs
+    model.create_dependency(component_lib, dashboard, fts);
+    model.create_dependency(component_lib, admin, fts);
+    model.create_dependency(api_design, dashboard, fts);
+    model.create_dependency(api_design, admin, fts);
+
+    // Integration testing waits for all implementation
+    model.create_dependency(auth, integration_test, fts);
+    model.create_dependency(notifications, integration_test, fts);
+    model.create_dependency(dashboard, integration_test, fts);
+    model.create_dependency(admin, integration_test, fts);
+
+    // Parallel QA tracks
+    model.create_dependency(integration_test, perf_test, fts);
+    model.create_dependency(integration_test, security, fts);
+
+    // Beta requires both QA tracks
+    model.create_dependency(perf_test, beta, fts);
+    model.create_dependency(security, beta, fts);
+
+    model.create_dependency(beta, deploy, fts);
+
+    // ── Milestones ───────────────────────────────────────────────────────────
+    // Approximate day positions computed from the critical path above.
+    model.create_milestone("Design Approved", 23);
+    model.create_milestone("Backend Feature-Complete", 39);
+    model.create_milestone("Go Live", 62);
+
+    // ── Plan assembly ─────────────────────────────────────────────────────────
+    let all_blocks = vec![
+        discovery, architecture, ux_research, ui_design,
+        db_schema, api_design, auth, core_data, notifications,
+        component_lib, dashboard, admin,
+        integration_test, perf_test, security, beta, deploy,
+    ];
+
+    let allocations = vec![
+        // Discovery: PM + Lead Eng
+        ResourceAllocation { resource_id: alice, work_block_id: discovery, allocation_factor: 1.0 },
+        ResourceAllocation { resource_id: bob, work_block_id: discovery, allocation_factor: 0.5 },
+        // Architecture: Lead Eng
+        ResourceAllocation { resource_id: bob, work_block_id: architecture, allocation_factor: 1.0 },
+        // UX Research: Designer
+        ResourceAllocation { resource_id: frank, work_block_id: ux_research, allocation_factor: 1.0 },
+        // UI/UX Design: Designer
+        ResourceAllocation { resource_id: frank, work_block_id: ui_design, allocation_factor: 1.0 },
+        // Database Schema: Lead Eng
+        ResourceAllocation { resource_id: bob, work_block_id: db_schema, allocation_factor: 1.0 },
+        // API Design: Lead Eng + Backend
+        ResourceAllocation { resource_id: bob, work_block_id: api_design, allocation_factor: 0.5 },
+        ResourceAllocation { resource_id: carol, work_block_id: api_design, allocation_factor: 0.5 },
+        // Auth: Backend Eng
+        ResourceAllocation { resource_id: carol, work_block_id: auth, allocation_factor: 1.0 },
+        // Core Data: Backend Eng
+        ResourceAllocation { resource_id: carol, work_block_id: core_data, allocation_factor: 1.0 },
+        // Notifications: Backend Eng
+        ResourceAllocation { resource_id: carol, work_block_id: notifications, allocation_factor: 1.0 },
+        // Component Library: Frontend Eng
+        ResourceAllocation { resource_id: diana, work_block_id: component_lib, allocation_factor: 1.0 },
+        // Dashboard: Frontend Eng
+        ResourceAllocation { resource_id: diana, work_block_id: dashboard, allocation_factor: 1.0 },
+        // Admin: Frontend Eng
+        ResourceAllocation { resource_id: diana, work_block_id: admin, allocation_factor: 1.0 },
+        // Integration Testing: QA
+        ResourceAllocation { resource_id: eve, work_block_id: integration_test, allocation_factor: 1.0 },
+        // Performance Testing: QA + Lead Eng
+        ResourceAllocation { resource_id: eve, work_block_id: perf_test, allocation_factor: 0.5 },
+        ResourceAllocation { resource_id: bob, work_block_id: perf_test, allocation_factor: 0.5 },
+        // Security Review: Lead Eng
+        ResourceAllocation { resource_id: bob, work_block_id: security, allocation_factor: 1.0 },
+        // Beta Testing: QA + PM
+        ResourceAllocation { resource_id: eve, work_block_id: beta, allocation_factor: 1.0 },
+        ResourceAllocation { resource_id: alice, work_block_id: beta, allocation_factor: 0.5 },
+        // Deployment: Lead Eng + Backend
+        ResourceAllocation { resource_id: bob, work_block_id: deploy, allocation_factor: 1.0 },
+        ResourceAllocation { resource_id: carol, work_block_id: deploy, allocation_factor: 1.0 },
+    ];
 
     let plan = {
         let p = model.plans.get_mut(&plan_id).unwrap();
-        p.root_blocks = vec![design, build, test, review, deploy];
+        p.root_blocks = all_blocks.clone();
+        p.allocations = allocations;
         p.clone()
     };
 
