@@ -837,7 +837,18 @@ fn resource_row_labels_ui(
 fn setup_demo_schedule(mut model: ResMut<model::Model>, mut commands: Commands) {
     use model::{DependencyType, Estimate};
     // Skip seeding if the DB already has plans — prevents duplicate Demo Plan on every restart.
+    // But we still need to build and insert the Schedule resource from the loaded data so that
+    // all downstream systems (side_panel_ui, draw_create_mode_overlay, spawn_day_labels, etc.)
+    // have a valid Schedule on the very first Update tick.
     if !model.plans.is_empty() {
+        if let Some(plan) = model.plans.values().next().cloned() {
+            let graph = graph::build_graph(&model, &plan);
+            if let Ok(sched) = schedule::forward_pass(&model, &plan, &graph) {
+                commands.insert_resource(sched);
+            } else {
+                commands.insert_resource(schedule::Schedule::new(plan.id));
+            }
+        }
         return;
     }
 
