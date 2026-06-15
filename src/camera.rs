@@ -1,5 +1,8 @@
 use bevy::{
-    input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll, MouseScrollUnit},
+    input::{
+        gestures::PinchGesture,
+        mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll, MouseScrollUnit},
+    },
     prelude::*,
 };
 
@@ -47,12 +50,21 @@ pub fn home_target(window: &Window) -> CameraTarget {
     }
 }
 
-/// Reads mouse input and updates `CameraTarget`. Must run before `smooth_camera`.
+/// Reads mouse / trackpad input and updates `CameraTarget`. Must run before
+/// `smooth_camera`.
+///
+/// - Middle/right-drag pans.
+/// - Two-finger trackpad scroll pans at constant zoom — the Mac-native gesture
+///   for moving along the timeline.
+/// - Trackpad pinch zooms.
+/// - Cmd/Ctrl + scroll zooms, so a plain mouse wheel can still zoom.
 pub fn update_camera_target(
     mut target: ResMut<CameraTarget>,
     mouse_buttons: Res<ButtonInput<MouseButton>>,
     mouse_motion: Res<AccumulatedMouseMotion>,
     mouse_scroll: Res<AccumulatedMouseScroll>,
+    keyboard: Res<ButtonInput<KeyCode>>,
+    mut pinch_events: MessageReader<PinchGesture>,
 ) {
     if (mouse_buttons.pressed(MouseButton::Middle) || mouse_buttons.pressed(MouseButton::Right))
         && mouse_motion.delta != Vec2::ZERO
@@ -61,13 +73,38 @@ pub fn update_camera_target(
         target.pos.y += mouse_motion.delta.y * target.zoom;
     }
 
-    if mouse_scroll.delta != Vec2::ZERO {
-        let lines = match mouse_scroll.unit {
-            MouseScrollUnit::Line => mouse_scroll.delta.y,
-            MouseScrollUnit::Pixel => mouse_scroll.delta.y / 60.0,
-        };
-        target.zoom *= 1.0 - lines * 0.10;
+    // Trackpad pinch → zoom.
+    let pinch: f32 = pinch_events.read().map(|e| e.0).sum();
+    if pinch != 0.0 {
+        target.zoom *= 1.0 - pinch * 2.5;
         target.zoom = target.zoom.clamp(0.15, 6.0);
+    }
+
+    if mouse_scroll.delta != Vec2::ZERO {
+        let zoom_modifier = keyboard.pressed(KeyCode::SuperLeft)
+            || keyboard.pressed(KeyCode::SuperRight)
+            || keyboard.pressed(KeyCode::ControlLeft)
+            || keyboard.pressed(KeyCode::ControlRight);
+
+        if zoom_modifier {
+            // Cmd/Ctrl + scroll → zoom (mouse-wheel fallback).
+            let lines = match mouse_scroll.unit {
+                MouseScrollUnit::Line => mouse_scroll.delta.y,
+                MouseScrollUnit::Pixel => mouse_scroll.delta.y / 60.0,
+            };
+            target.zoom *= 1.0 - lines * 0.10;
+            target.zoom = target.zoom.clamp(0.15, 6.0);
+        } else {
+            // Plain two-finger scroll → pan along the timeline at constant zoom.
+            // Convert to world units via the current zoom so the pan tracks the
+            // cursor regardless of scale.
+            let px = match mouse_scroll.unit {
+                MouseScrollUnit::Line => mouse_scroll.delta * 20.0,
+                MouseScrollUnit::Pixel => mouse_scroll.delta,
+            };
+            target.pos.x -= px.x * target.zoom;
+            target.pos.y += px.y * target.zoom;
+        }
     }
 }
 
