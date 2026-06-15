@@ -67,6 +67,49 @@ const PALETTE: &[LinearRgba] = &[
 /// HDR gold applied to every block on the critical path.
 const CRITICAL_PATH_COLOR: LinearRgba = LinearRgba::new(3.0, 2.5, 0.0, 1.0);
 
+/// Choose a color for a newly created block.
+///
+/// When drilled into a variant scope the block is a child — inherit the parent
+/// block's color so children visually group with their parent. Otherwise cycle
+/// through `PALETTE` picking whichever entry is currently used by the fewest
+/// blocks, spreading colors across the project naturally.
+pub fn pick_block_color(model: &model::Model, scope: &schedule::ViewScope) -> [f32; 3] {
+    // Variant-scoped: inherit parent's color (fall through to palette if parent
+    // has no color set, which happens on the very first block in a variant).
+    if let Some(schedule::ScopeEntry::Variant(vid)) = scope.scope_stack.last() {
+        if let Some(variant) = model.variants.get(vid) {
+            if let Some(wb) = model.work_blocks.get(&variant.parent) {
+                if let Some(color) = wb.color {
+                    return color;
+                }
+            }
+        }
+    }
+    // Top-level: pick the least-used palette color.
+    let palette_rgb: Vec<[f32; 3]> = PALETTE.iter().map(|c| [c.red, c.green, c.blue]).collect();
+    let mut counts = vec![0usize; palette_rgb.len()];
+    for wb in model.work_blocks.values() {
+        if let Some(c) = wb.color {
+            for (i, pc) in palette_rgb.iter().enumerate() {
+                if (c[0] - pc[0]).abs() < 0.001
+                    && (c[1] - pc[1]).abs() < 0.001
+                    && (c[2] - pc[2]).abs() < 0.001
+                {
+                    counts[i] += 1;
+                    break;
+                }
+            }
+        }
+    }
+    let min_idx = counts
+        .iter()
+        .enumerate()
+        .min_by_key(|(_, &c)| c)
+        .map(|(i, _)| i)
+        .unwrap_or(0);
+    palette_rgb[min_idx]
+}
+
 /// Tracks the currently selected work block (if any).
 #[derive(Resource, Default)]
 pub struct SelectedBlock(pub Option<WorkBlockId>);
@@ -713,6 +756,7 @@ pub fn handle_block_selection(
     mut last_empty_click: Local<f32>,
     dep_drag: Res<DepDragState>,
     active_schedule: Res<schedule::Schedule>,
+    scope: Res<schedule::ViewScope>,
 ) {
     // Yield when a dep-handle drag is in progress.
     if dep_drag.from.is_some() {
@@ -789,9 +833,11 @@ pub fn handle_block_selection(
                 confidence: 0.8,
             };
             let new_id = model.create_work_block("New Block", est);
+            let auto_color = pick_block_color(&model, &scope);
             if let Some(wb) = model.work_blocks.get_mut(&new_id) {
                 wb.start_day = start_day;
                 wb.duration_days = 1;
+                wb.color = Some(auto_color);
             }
             let plan_id = active_schedule.plan_id;
             if let Some(plan) = model.plans.get_mut(&plan_id) {
@@ -2127,6 +2173,7 @@ pub fn draw_create_mode_overlay(
     mut model: ResMut<model::Model>,
     conn: NonSend<rusqlite::Connection>,
     active_schedule: Res<schedule::Schedule>,
+    scope: Res<schedule::ViewScope>,
 ) {
     if !state.active {
         return;
@@ -2178,12 +2225,7 @@ pub fn draw_create_mode_overlay(
             };
             let new_id = model.create_work_block(name, est);
             let plan_id = active_schedule.plan_id;
-            // Place the new block at branch_min so it appears immediately on the timeline.
-            // For baseline plans (branch_start_day=None) branch_min is 0.0 — day 0 is the
-            // correct default since the user can drag to reposition. Leaving duration_days=0
-            // would make the block invisible, which is worse UX.
-            // For branch plans branch_min is the branch start day, keeping new work inside
-            // the branch window.
+            let auto_color = pick_block_color(&model, &scope);
             let branch_min = model
                 .plans
                 .get(&plan_id)
@@ -2192,6 +2234,7 @@ pub fn draw_create_mode_overlay(
             if let Some(wb) = model.work_blocks.get_mut(&new_id) {
                 wb.start_day = branch_min;
                 wb.duration_days = 1;
+                wb.color = Some(auto_color);
             }
             if let Some(plan) = model.plans.get_mut(&plan_id) {
                 plan.root_blocks.push(new_id);
