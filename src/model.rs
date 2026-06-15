@@ -112,10 +112,10 @@ impl Default for CalendarConfig {
             working_days_per_week: 5,
             non_working_dates: vec![],
             quarter_colors: [
-                [0.20, 0.30, 0.60, 0.07], // Q1 - blue
-                [0.20, 0.50, 0.25, 0.07], // Q2 - green
-                [0.60, 0.40, 0.15, 0.07], // Q3 - amber
-                [0.45, 0.20, 0.50, 0.07], // Q4 - purple
+                [0.22, 0.50, 0.90, 0.10], // Q1 - sky blue
+                [0.25, 0.75, 0.50, 0.10], // Q2 - teal green
+                [0.95, 0.65, 0.20, 0.10], // Q3 - warm amber
+                [0.65, 0.35, 0.88, 0.10], // Q4 - violet
             ],
         }
     }
