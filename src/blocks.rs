@@ -4,6 +4,7 @@ use bevy::prelude::*;
 use bevy_egui::{egui, EguiContexts};
 
 use bevy::sprite::Anchor;
+use bevy::window::{CursorIcon, SystemCursorIcon};
 
 use crate::{
     constants::{PIXELS_PER_DAY, ROW_HEIGHT},
@@ -1280,6 +1281,70 @@ pub fn draw_block_handles(
         };
         gizmos.circle_2d(right_pos, rr, rc);
     }
+}
+
+/// Sets the OS cursor to reflect what the hovered block region does: a connect
+/// (crosshair) cursor over the dependency dots, a resize cursor near the right
+/// edge, and a move cursor over the block body. Leaves egui to manage the cursor
+/// while the pointer is over a UI area.
+pub fn update_cursor_icon(
+    mut commands: Commands,
+    mut egui_ctx: EguiContexts,
+    windows: Query<(Entity, &Window)>,
+    camera: Query<(&Camera, &GlobalTransform), With<Camera2d>>,
+    block_query: Query<(&Transform, &Sprite), With<BlockSprite>>,
+) {
+    let Ok((win_entity, window)) = windows.single() else {
+        return;
+    };
+    if egui_ctx
+        .ctx_mut()
+        .map(|c| c.is_pointer_over_area())
+        .unwrap_or(false)
+    {
+        return; // egui manages its own cursor over UI
+    }
+    let Ok((cam, cam_tr)) = camera.single() else {
+        return;
+    };
+    let Some(cursor) = window.cursor_position() else {
+        return;
+    };
+    let Ok(world_pos) = cam.viewport_to_world_2d(cam_tr, cursor) else {
+        return;
+    };
+
+    let mut icon = SystemCursorIcon::Default;
+    for (transform, sprite) in &block_query {
+        let Some(size) = sprite.custom_size else {
+            continue;
+        };
+        let center = transform.translation.truncate();
+        let half = size * 0.5;
+
+        // Priority matches the interaction order: dep handle > resize edge > move.
+        let near_handle = (world_pos - Vec2::new(center.x - half.x, center.y)).length()
+            < HANDLE_HIT_PX
+            || (world_pos - Vec2::new(center.x + half.x, center.y)).length() < HANDLE_HIT_PX;
+        if near_handle {
+            icon = SystemCursorIcon::Crosshair;
+            break;
+        }
+        let inside = world_pos.x >= center.x - half.x
+            && world_pos.x <= center.x + half.x
+            && world_pos.y >= center.y - half.y
+            && world_pos.y <= center.y + half.y;
+        if inside {
+            icon = if world_pos.x >= center.x + half.x - EDGE_GRAB_PX {
+                SystemCursorIcon::EwResize
+            } else {
+                SystemCursorIcon::Move
+            };
+            break;
+        }
+    }
+
+    commands.entity(win_entity).insert(CursorIcon::System(icon));
 }
 
 #[allow(clippy::too_many_arguments)]

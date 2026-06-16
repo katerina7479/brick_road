@@ -151,6 +151,7 @@ fn main() {
                 .before(blocks::handle_block_resize),
         )
         .add_systems(Update, blocks::draw_block_handles)
+        .add_systems(Update, blocks::update_cursor_icon)
         .add_systems(
             Update,
             blocks::draw_dependency_edges
