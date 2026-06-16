@@ -72,6 +72,7 @@ fn main() {
         .add_systems(Update, (camera_nav_keys, update_camera_target, smooth_camera).chain())
         .add_systems(Update, draw_grid)
         .add_systems(Update, draw_branch_markers)
+        .add_systems(Update, draw_branch_sketch)
         .add_systems(Update, handle_fork_hover)
         .add_systems(Update, schedule::update_today_marker)
         .add_systems(Update, sync_total_duration)
@@ -672,6 +673,117 @@ fn draw_branch_markers(
         let arm = ortho.scale * 14.0;
         gizmos.line_2d(Vec2::new(x, fork_y), Vec2::new(x - arm, fork_y + arm), ghost);
         gizmos.line_2d(Vec2::new(x, fork_y), Vec2::new(x + arm, fork_y + arm), ghost);
+    }
+}
+
+/// Collects a plan's placed work blocks: its root blocks plus the children of
+/// each block's selected variant (following the plan's variant choices).
+fn collect_plan_blocks<'a>(
+    model: &'a model::Model,
+    plan: &model::Plan,
+) -> Vec<&'a model::WorkBlock> {
+    let mut ids: Vec<model::WorkBlockId> = Vec::new();
+    let mut seen: std::collections::HashSet<model::WorkBlockId> = std::collections::HashSet::new();
+    let mut stack: Vec<model::WorkBlockId> = plan.root_blocks.clone();
+    while let Some(id) = stack.pop() {
+        if !seen.insert(id) {
+            continue;
+        }
+        ids.push(id);
+        if let Some(wb) = model.work_blocks.get(&id) {
+            let var = plan
+                .selected_variants
+                .get(&id)
+                .copied()
+                .or_else(|| wb.variants.first().copied());
+            if let Some(vid) = var {
+                if let Some(v) = model.variants.get(&vid) {
+                    for &c in &v.children {
+                        stack.push(c);
+                    }
+                }
+            }
+        }
+    }
+    ids.iter()
+        .filter_map(|id| model.work_blocks.get(id))
+        .filter(|wb| wb.duration_days > 0)
+        .collect()
+}
+
+/// SKETCH: renders each branch plan (a non-active plan with a `branch_start_day`)
+/// as a parallel timeline band below the active plan, joined to its fork point by
+/// a diverging line. Gizmo outlines only — a rough sketch of the look, not final.
+fn draw_branch_sketch(
+    mut gizmos: Gizmos,
+    model: Res<model::Model>,
+    schedule: Res<schedule::Schedule>,
+    visible: Res<schedule::VisibleBlocks>,
+) {
+    let active_id = schedule.plan_id;
+
+    // Lowest lane the active plan occupies, so branch bands sit below it.
+    let active_max_row = visible
+        .ids
+        .iter()
+        .filter_map(|id| model.work_blocks.get(id).map(|wb| wb.row))
+        .max()
+        .unwrap_or(0);
+
+    let mut branch_plans: Vec<&model::Plan> = model
+        .plans
+        .values()
+        .filter(|p| p.id != active_id && p.branch_start_day.is_some())
+        .collect();
+    branch_plans.sort_by_key(|p| (p.branch_start_day.unwrap_or(i32::MAX), p.id.0));
+
+    let row_h = constants::ROW_HEIGHT;
+    let block_h = row_h * 0.6;
+    let mut band_top = active_max_row + 2; // a gap below the active plan
+
+    for (idx, plan) in branch_plans.iter().enumerate() {
+        let fork_day = plan.branch_start_day.unwrap_or(0);
+        let fork_x = fork_day as f32 * PIXELS_PER_DAY;
+        let lc = blocks::BRANCH_PALETTE[idx % blocks::BRANCH_PALETTE.len()];
+        let color = Color::from(LinearRgba::new(lc.red, lc.green, lc.blue, 0.95));
+        let faint = Color::from(LinearRgba::new(lc.red, lc.green, lc.blue, 0.30));
+
+        // The branch's blocks from the fork point onward.
+        let blocks: Vec<&model::WorkBlock> = collect_plan_blocks(&model, plan)
+            .into_iter()
+            .filter(|wb| wb.start_day + wb.duration_days > fork_day)
+            .collect();
+        if blocks.is_empty() {
+            band_top += 2;
+            continue;
+        }
+        let min_row = blocks.iter().map(|wb| wb.row).min().unwrap_or(0);
+        let band_center_y = -(band_top as f32) * row_h;
+        let mut band_bottom = band_top;
+
+        for wb in &blocks {
+            let row_in_band = band_top + (wb.row - min_row);
+            band_bottom = band_bottom.max(row_in_band);
+            let y = -(row_in_band as f32) * row_h;
+            let x0 = (wb.start_day as f32 * PIXELS_PER_DAY).max(fork_x);
+            let x1 = ((wb.start_day + wb.duration_days) as f32 * PIXELS_PER_DAY).max(x0 + 2.0);
+            let (y0, y1) = (y - block_h * 0.5, y + block_h * 0.5);
+            gizmos.line_2d(Vec2::new(x0, y0), Vec2::new(x1, y0), color);
+            gizmos.line_2d(Vec2::new(x1, y0), Vec2::new(x1, y1), color);
+            gizmos.line_2d(Vec2::new(x1, y1), Vec2::new(x0, y1), color);
+            gizmos.line_2d(Vec2::new(x0, y1), Vec2::new(x0, y0), color);
+        }
+
+        // Parallel timeline line for the band, and the diverging connector down
+        // from the fork point on the main baseline.
+        let band_right = blocks
+            .iter()
+            .map(|wb| (wb.start_day + wb.duration_days) as f32 * PIXELS_PER_DAY)
+            .fold(fork_x, f32::max);
+        gizmos.line_2d(Vec2::new(fork_x, band_center_y), Vec2::new(band_right, band_center_y), faint);
+        gizmos.line_2d(Vec2::new(fork_x, row_h * 0.5), Vec2::new(fork_x, band_center_y), color);
+
+        band_top = band_bottom + 2;
     }
 }
 
