@@ -354,12 +354,15 @@ pub fn sync_block_sprites(
         // left-anchored at start_day, not centered on the model midpoint.
         let visual_width = width.max(min_width);
         let x = wb.start_day as f32 * PIXELS_PER_DAY + visual_width * 0.5;
-        let y = -(block_sprite.row as f32) * ROW_HEIGHT;
+        // Read the live model row (not the cached BlockSprite.row, which only
+        // refreshes when the visible set changes) so vertical drags track the
+        // cursor immediately — same as start_day does for x.
+        let y = -(wb.row as f32) * ROW_HEIGHT;
         transform.translation.x = x;
         transform.translation.y = y;
         sprite.custom_size = Some(Vec2::new(visual_width, BLOCK_HEIGHT));
 
-        let base = PALETTE[block_sprite.row.rem_euclid(PALETTE.len() as i32) as usize];
+        let base = PALETTE[wb.row.rem_euclid(PALETTE.len() as i32) as usize];
         let id = block_sprite.work_block_id;
         // Color hierarchy: user color > selected highlight > palette.
         sprite.color = if let Some([r, g, b]) = wb.color {
