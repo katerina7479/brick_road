@@ -210,21 +210,23 @@ pub fn reconcile_block_sprites(
                 };
                 let name = wb.name.clone();
                 block_cmd.with_children(|parent| {
-                    // Dark shadow for contrast — 1 screen-pixel offset (updated by sync_block_labels).
+                    // Light halo behind the dark text — 1 screen-pixel offset
+                    // (updated by sync_block_labels). The blocks are light pastels,
+                    // so dark text + a light halo reads far better than the reverse.
                     parent.spawn((
                         BlockLabelShadow { full_name: name.clone(), work_block_id: id },
                         Text2d::new(display.clone()),
                         TextFont { font_size: 13.0, ..default() },
-                        TextColor(Color::srgba(0.0, 0.0, 0.0, 0.6)),
+                        TextColor(Color::srgba(1.0, 1.0, 1.0, 0.55)),
                         Anchor::CENTER,
                         Transform::from_xyz(0.0, 0.0, 0.08),
                     ));
-                    // White main label centered in the block.
+                    // Dark main label centered in the block.
                     parent.spawn((
                         BlockLabel { full_name: name, work_block_id: id },
                         Text2d::new(display),
                         TextFont { font_size: 13.0, ..default() },
-                        TextColor(Color::srgba(1.0, 1.0, 1.0, 1.0)),
+                        TextColor(Color::srgba(0.10, 0.10, 0.13, 1.0)),
                         Anchor::CENTER,
                         Transform::from_xyz(0.0, 0.0, 0.15),
                     ));
