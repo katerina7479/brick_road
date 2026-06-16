@@ -1206,15 +1206,15 @@ fn nearest_dep_edge(
     best.map(|(id, _)| id)
 }
 
-fn dep_type_from_modifiers(keys: &ButtonInput<KeyCode>) -> DependencyType {
-    if keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]) {
-        DependencyType::StartToStart
-    } else if keys.any_pressed([KeyCode::ControlLeft, KeyCode::ControlRight]) {
-        DependencyType::FinishToFinish
-    } else if keys.any_pressed([KeyCode::AltLeft, KeyCode::AltRight]) {
-        DependencyType::StartToFinish
-    } else {
-        DependencyType::FinishToStart
+/// Dependency type implied by which edge you drag from and which edge you drop
+/// on. `*_finish` is true for the finish (right) edge, false for the start (left)
+/// edge. The drag source is always the predecessor, the drop target the successor.
+fn dep_type_from_edges(source_finish: bool, target_finish: bool) -> DependencyType {
+    match (source_finish, target_finish) {
+        (true, false) => DependencyType::FinishToStart,
+        (true, true) => DependencyType::FinishToFinish,
+        (false, false) => DependencyType::StartToStart,
+        (false, true) => DependencyType::StartToFinish,
     }
 }
 
@@ -1353,7 +1353,6 @@ pub fn handle_dep_drag(
     windows: Query<&Window>,
     camera: Query<(&Camera, &GlobalTransform)>,
     mouse: Res<ButtonInput<MouseButton>>,
-    keyboard: Res<ButtonInput<KeyCode>>,
     mut drag: ResMut<DepDragState>,
     mut model: ResMut<model::Model>,
     block_query: Query<(&BlockSprite, &Transform, &Sprite)>,
@@ -1371,7 +1370,8 @@ pub fn handle_dep_drag(
     let Some(cursor) = window.cursor_position() else { return };
     let Ok(world_pos) = cam.viewport_to_world_2d(cam_tr, cursor) else { return };
 
-    let block_at = |pos: Vec2| -> Option<WorkBlockId> {
+    // Returns the block under `pos` and whether `pos` is in its right (finish) half.
+    let block_at = |pos: Vec2| -> Option<(WorkBlockId, bool)> {
         for (bs, tr, sp) in &block_query {
             let Some(size) = sp.custom_size else { continue };
             let center = tr.translation.truncate();
@@ -1381,7 +1381,7 @@ pub fn handle_dep_drag(
                 && pos.y >= center.y - half.y
                 && pos.y <= center.y + half.y
             {
-                return Some(bs.work_block_id);
+                return Some((bs.work_block_id, pos.x >= center.x));
             }
         }
         None
@@ -1409,25 +1409,22 @@ pub fn handle_dep_drag(
         }
     }
 
-    // Left-click release: finish a handle-initiated dep drag.
+    // Left-click release: finish a handle-initiated dep drag. The dependency type
+    // is implied by the source edge (which handle) and the target edge (drop half);
+    // the drag source is always the predecessor.
     if mouse.just_released(MouseButton::Left) {
         if let Some(from_id) = drag.from.take() {
-            if let Some(to_id) = block_at(world_pos) {
+            if let Some((to_id, to_finish)) = block_at(world_pos) {
                 if to_id != from_id {
-                    let dep_type = dep_type_from_modifiers(&keyboard);
-                    let (pred, succ) = if drag.from_right {
-                        (from_id, to_id) // right handle → from is predecessor
-                    } else {
-                        (to_id, from_id) // left handle → from is successor
-                    };
+                    let dep_type = dep_type_from_edges(drag.from_right, to_finish);
                     // Create only (idempotent); deletion is click-the-edge + Delete.
                     let exists = model.dependencies.values().any(|d| {
-                        d.predecessor == pred
-                            && d.successor == succ
+                        d.predecessor == from_id
+                            && d.successor == to_id
                             && d.dependency_type == dep_type
                     });
                     if !exists {
-                        model.create_dependency(pred, succ, dep_type);
+                        model.create_dependency(from_id, to_id, dep_type);
                         if let Err(e) = crate::db::save_model(&conn, &model) {
                             error!("save_model failed: {e}");
                         }
@@ -1437,17 +1434,17 @@ pub fn handle_dep_drag(
         }
     }
 
-    // Right-click drag: existing shortcut, always treats source as predecessor.
+    // Right-click drag: shortcut that drags from the source's finish edge.
     if mouse.just_pressed(MouseButton::Right) {
-        drag.from = block_at(world_pos);
+        drag.from = block_at(world_pos).map(|(id, _)| id);
         drag.from_right = true;
     }
 
     if mouse.just_released(MouseButton::Right) {
         if let Some(from_id) = drag.from.take() {
-            if let Some(to_id) = block_at(world_pos) {
+            if let Some((to_id, to_finish)) = block_at(world_pos) {
                 if to_id != from_id {
-                    let dep_type = dep_type_from_modifiers(&keyboard);
+                    let dep_type = dep_type_from_edges(drag.from_right, to_finish);
                     let exists = model.dependencies.values().any(|d| {
                         d.predecessor == from_id
                             && d.successor == to_id
