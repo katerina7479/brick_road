@@ -26,6 +26,7 @@ pub fn create_tables(conn: &Connection) -> Result<()> {
         "ALTER TABLE work_blocks ADD COLUMN t_shirt_size TEXT",
         "ALTER TABLE work_blocks ADD COLUMN block_row INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE plans ADD COLUMN branch_start_day INTEGER",
+        "ALTER TABLE plans ADD COLUMN parent_plan_id INTEGER",
     ] {
         match conn.execute_batch(sql) {
             Ok(()) => {}
@@ -33,6 +34,13 @@ pub fn create_tables(conn: &Connection) -> Result<()> {
             Err(e) => return Err(e),
         }
     }
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS plan_removed_inherited (
+            plan_id       INTEGER NOT NULL,
+            work_block_id INTEGER NOT NULL,
+            PRIMARY KEY (plan_id, work_block_id)
+        );",
+    )?;
     // Seed default t-shirt sizes on first use (table created above).
     let count: i64 =
         conn.query_row("SELECT COUNT(*) FROM t_shirt_sizes", [], |r| r.get(0))?;
@@ -109,7 +117,8 @@ pub fn save_model(conn: &Connection, model: &Model) -> Result<()> {
          DELETE FROM availability_segments;
          DELETE FROM calendar_non_working_dates;
          DELETE FROM t_shirt_sizes;
-         DELETE FROM quarter_colors;",
+         DELETE FROM quarter_colors;
+         DELETE FROM plan_removed_inherited;",
     )?;
 
     // ── Phase 2: upsert all current entity rows ───────────────────────────────
@@ -242,16 +251,19 @@ pub fn save_model(conn: &Connection, model: &Model) -> Result<()> {
 
     for plan in model.plans.values() {
         tx.execute(
-            "INSERT INTO plans (id, name, world_id, branch_start_day) VALUES (?1, ?2, ?3, ?4)
+            "INSERT INTO plans (id, name, world_id, branch_start_day, parent_plan_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5)
              ON CONFLICT(id) DO UPDATE SET
                  name = excluded.name,
                  world_id = excluded.world_id,
-                 branch_start_day = excluded.branch_start_day",
+                 branch_start_day = excluded.branch_start_day,
+                 parent_plan_id = excluded.parent_plan_id",
             (
                 plan.id.0 as i64,
                 &plan.name,
                 plan.world_id.0 as i64,
                 plan.branch_start_day,
+                plan.parent.map(|p| p.0 as i64),
             ),
         )?;
     }
@@ -341,6 +353,12 @@ pub fn save_model(conn: &Connection, model: &Model) -> Result<()> {
                 "INSERT INTO plan_root_blocks (plan_id, work_block_id, sort_order)
                  VALUES (?1, ?2, ?3)",
                 (plan.id.0 as i64, wb_id.0 as i64, order as i64),
+            )?;
+        }
+        for &wb_id in &plan.removed_inherited {
+            tx.execute(
+                "INSERT INTO plan_removed_inherited (plan_id, work_block_id) VALUES (?1, ?2)",
+                (plan.id.0 as i64, wb_id.0 as i64),
             )?;
         }
         for (&wb_id, &var_id) in &plan.selected_variants {
@@ -697,18 +715,19 @@ pub fn load_model(conn: &Connection) -> Result<Model> {
 
     // plans
     {
-        let mut stmt =
-            conn.prepare("SELECT id, name, world_id, branch_start_day FROM plans")?;
+        let mut stmt = conn
+            .prepare("SELECT id, name, world_id, branch_start_day, parent_plan_id FROM plans")?;
         let rows = stmt.query_map([], |row| {
             Ok((
                 row.get::<_, i64>(0)?,
                 row.get::<_, String>(1)?,
                 row.get::<_, i64>(2)?,
                 row.get::<_, Option<f64>>(3)?,
+                row.get::<_, Option<i64>>(4)?,
             ))
         })?;
         for row in rows {
-            let (id, name, world_id, branch_start_day) = row?;
+            let (id, name, world_id, branch_start_day, parent_plan_id) = row?;
             bump!(id);
             model.plans.insert(
                 PlanId(id as u64),
@@ -720,8 +739,23 @@ pub fn load_model(conn: &Connection) -> Result<Model> {
                     selected_variants: HashMap::new(),
                     allocations: vec![],
                     branch_start_day: branch_start_day.map(|d| d as i32),
+                    parent: parent_plan_id.map(|p| PlanId(p as u64)),
+                    removed_inherited: std::collections::HashSet::new(),
                 },
             );
+        }
+    }
+
+    // plan_removed_inherited
+    {
+        let mut stmt =
+            conn.prepare("SELECT plan_id, work_block_id FROM plan_removed_inherited")?;
+        let rows = stmt.query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)))?;
+        for row in rows {
+            let (plan_id, wb_id) = row?;
+            if let Some(plan) = model.plans.get_mut(&PlanId(plan_id as u64)) {
+                plan.removed_inherited.insert(WorkBlockId(wb_id as u64));
+            }
         }
     }
 
@@ -1355,6 +1389,8 @@ mod tests {
                 selected_variants: Default::default(),
                 allocations: vec![],
                 branch_start_day: None,
+                parent: None,
+                removed_inherited: std::collections::HashSet::new(),
             },
         );
         let err = validate_model(&m).unwrap_err().to_string();

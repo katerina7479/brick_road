@@ -119,6 +119,7 @@ pub fn camera_nav_keys(
     keyboard: Res<ButtonInput<KeyCode>>,
     mut target: ResMut<CameraTarget>,
     model: Res<Model>,
+    active: Res<schedule::Schedule>,
     scope: Res<ViewScope>,
     windows: Query<&Window>,
 ) {
@@ -134,7 +135,7 @@ pub fn camera_nav_keys(
         *target = home_target(window);
     }
     if keyboard.just_pressed(KeyCode::KeyF) {
-        if let Some(new_target) = fit_to_blocks(&model, &scope, &windows) {
+        if let Some(new_target) = fit_to_blocks(&model, active.plan_id, &scope, &windows) {
             *target = new_target;
         }
     }
@@ -145,6 +146,7 @@ pub fn camera_nav_keys(
 /// Returns `None` when there are no placed visible blocks or no window.
 pub fn fit_to_blocks(
     model: &Model,
+    plan_id: crate::model::PlanId,
     scope: &ViewScope,
     windows: &Query<&Window>,
 ) -> Option<CameraTarget> {
@@ -152,7 +154,7 @@ pub fn fit_to_blocks(
     let window_w = window.width();
     let window_h = window.height();
 
-    let visible: Vec<_> = schedule::visible_blocks(model, scope)
+    let visible: Vec<_> = schedule::visible_blocks(model, plan_id, scope)
         .into_iter()
         .filter(|wb| wb.duration_days > 0)
         .collect();
