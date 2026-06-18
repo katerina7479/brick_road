@@ -51,6 +51,7 @@ fn main() {
         .insert_resource(blocks::CompareBlockSpriteMap::default())
         .insert_resource(labels::NestingDepthMap::default())
         .insert_resource(ForkHoverState::default())
+        .insert_resource(SelectedPlan::default())
         .add_systems(Startup, (setup_db, setup_camera))
         .add_systems(Startup, setup_demo_schedule.after(setup_db))
         .add_systems(PostStartup, update_analysis.before(blocks::reconcile_block_sprites))
@@ -73,6 +74,11 @@ fn main() {
         .add_systems(Update, draw_grid)
         .add_systems(Update, draw_branch_markers)
         .add_systems(Update, handle_fork_hover)
+        .add_systems(
+            Update,
+            handle_branch_selection.before(blocks::handle_block_selection),
+        )
+        .add_systems(Update, handle_branch_delete.after(blocks::handle_name_edit))
         .add_systems(Update, schedule::update_today_marker)
         .add_systems(Update, sync_total_duration)
         .add_systems(Update, sync_weekend_bands.after(sync_total_duration))
@@ -473,7 +479,16 @@ fn setup_demo_schedule(mut model: ResMut<model::Model>, mut commands: Commands) 
     // all downstream systems (side_panel_ui, draw_create_mode_overlay, spawn_day_labels, etc.)
     // have a valid Schedule on the very first Update tick.
     if !model.plans.is_empty() {
-        if let Some(plan) = model.plans.values().next().cloned() {
+        // Default the active plan to the lowest-id root plan (forks sort last
+        // via `branch_start_day.is_some()`). Picking an arbitrary
+        // `values().next()` could make a fork active — and the active plan can't
+        // be deleted, so a randomly-active branch would be impossible to remove.
+        let default_plan = model
+            .plans
+            .values()
+            .min_by_key(|p| (p.branch_start_day.is_some(), p.id.0))
+            .cloned();
+        if let Some(plan) = default_plan {
             let graph = graph::build_graph(&model, &plan);
             if let Ok(sched) = schedule::forward_pass(&model, &plan, &graph) {
                 commands.insert_resource(sched);
@@ -621,6 +636,7 @@ fn draw_branch_markers(
     mut gizmos: Gizmos,
     model: Res<model::Model>,
     schedule: Res<schedule::Schedule>,
+    selected_plan: Res<SelectedPlan>,
     fork: Res<ForkHoverState>,
     cam_q: Query<(&Transform, &Projection), With<Camera2d>>,
     windows: Query<&Window>,
@@ -642,7 +658,14 @@ fn draw_branch_markers(
         let Some(branch_day) = plan.branch_start_day else { continue };
         let x = branch_day as f32 * PIXELS_PER_DAY;
         let lc = blocks::BRANCH_PALETTE[idx % blocks::BRANCH_PALETTE.len()];
-        let color = Color::from(LinearRgba::new(lc.red * 0.7, lc.green * 0.7, lc.blue * 0.7, 0.55));
+        // The selected branch is drawn brighter and fully opaque so it's clear
+        // which one the Delete key will remove.
+        let selected = selected_plan.0 == Some(plan.id);
+        let color = if selected {
+            Color::from(LinearRgba::new(lc.red * 1.4, lc.green * 1.4, lc.blue * 1.4, 1.0))
+        } else {
+            Color::from(LinearRgba::new(lc.red * 0.7, lc.green * 0.7, lc.blue * 0.7, 0.55))
+        };
 
         // Vertical branch line.
         gizmos.line_2d(
@@ -832,10 +855,168 @@ fn top_bar_ui(
         });
 }
 
+/// The branch (forked plan) whose marker is currently selected, if any.
+/// Selecting a branch by clicking its marker arms the Delete key to remove it.
+#[derive(Resource, Default)]
+pub struct SelectedPlan(pub Option<model::PlanId>);
+
+/// Returns the non-active forked plan whose branch marker is within `hit_world`
+/// units of `world_x`, nearest first. Used both to select a branch on click and
+/// to keep block-creation clicks from landing on a marker.
+pub fn branch_plan_at_x(
+    model: &model::Model,
+    active_id: model::PlanId,
+    world_x: f32,
+    hit_world: f32,
+) -> Option<model::PlanId> {
+    let mut best: Option<(f32, model::PlanId)> = None;
+    for plan in model.plans.values() {
+        if plan.id == active_id {
+            continue;
+        }
+        let Some(day) = plan.branch_start_day else {
+            continue;
+        };
+        let dist = (world_x - day as f32 * PIXELS_PER_DAY).abs();
+        if dist <= hit_world && best.is_none_or(|(bd, _)| dist < bd) {
+            best = Some((dist, plan.id));
+        }
+    }
+    best.map(|(_, id)| id)
+}
+
+/// Left-click on (or very near) a branch marker selects that branch; the Delete
+/// key then removes it. Selecting a branch clears any block/dependency
+/// selection so Delete is unambiguous.
+fn handle_branch_selection(
+    mut egui_ctx: EguiContexts,
+    windows: Query<&Window>,
+    camera: Query<(&Camera, &GlobalTransform), With<Camera2d>>,
+    cam_proj: Query<&Projection, With<Camera2d>>,
+    mouse: Res<ButtonInput<MouseButton>>,
+    keyboard: Res<ButtonInput<KeyCode>>,
+    model: Res<model::Model>,
+    schedule: Res<schedule::Schedule>,
+    mut selected_plan: ResMut<SelectedPlan>,
+    mut selected_block: ResMut<blocks::SelectedBlock>,
+    mut selected_dep: ResMut<blocks::SelectedDependency>,
+) {
+    if !mouse.just_pressed(MouseButton::Left) {
+        return;
+    }
+    // Ctrl+click is the fork gesture, not selection.
+    if keyboard.pressed(KeyCode::ControlLeft) || keyboard.pressed(KeyCode::ControlRight) {
+        return;
+    }
+    if let Ok(ctx) = egui_ctx.ctx_mut() {
+        if ctx.is_pointer_over_area() {
+            return;
+        }
+    }
+    let Ok(window) = windows.single() else { return };
+    let Ok((cam, cam_gt)) = camera.single() else { return };
+    let Some(world) = window
+        .cursor_position()
+        .and_then(|c| cam.viewport_to_world_2d(cam_gt, c).ok())
+    else {
+        return;
+    };
+    let scale = cam_proj
+        .single()
+        .ok()
+        .and_then(|p| match p {
+            Projection::Orthographic(o) => Some(o.scale),
+            _ => None,
+        })
+        .unwrap_or(1.0);
+
+    // ~6 screen pixels of grab tolerance on either side of the marker line.
+    if let Some(id) = branch_plan_at_x(&model, schedule.plan_id, world.x, 6.0 * scale) {
+        selected_plan.0 = Some(id);
+        selected_block.0 = None;
+        selected_dep.0 = None;
+    }
+}
+
+/// Deletes the selected branch on Delete/Backspace. Block deletion lives in
+/// `blocks::handle_block_delete`; the two never collide because selecting a
+/// branch clears the block selection and vice versa.
+fn handle_branch_delete(
+    mut egui_ctx: EguiContexts,
+    keyboard: Res<ButtonInput<KeyCode>>,
+    name_edit: Res<blocks::NameEditState>,
+    mut selected_plan: ResMut<SelectedPlan>,
+    mut model: ResMut<model::Model>,
+    conn: NonSend<rusqlite::Connection>,
+) {
+    if name_edit.editing.is_some() {
+        return;
+    }
+    if let Ok(ctx) = egui_ctx.ctx_mut() {
+        if ctx.wants_keyboard_input() {
+            return;
+        }
+    }
+    if !(keyboard.just_pressed(KeyCode::Delete) || keyboard.just_pressed(KeyCode::Backspace)) {
+        return;
+    }
+    if let Some(id) = selected_plan.0.take() {
+        delete_plan(&mut model, id);
+        if let Err(e) = db::save_model(&conn, &model) {
+            error!("save_model failed: {e}");
+        }
+    }
+}
+
+/// Removes a forked plan and any work blocks it solely owned. A fork copies the
+/// parent's `root_blocks` (the same block ids), so blocks still rooted by
+/// another plan are left intact — only blocks orphaned by the removal are
+/// deleted, along with their variant descendants.
+fn delete_plan(model: &mut model::Model, plan_id: model::PlanId) {
+    let Some(plan) = model.plans.remove(&plan_id) else {
+        return;
+    };
+    for block in plan.root_blocks {
+        let still_rooted = model
+            .plans
+            .values()
+            .any(|p| p.root_blocks.contains(&block));
+        if !still_rooted {
+            blocks::delete_work_block(model, block);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use chrono::NaiveDate;
+
+    fn est() -> model::Estimate {
+        model::Estimate { most_likely: 3, optimistic: 1, pessimistic: 7, confidence: 0.8 }
+    }
+
+    #[test]
+    fn delete_plan_keeps_shared_blocks_removes_exclusive() {
+        let mut m = model::Model::default();
+        let w = m.create_world("w");
+        let root = m.create_plan("root", w, None);
+        let shared = m.create_work_block("shared", est());
+        m.plans.get_mut(&root).unwrap().root_blocks.push(shared);
+
+        // A fork copies the parent's root_blocks (same `shared` id) and gains
+        // its own exclusive block.
+        let fork = m.create_plan("fork", w, Some(0));
+        let exclusive = m.create_work_block("exclusive", est());
+        m.plans.get_mut(&fork).unwrap().root_blocks = vec![shared, exclusive];
+
+        delete_plan(&mut m, fork);
+
+        assert!(!m.plans.contains_key(&fork), "fork plan removed");
+        assert!(m.work_blocks.contains_key(&shared), "block shared with root is kept");
+        assert!(!m.work_blocks.contains_key(&exclusive), "block only the fork owned is removed");
+        assert!(m.plans.contains_key(&root), "root plan untouched");
+    }
 
     #[test]
     fn week_bands_at_every_wdpw_boundary() {
