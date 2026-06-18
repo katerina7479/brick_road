@@ -473,7 +473,16 @@ fn setup_demo_schedule(mut model: ResMut<model::Model>, mut commands: Commands) 
     // all downstream systems (side_panel_ui, draw_create_mode_overlay, spawn_day_labels, etc.)
     // have a valid Schedule on the very first Update tick.
     if !model.plans.is_empty() {
-        if let Some(plan) = model.plans.values().next().cloned() {
+        // Default the active plan to the lowest-id root plan (forks sort last
+        // via `branch_start_day.is_some()`). Picking an arbitrary
+        // `values().next()` could make a fork active — and the active plan can't
+        // be deleted, so a randomly-active branch would be impossible to remove.
+        let default_plan = model
+            .plans
+            .values()
+            .min_by_key(|p| (p.branch_start_day.is_some(), p.id.0))
+            .cloned();
+        if let Some(plan) = default_plan {
             let graph = graph::build_graph(&model, &plan);
             if let Ok(sched) = schedule::forward_pass(&model, &plan, &graph) {
                 commands.insert_resource(sched);
