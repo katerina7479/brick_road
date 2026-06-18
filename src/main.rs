@@ -786,12 +786,28 @@ fn calendar_ruler_ui(
 fn top_bar_ui(
     mut contexts: EguiContexts,
     mut target: ResMut<CameraTarget>,
-    model: Res<model::Model>,
+    mut model: ResMut<model::Model>,
     scope: Res<schedule::ViewScope>,
+    schedule: Res<schedule::Schedule>,
     windows: Query<&Window>,
     today: Res<schedule::TodayMarker>,
+    conn: NonSend<rusqlite::Connection>,
 ) {
     let Ok(ctx) = contexts.ctx_mut() else { return };
+
+    // Forked plans (those anchored at a branch day), oldest first, for the
+    // branch list. The root plan has `branch_start_day == None` and is omitted.
+    let active_id = schedule.plan_id;
+    let mut branches: Vec<(model::PlanId, String)> = model
+        .plans
+        .values()
+        .filter(|p| p.branch_start_day.is_some())
+        .map(|p| (p.id, p.name.clone()))
+        .collect();
+    branches.sort_by_key(|(id, _)| id.0);
+
+    let mut plan_to_delete: Option<model::PlanId> = None;
+
     egui::TopBottomPanel::top("top_bar")
         .frame(
             egui::Frame::new()
@@ -809,6 +825,29 @@ fn top_bar_ui(
                 if ui.add(btn).on_hover_text("Fit to view [F]").clicked() {
                     if let Some(new_target) = camera::fit_to_blocks(&model, &scope, &windows) {
                         *target = new_target;
+                    }
+                }
+
+                // Branch list: each forked plan with a delete (✕) button.
+                if !branches.is_empty() {
+                    ui.separator();
+                    ui.label(
+                        egui::RichText::new("Branches:")
+                            .color(egui::Color32::from_rgb(170, 150, 120)),
+                    );
+                    for (id, name) in &branches {
+                        ui.label(
+                            egui::RichText::new(name).color(egui::Color32::from_rgb(210, 214, 228)),
+                        );
+                        let del = ui
+                            .small_button(egui::RichText::new("✕").color(egui::Color32::from_rgb(
+                                230, 120, 120,
+                            )))
+                            .on_hover_text("Delete this branch");
+                        // Never delete the active plan out from under the editor.
+                        if del.clicked() && *id != active_id {
+                            plan_to_delete = Some(*id);
+                        }
                     }
                 }
 
@@ -830,12 +869,64 @@ fn top_bar_ui(
                 });
             });
         });
+
+    if let Some(del_id) = plan_to_delete {
+        delete_plan(&mut model, del_id);
+        if let Err(e) = db::save_model(&conn, &model) {
+            error!("save_model failed: {e}");
+        }
+    }
+}
+
+/// Removes a forked plan and any work blocks it solely owned. A fork copies the
+/// parent's `root_blocks` (the same block ids), so blocks still rooted by
+/// another plan are left intact — only blocks orphaned by the removal are
+/// deleted, along with their variant descendants.
+fn delete_plan(model: &mut model::Model, plan_id: model::PlanId) {
+    let Some(plan) = model.plans.remove(&plan_id) else {
+        return;
+    };
+    for block in plan.root_blocks {
+        let still_rooted = model
+            .plans
+            .values()
+            .any(|p| p.root_blocks.contains(&block));
+        if !still_rooted {
+            blocks::delete_work_block(model, block);
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use chrono::NaiveDate;
+
+    fn est() -> model::Estimate {
+        model::Estimate { most_likely: 3, optimistic: 1, pessimistic: 7, confidence: 0.8 }
+    }
+
+    #[test]
+    fn delete_plan_keeps_shared_blocks_removes_exclusive() {
+        let mut m = model::Model::default();
+        let w = m.create_world("w");
+        let root = m.create_plan("root", w, None);
+        let shared = m.create_work_block("shared", est());
+        m.plans.get_mut(&root).unwrap().root_blocks.push(shared);
+
+        // A fork copies the parent's root_blocks (same `shared` id) and gains
+        // its own exclusive block.
+        let fork = m.create_plan("fork", w, Some(0));
+        let exclusive = m.create_work_block("exclusive", est());
+        m.plans.get_mut(&fork).unwrap().root_blocks = vec![shared, exclusive];
+
+        delete_plan(&mut m, fork);
+
+        assert!(!m.plans.contains_key(&fork), "fork plan removed");
+        assert!(m.work_blocks.contains_key(&shared), "block shared with root is kept");
+        assert!(!m.work_blocks.contains_key(&exclusive), "block only the fork owned is removed");
+        assert!(m.plans.contains_key(&root), "root plan untouched");
+    }
 
     #[test]
     fn week_bands_at_every_wdpw_boundary() {
