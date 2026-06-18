@@ -105,7 +105,12 @@ fn format_day_label(day: i32, month_only: bool, model: &Model) -> String {
     if month_only {
         format!("{} {}", date.format("%b"), date.year())
     } else {
-        format!("{} {} '{:02}", date.format("%b"), date.day(), date.year() % 100)
+        format!(
+            "{} {} '{:02}",
+            date.format("%b"),
+            date.day(),
+            date.year() % 100
+        )
     }
 }
 
@@ -350,7 +355,10 @@ pub fn spawn_period_labels(
         commands.spawn((
             PeriodLabel,
             Text2d::new(label),
-            TextFont { font_size: 11.0, ..default() },
+            TextFont {
+                font_size: 11.0,
+                ..default()
+            },
             TextColor(Color::srgba(0.65, 0.65, 0.85, 0.70)),
             Transform::from_xyz(cx, PERIOD_LABEL_Y, 1.0),
         ));
@@ -362,7 +370,11 @@ pub fn spawn_period_labels(
 }
 
 fn next_ym(year: i32, month: u32) -> (i32, u32) {
-    if month == 12 { (year + 1, 1) } else { (year, month + 1) }
+    if month == 12 {
+        (year + 1, 1)
+    } else {
+        (year, month + 1)
+    }
 }
 
 /// Pixels of extra left-indent per nesting level for hierarchy brackets.
@@ -388,7 +400,13 @@ pub fn draw_nesting_indicators(
     let ortho_scale = cam_q
         .single()
         .ok()
-        .and_then(|p| if let Projection::Orthographic(o) = p { Some(o.scale) } else { None })
+        .and_then(|p| {
+            if let Projection::Orthographic(o) = p {
+                Some(o.scale)
+            } else {
+                None
+            }
+        })
         .unwrap_or(1.0);
     if ortho_scale > LOD_BRACKET_HIDE {
         return;
@@ -456,22 +474,19 @@ pub fn scale_labels_to_zoom(
     mut label_q: Query<&mut Transform, With<DayLabel>>,
 ) {
     let Ok(proj) = cam_q.single() else { return };
-    let Projection::Orthographic(ortho) = proj else { return };
+    let Projection::Orthographic(ortho) = proj else {
+        return;
+    };
     let s = ortho.scale;
     for mut transform in &mut label_q {
         transform.scale = Vec3::splat(s);
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{Estimate, Model};
-
-    fn est() -> Estimate {
-        Estimate { most_likely: 3, optimistic: 2, pessimistic: 5, confidence: 0.8 }
-    }
+    use crate::model::Model;
 
     #[test]
     fn empty_model_produces_empty_map() {
@@ -482,7 +497,7 @@ mod tests {
     #[test]
     fn single_root_block_has_depth_zero() {
         let mut model = Model::default();
-        let id = model.create_work_block("root", est());
+        let id = model.create_work_block("root");
         let depths = build_depth_map(&model);
         assert_eq!(depths[&id], 0);
     }
@@ -490,10 +505,15 @@ mod tests {
     #[test]
     fn child_of_variant_has_depth_one() {
         let mut model = Model::default();
-        let parent = model.create_work_block("parent", est());
-        let child = model.create_work_block("child", est());
+        let parent = model.create_work_block("parent");
+        let child = model.create_work_block("child");
         let vid = model.create_variant("v", parent);
-        model.work_blocks.get_mut(&parent).unwrap().variants.push(vid);
+        model
+            .work_blocks
+            .get_mut(&parent)
+            .unwrap()
+            .variants
+            .push(vid);
         model.variants.get_mut(&vid).unwrap().children.push(child);
 
         let depths = build_depth_map(&model);
@@ -504,9 +524,9 @@ mod tests {
     #[test]
     fn three_level_hierarchy() {
         let mut model = Model::default();
-        let root = model.create_work_block("root", est());
-        let mid = model.create_work_block("mid", est());
-        let leaf = model.create_work_block("leaf", est());
+        let root = model.create_work_block("root");
+        let mid = model.create_work_block("mid");
+        let leaf = model.create_work_block("leaf");
 
         let v1 = model.create_variant("v1", root);
         model.work_blocks.get_mut(&root).unwrap().variants.push(v1);
@@ -525,8 +545,8 @@ mod tests {
     #[test]
     fn multiple_roots_all_at_depth_zero() {
         let mut model = Model::default();
-        let a = model.create_work_block("a", est());
-        let b = model.create_work_block("b", est());
+        let a = model.create_work_block("a");
+        let b = model.create_work_block("b");
         let depths = build_depth_map(&model);
         assert_eq!(depths[&a], 0);
         assert_eq!(depths[&b], 0);
@@ -535,8 +555,8 @@ mod tests {
     #[test]
     fn diamond_uses_first_assigned_depth() {
         let mut model = Model::default();
-        let root = model.create_work_block("root", est());
-        let shared = model.create_work_block("shared", est());
+        let root = model.create_work_block("root");
+        let shared = model.create_work_block("shared");
 
         let v1 = model.create_variant("v1", root);
         let v2 = model.create_variant("v2", root);

@@ -148,7 +148,9 @@ pub fn fit_to_blocks(
     scope: &ViewScope,
     windows: &Query<&Window>,
 ) -> Option<CameraTarget> {
-    let Ok(window) = windows.single() else { return None };
+    let Ok(window) = windows.single() else {
+        return None;
+    };
     let window_w = window.width();
     let window_h = window.height();
 

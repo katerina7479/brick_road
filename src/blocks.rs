@@ -9,7 +9,7 @@ use bevy::window::{CursorIcon, SystemCursorIcon};
 use crate::{
     constants::{PIXELS_PER_DAY, ROW_HEIGHT},
     db, graph,
-    model::{self, Day, DependencyType, Estimate, PlanId, WorkBlockId},
+    model::{self, Day, DependencyType, PlanId, WorkBlockId},
     schedule::{self, ViewScope},
 };
 
@@ -95,7 +95,6 @@ pub struct CompareBlockSprite {
     pub work_block_id: WorkBlockId,
 }
 
-
 /// Faded palette for branch ghost lanes — distinct colors, lower saturation
 /// than the main block palette so they read as "alternative" rather than active.
 pub const BRANCH_PALETTE: &[LinearRgba] = &[
@@ -104,7 +103,6 @@ pub const BRANCH_PALETTE: &[LinearRgba] = &[
     LinearRgba::new(1.80, 0.50, 1.40, 1.0), // rose
     LinearRgba::new(1.60, 1.20, 0.30, 1.0), // gold
 ];
-
 
 /// Tracks inline name-edit state: which block is being renamed and the live text buffer.
 #[derive(Resource, Default)]
@@ -189,7 +187,10 @@ pub fn reconcile_block_sprites(
             };
 
             let mut block_cmd = commands.spawn((
-                BlockSprite { work_block_id: id, row },
+                BlockSprite {
+                    work_block_id: id,
+                    row,
+                },
                 Sprite {
                     color,
                     custom_size: Some(Vec2::new(width, BLOCK_HEIGHT)),
@@ -202,8 +203,11 @@ pub fn reconcile_block_sprites(
             if width >= MIN_LABEL_WIDTH {
                 let available_chars = ((width - 8.0) / LABEL_CHAR_WIDTH) as usize;
                 let display = if wb.name.chars().count() > available_chars && available_chars > 0 {
-                    let truncated: String =
-                        wb.name.chars().take(available_chars.saturating_sub(1)).collect();
+                    let truncated: String = wb
+                        .name
+                        .chars()
+                        .take(available_chars.saturating_sub(1))
+                        .collect();
                     format!("{truncated}…")
                 } else {
                     wb.name.clone()
@@ -214,18 +218,30 @@ pub fn reconcile_block_sprites(
                     // (updated by sync_block_labels). The blocks are light pastels,
                     // so dark text + a light halo reads far better than the reverse.
                     parent.spawn((
-                        BlockLabelShadow { full_name: name.clone(), work_block_id: id },
+                        BlockLabelShadow {
+                            full_name: name.clone(),
+                            work_block_id: id,
+                        },
                         Text2d::new(display.clone()),
-                        TextFont { font_size: 13.0, ..default() },
+                        TextFont {
+                            font_size: 13.0,
+                            ..default()
+                        },
                         TextColor(Color::srgba(1.0, 1.0, 1.0, 0.55)),
                         Anchor::CENTER,
                         Transform::from_xyz(0.0, 0.0, 0.08),
                     ));
                     // Dark main label centered in the block.
                     parent.spawn((
-                        BlockLabel { full_name: name, work_block_id: id },
+                        BlockLabel {
+                            full_name: name,
+                            work_block_id: id,
+                        },
                         Text2d::new(display),
-                        TextFont { font_size: 13.0, ..default() },
+                        TextFont {
+                            font_size: 13.0,
+                            ..default()
+                        },
                         TextColor(Color::srgba(0.10, 0.10, 0.13, 1.0)),
                         Anchor::CENTER,
                         Transform::from_xyz(0.0, 0.0, 0.15),
@@ -239,7 +255,10 @@ pub fn reconcile_block_sprites(
                     parent.spawn((
                         DescriptionDot { work_block_id: id },
                         Text2d::new("·"),
-                        TextFont { font_size: 14.0, ..default() },
+                        TextFont {
+                            font_size: 14.0,
+                            ..default()
+                        },
                         TextColor(Color::srgba(1.0, 1.0, 1.0, 0.7)),
                         Anchor::TOP_RIGHT,
                         Transform::from_xyz(width * 0.5 - 2.0, BLOCK_HEIGHT * 0.5 - 1.0, 0.2),
@@ -296,8 +315,10 @@ pub fn sync_description_dots(
         return;
     }
 
-    let existing_dots: HashMap<WorkBlockId, Entity> =
-        dot_q.iter().map(|(e, dot)| (dot.work_block_id, e)).collect();
+    let existing_dots: HashMap<WorkBlockId, Entity> = dot_q
+        .iter()
+        .map(|(e, dot)| (dot.work_block_id, e))
+        .collect();
 
     for (&id, &sprite_entity) in &sprite_map.entities {
         let Some(wb) = model.work_blocks.get(&id) else {
@@ -312,7 +333,10 @@ pub fn sync_description_dots(
                     parent.spawn((
                         DescriptionDot { work_block_id: id },
                         Text2d::new("·"),
-                        TextFont { font_size: 14.0, ..default() },
+                        TextFont {
+                            font_size: 14.0,
+                            ..default()
+                        },
                         TextColor(Color::srgba(1.0, 1.0, 1.0, 0.7)),
                         Anchor::TOP_RIGHT,
                         Transform::from_xyz(width * 0.5 - 2.0, BLOCK_HEIGHT * 0.5 - 1.0, 0.2),
@@ -343,7 +367,13 @@ pub fn sync_block_sprites(
     let ortho_scale = camera_q
         .single()
         .ok()
-        .and_then(|p| if let Projection::Orthographic(o) = p { Some(o.scale) } else { None })
+        .and_then(|p| {
+            if let Projection::Orthographic(o) = p {
+                Some(o.scale)
+            } else {
+                None
+            }
+        })
         .unwrap_or(1.0);
     let min_width = 8.0 * ortho_scale;
 
@@ -419,11 +449,17 @@ pub fn sync_compare_overlays(
         commands.entity(entity).despawn();
     }
 
-    let Some(cmp_id) = compare_state.compare_plan_id else { return };
-    let Some(cmp_plan) = model.plans.get(&cmp_id).cloned() else { return };
+    let Some(cmp_id) = compare_state.compare_plan_id else {
+        return;
+    };
+    let Some(cmp_plan) = model.plans.get(&cmp_id).cloned() else {
+        return;
+    };
 
     let cmp_graph = graph::build_graph(&model, &cmp_plan);
-    let Ok(cmp_sched) = schedule::forward_pass(&model, &cmp_plan, &cmp_graph) else { return };
+    let Ok(cmp_sched) = schedule::forward_pass(&model, &cmp_plan, &cmp_graph) else {
+        return;
+    };
 
     // Build id → row from the active plan's current block sprites.
     let id_to_row: HashMap<WorkBlockId, i32> = block_sprites
@@ -508,11 +544,24 @@ fn fit_label(full_name: &str, block_world_w: f32, scale: f32) -> Option<String> 
 pub fn sync_block_labels(
     cam_q: Query<&Projection, With<Camera2d>>,
     model: Res<model::Model>,
-    mut label_q: Query<(&BlockLabel, &mut Text2d, &mut Visibility, &mut Transform), Without<BlockLabelShadow>>,
-    mut shadow_q: Query<(&BlockLabelShadow, &mut Text2d, &mut Visibility, &mut Transform), Without<BlockLabel>>,
+    mut label_q: Query<
+        (&BlockLabel, &mut Text2d, &mut Visibility, &mut Transform),
+        Without<BlockLabelShadow>,
+    >,
+    mut shadow_q: Query<
+        (
+            &BlockLabelShadow,
+            &mut Text2d,
+            &mut Visibility,
+            &mut Transform,
+        ),
+        Without<BlockLabel>,
+    >,
 ) {
     let Ok(proj) = cam_q.single() else { return };
-    let Projection::Orthographic(ortho) = proj else { return };
+    let Projection::Orthographic(ortho) = proj else {
+        return;
+    };
     let scale = ortho.scale;
 
     let block_width = |id: &WorkBlockId| -> f32 {
@@ -616,8 +665,13 @@ pub fn handle_block_selection(
             _ => None,
         })
         .unwrap_or(1.0);
-    if crate::branch_plan_at_x(&model, active_schedule.plan_id, world_pos.x, 6.0 * marker_scale)
-        .is_some()
+    if crate::branch_plan_at_x(
+        &model,
+        active_schedule.plan_id,
+        world_pos.x,
+        6.0 * marker_scale,
+    )
+    .is_some()
     {
         return;
     }
@@ -645,14 +699,24 @@ pub fn handle_block_selection(
         // Reset so a later empty-space click doesn't inherit a stale timestamp.
         *last_empty_click = 0.0;
         // Re-clicking the selected block toggles it off; otherwise select it.
-        selected.0 = if Some(id) == selected.0 { None } else { Some(id) };
+        selected.0 = if Some(id) == selected.0 {
+            None
+        } else {
+            Some(id)
+        };
         selected_dep.0 = None;
     } else {
         // A dependency edge under the cursor takes priority — select it (for delete).
         let scale = cam_proj
             .single()
             .ok()
-            .and_then(|p| if let Projection::Orthographic(o) = p { Some(o.scale) } else { None })
+            .and_then(|p| {
+                if let Projection::Orthographic(o) = p {
+                    Some(o.scale)
+                } else {
+                    None
+                }
+            })
             .unwrap_or(1.0);
         if let Some(dep_id) = nearest_dep_edge(&model, world_pos, 7.0 * scale) {
             selected_dep.0 = Some(dep_id);
@@ -675,13 +739,7 @@ pub fn handle_block_selection(
                 .and_then(|p| p.branch_start_day)
                 .unwrap_or(0);
             let start_day = raw_start.max(branch_min);
-            let est = Estimate {
-                most_likely: 1,
-                optimistic: 1,
-                pessimistic: 2,
-                confidence: 0.8,
-            };
-            let new_id = model.create_work_block("New Block", est);
+            let new_id = model.create_work_block("New Block");
             // Spawn at the double-clicked lane; the block stays where you put it.
             let row = (-world_pos.y / ROW_HEIGHT).round() as i32;
             if let Some(wb) = model.work_blocks.get_mut(&new_id) {
@@ -756,7 +814,9 @@ pub fn handle_block_resize(
     }
 
     let Ok(window) = windows.single() else { return };
-    let Ok((camera, camera_transform)) = camera.single() else { return };
+    let Ok((camera, camera_transform)) = camera.single() else {
+        return;
+    };
     let Some(cursor_pos) = window.cursor_position() else {
         resize.dragging = None;
         return;
@@ -769,7 +829,9 @@ pub fn handle_block_resize(
     if mouse.just_pressed(MouseButton::Left) {
         resize.dragging = None;
         for (block_sprite, transform, sprite) in &block_query {
-            let Some(size) = sprite.custom_size else { continue };
+            let Some(size) = sprite.custom_size else {
+                continue;
+            };
             let center = transform.translation.truncate();
             let half = size * 0.5;
             let right_x = center.x + half.x;
@@ -788,8 +850,9 @@ pub fn handle_block_resize(
     if mouse.pressed(MouseButton::Left) {
         if let Some(id) = resize.dragging {
             if let Some(wb) = model.work_blocks.get_mut(&id) {
-                let raw_dur =
-                    ((world_pos.x - wb.start_day as f32 * PIXELS_PER_DAY) / PIXELS_PER_DAY).max(1.0);
+                let raw_dur = ((world_pos.x - wb.start_day as f32 * PIXELS_PER_DAY)
+                    / PIXELS_PER_DAY)
+                    .max(1.0);
                 wb.duration_days = raw_dur.round() as Day;
             }
         }
@@ -861,7 +924,9 @@ pub fn handle_block_drag(
             return;
         }
         for (block_sprite, transform, sprite) in &block_query {
-            let Some(size) = sprite.custom_size else { continue };
+            let Some(size) = sprite.custom_size else {
+                continue;
+            };
             let center = transform.translation.truncate();
             let half = size * 0.5;
             if world_pos.x >= center.x - half.x
@@ -918,7 +983,6 @@ pub fn handle_block_drag(
     }
 }
 
-
 // ── Past-portion overlay ──────────────────────────────────────────────────────
 
 /// Reconciliation key for the dark overlay covering the past portion of a block
@@ -942,10 +1006,8 @@ pub fn sync_past_overlays(
         return;
     }
 
-    let existing: HashMap<PastPortionOverlay, Entity> = overlay_q
-        .iter()
-        .map(|(e, k, _, _)| (*k, e))
-        .collect();
+    let existing: HashMap<PastPortionOverlay, Entity> =
+        overlay_q.iter().map(|(e, k, _, _)| (*k, e)).collect();
 
     struct Overlay {
         key: PastPortionOverlay,
@@ -955,7 +1017,9 @@ pub fn sync_past_overlays(
     let mut desired: Vec<Overlay> = Vec::new();
 
     for &id in &visible_blocks.ids {
-        let Some(wb) = model.work_blocks.get(&id) else { continue };
+        let Some(wb) = model.work_blocks.get(&id) else {
+            continue;
+        };
         let end_day = wb.start_day + wb.duration_days;
         if wb.start_day >= today.day || end_day <= today.day {
             continue;
@@ -982,7 +1046,11 @@ pub fn sync_past_overlays(
         } else {
             commands.spawn((
                 ov.key,
-                Sprite { color: overlay_color, custom_size: Some(ov.size), ..default() },
+                Sprite {
+                    color: overlay_color,
+                    custom_size: Some(ov.size),
+                    ..default()
+                },
                 Transform::from_translation(ov.pos),
             ));
         }
@@ -1013,11 +1081,19 @@ pub fn draw_block_borders(
     let scale = cam_q
         .single()
         .ok()
-        .and_then(|p| if let Projection::Orthographic(o) = p { Some(o.scale) } else { None })
+        .and_then(|p| {
+            if let Projection::Orthographic(o) = p {
+                Some(o.scale)
+            } else {
+                None
+            }
+        })
         .unwrap_or(1.0);
 
     for (bs, transform, sprite) in &block_q {
-        let Some(wb) = model.work_blocks.get(&bs.work_block_id) else { continue };
+        let Some(wb) = model.work_blocks.get(&bs.work_block_id) else {
+            continue;
+        };
 
         let (rings, color) = match wb.priority {
             0 => continue,
@@ -1026,7 +1102,9 @@ pub fn draw_block_borders(
             _ => (3usize, Color::from(LinearRgba::new(3.0, 2.2, 0.4, 1.0))),
         };
 
-        let Some(size) = sprite.custom_size else { continue };
+        let Some(size) = sprite.custom_size else {
+            continue;
+        };
         let center = transform.translation.truncate();
 
         for i in 0..rings {
@@ -1098,7 +1176,13 @@ pub fn draw_dependency_edges(
     let ortho_scale = cam_proj
         .single()
         .ok()
-        .and_then(|p| if let Projection::Orthographic(o) = p { Some(o.scale) } else { None })
+        .and_then(|p| {
+            if let Projection::Orthographic(o) = p {
+                Some(o.scale)
+            } else {
+                None
+            }
+        })
         .unwrap_or(1.0);
 
     // Fade edges between LOD_FAR_MIN and LOD_DEP_HIDE; skip entirely beyond LOD_DEP_HIDE.
@@ -1110,7 +1194,8 @@ pub fn draw_dependency_edges(
 
     if edge_alpha > 0.0 {
         for (dep_id, dep) in &model.dependencies {
-            let (Some(pg), Some(sg)) = (geom.get(&dep.predecessor), geom.get(&dep.successor)) else {
+            let (Some(pg), Some(sg)) = (geom.get(&dep.predecessor), geom.get(&dep.successor))
+            else {
                 continue;
             };
 
@@ -1255,9 +1340,15 @@ pub fn draw_block_handles(
     camera: Query<(&Camera, &GlobalTransform)>,
 ) {
     let Ok(window) = windows.single() else { return };
-    let Ok((cam, cam_tr)) = camera.single() else { return };
-    let Some(cursor) = window.cursor_position() else { return };
-    let Ok(world_pos) = cam.viewport_to_world_2d(cam_tr, cursor) else { return };
+    let Ok((cam, cam_tr)) = camera.single() else {
+        return;
+    };
+    let Some(cursor) = window.cursor_position() else {
+        return;
+    };
+    let Ok(world_pos) = cam.viewport_to_world_2d(cam_tr, cursor) else {
+        return;
+    };
 
     // One subtle connector dot; brightens slightly (no white, no big grow) when
     // hovered or while it's the drag source.
@@ -1265,7 +1356,9 @@ pub fn draw_block_handles(
     let dot_hi = Color::srgba(0.80, 0.86, 0.98, 0.95);
 
     for &id in &visible_blocks.ids {
-        let Some(wb) = model.work_blocks.get(&id) else { continue };
+        let Some(wb) = model.work_blocks.get(&id) else {
+            continue;
+        };
         if wb.duration_days <= 0 {
             continue;
         }
@@ -1277,9 +1370,7 @@ pub fn draw_block_handles(
         let is_source = drag.from == Some(wb.id);
 
         // Show the handle when hovering this block or while it's the drag source.
-        let in_block = world_pos.x >= xl
-            && world_pos.x <= xr
-            && (world_pos.y - y).abs() <= half_h;
+        let in_block = world_pos.x >= xl && world_pos.x <= xr && (world_pos.y - y).abs() <= half_h;
         if !in_block && !is_source {
             continue;
         }
@@ -1391,9 +1482,15 @@ pub fn handle_dep_drag(
     }
 
     let Ok(window) = windows.single() else { return };
-    let Ok((cam, cam_tr)) = camera.single() else { return };
-    let Some(cursor) = window.cursor_position() else { return };
-    let Ok(world_pos) = cam.viewport_to_world_2d(cam_tr, cursor) else { return };
+    let Ok((cam, cam_tr)) = camera.single() else {
+        return;
+    };
+    let Some(cursor) = window.cursor_position() else {
+        return;
+    };
+    let Ok(world_pos) = cam.viewport_to_world_2d(cam_tr, cursor) else {
+        return;
+    };
 
     // Returns the block under `pos` and whether `pos` is in its right (finish) half.
     let block_at = |pos: Vec2| -> Option<(WorkBlockId, bool)> {
@@ -1516,8 +1613,12 @@ pub fn handle_name_edit(
     }
 
     let Ok(window) = windows.single() else { return };
-    let Ok((camera, camera_transform)) = camera.single() else { return };
-    let Some(cursor_pos) = window.cursor_position() else { return };
+    let Ok((camera, camera_transform)) = camera.single() else {
+        return;
+    };
+    let Some(cursor_pos) = window.cursor_position() else {
+        return;
+    };
     let Ok(world_pos) = camera.viewport_to_world_2d(camera_transform, cursor_pos) else {
         return;
     };
@@ -1528,7 +1629,9 @@ pub fn handle_name_edit(
     // If the block has variants → drill into its children.
     // If the block has no variants → enter inline name-edit mode.
     for (block_sprite, transform, sprite) in &block_query {
-        let Some(size) = sprite.custom_size else { continue };
+        let Some(size) = sprite.custom_size else {
+            continue;
+        };
         let center = transform.translation.truncate();
         let half = size * 0.5;
         if world_pos.x >= center.x - half.x
@@ -1576,10 +1679,16 @@ pub fn draw_name_edit_overlay(
     block_query: Query<(&BlockSprite, &Transform)>,
     keys: Res<ButtonInput<KeyCode>>,
 ) {
-    let Some(edit_id) = name_edit.editing else { return };
+    let Some(edit_id) = name_edit.editing else {
+        return;
+    };
 
-    let Ok(_window) = windows.single() else { return };
-    let Ok((camera, camera_transform)) = camera.single() else { return };
+    let Ok(_window) = windows.single() else {
+        return;
+    };
+    let Ok((camera, camera_transform)) = camera.single() else {
+        return;
+    };
 
     // Locate the block sprite's screen position to anchor the overlay.
     let mut screen_pos = egui::pos2(50.0, 200.0);
@@ -1704,8 +1813,12 @@ fn build_deletion_snapshot(model: &model::Model, id: WorkBlockId) -> DeletedBloc
     let mut plan_sel_vars = Vec::new();
     let mut plan_allocs = Vec::new();
     for (&plan_id, plan) in &model.plans {
-        let roots: Vec<WorkBlockId> =
-            plan.root_blocks.iter().filter(|&&b| delete_set.contains(&b)).copied().collect();
+        let roots: Vec<WorkBlockId> = plan
+            .root_blocks
+            .iter()
+            .filter(|&&b| delete_set.contains(&b))
+            .copied()
+            .collect();
         if !roots.is_empty() {
             plan_roots.push((plan_id, roots));
         }
@@ -1743,7 +1856,11 @@ fn build_deletion_snapshot(model: &model::Model, id: WorkBlockId) -> DeletedBloc
                 .filter(|&&b| delete_set.contains(&b))
                 .copied()
                 .collect();
-            if refs.is_empty() { None } else { Some((vid, refs)) }
+            if refs.is_empty() {
+                None
+            } else {
+                Some((vid, refs))
+            }
         })
         .collect();
 
@@ -1787,10 +1904,9 @@ fn restore_deletion_snapshot(model: &mut model::Model, snap: DeletedBlockSnapsho
     for (plan_id, allocs) in snap.plan_allocs {
         if let Some(plan) = model.plans.get_mut(&plan_id) {
             for alloc in allocs {
-                let already = plan
-                    .allocations
-                    .iter()
-                    .any(|a| a.work_block_id == alloc.work_block_id && a.resource_id == alloc.resource_id);
+                let already = plan.allocations.iter().any(|a| {
+                    a.work_block_id == alloc.work_block_id && a.resource_id == alloc.resource_id
+                });
                 if !already {
                     plan.allocations.push(alloc);
                 }
@@ -1920,30 +2036,28 @@ pub fn delete_work_block(model: &mut model::Model, id: WorkBlockId) {
         for &del_id in &to_delete {
             plan.selected_variants.remove(&del_id);
         }
-        plan.allocations.retain(|a| !delete_set.contains(&a.work_block_id));
+        plan.allocations
+            .retain(|a| !delete_set.contains(&a.work_block_id));
     }
     // Remove deleted IDs from surviving variants' children lists before
     // removing the variants themselves, so the retain below is consistent.
     for variant in model.variants.values_mut() {
         variant.children.retain(|bid| !delete_set.contains(bid));
     }
-    model.variants.retain(|_, v| !delete_set.contains(&v.parent));
+    model
+        .variants
+        .retain(|_, v| !delete_set.contains(&v.parent));
 }
-
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{Estimate, Model};
-
-    fn est() -> Estimate {
-        Estimate { most_likely: 5, optimistic: 3, pessimistic: 8, confidence: 0.8 }
-    }
+    use crate::model::Model;
 
     #[test]
     fn delete_simple_block_removes_it() {
         let mut m = Model::default();
-        let a = m.create_work_block("A", est());
+        let a = m.create_work_block("A");
         delete_work_block(&mut m, a);
         assert!(!m.work_blocks.contains_key(&a));
     }
@@ -1951,9 +2065,9 @@ mod tests {
     #[test]
     fn delete_block_with_variants_removes_children() {
         let mut m = Model::default();
-        let parent = m.create_work_block("P", est());
+        let parent = m.create_work_block("P");
         let var = m.create_variant("V", parent);
-        let child = m.create_work_block("C", est());
+        let child = m.create_work_block("C");
         m.work_blocks.get_mut(&parent).unwrap().variants.push(var);
         m.variants.get_mut(&var).unwrap().children.push(child);
 
@@ -1967,9 +2081,8 @@ mod tests {
     #[test]
     fn delete_block_cleans_plan_root_and_allocations() {
         let mut m = Model::default();
-        let wid = m.create_world("w");
-        let pid = m.create_plan("p", wid, None);
-        let a = m.create_work_block("A", est());
+        let pid = m.create_plan("p", None);
+        let a = m.create_work_block("A");
         m.plans.get_mut(&pid).unwrap().root_blocks.push(a);
 
         delete_work_block(&mut m, a);
@@ -1981,8 +2094,8 @@ mod tests {
     fn delete_block_removes_its_dependencies() {
         use crate::model::DependencyType;
         let mut m = Model::default();
-        let a = m.create_work_block("A", est());
-        let b = m.create_work_block("B", est());
+        let a = m.create_work_block("A");
+        let b = m.create_work_block("B");
         let dep = m.create_dependency(a, b, DependencyType::FinishToStart);
 
         delete_work_block(&mut m, a);
@@ -1994,11 +2107,11 @@ mod tests {
     #[test]
     fn delete_recursive_two_levels() {
         let mut m = Model::default();
-        let parent = m.create_work_block("P", est());
+        let parent = m.create_work_block("P");
         let var = m.create_variant("V", parent);
-        let child = m.create_work_block("C", est());
+        let child = m.create_work_block("C");
         let var2 = m.create_variant("V2", child);
-        let grandchild = m.create_work_block("GC", est());
+        let grandchild = m.create_work_block("GC");
         m.work_blocks.get_mut(&parent).unwrap().variants.push(var);
         m.variants.get_mut(&var).unwrap().children.push(child);
         m.work_blocks.get_mut(&child).unwrap().variants.push(var2);
@@ -2011,7 +2124,6 @@ mod tests {
         assert!(!m.work_blocks.contains_key(&grandchild));
         assert!(m.variants.is_empty());
     }
-
 }
 
 /// State for rapid block creation mode (activated with `N`).
@@ -2104,9 +2216,7 @@ pub fn draw_create_mode_overlay(
             response.request_focus();
             if response.has_focus() {
                 let plain_enter = ui.input(|i| {
-                    i.key_pressed(egui::Key::Enter)
-                        && !i.modifiers.ctrl
-                        && !i.modifiers.command
+                    i.key_pressed(egui::Key::Enter) && !i.modifiers.ctrl && !i.modifiers.command
                 });
                 if plain_enter {
                     if state.text_buf.ends_with('\n') {
@@ -2123,13 +2233,7 @@ pub fn draw_create_mode_overlay(
     if create_block {
         let name = state.text_buf.trim().to_string();
         if !name.is_empty() {
-            let est = Estimate {
-                most_likely: 1,
-                optimistic: 1,
-                pessimistic: 2,
-                confidence: 0.8,
-            };
-            let new_id = model.create_work_block(name, est);
+            let new_id = model.create_work_block(name);
             let plan_id = active_schedule.plan_id;
             // Place the new block at branch_min so it appears immediately on the timeline.
             // For baseline plans (branch_start_day=None) branch_min is 0.0 — day 0 is the
@@ -2171,8 +2275,8 @@ pub fn draw_create_mode_overlay(
 }
 
 /// Shows a stats tooltip when the pointer hovers over a block sprite.
-/// Displays start day, end day, duration, estimate range, and (if set) the
-/// block's description. Renders an egui Area near the cursor.
+/// Displays start day, end day, duration, and (if set) the block's
+/// description. Renders an egui Area near the cursor.
 pub fn draw_block_tooltip(
     mut egui_ctx: EguiContexts,
     model: Res<model::Model>,
@@ -2185,12 +2289,20 @@ pub fn draw_block_tooltip(
         return;
     }
     let Ok(window) = windows.single() else { return };
-    let Ok((cam, cam_transform)) = camera.single() else { return };
-    let Some(cursor_pos) = window.cursor_position() else { return };
-    let Ok(world_pos) = cam.viewport_to_world_2d(cam_transform, cursor_pos) else { return };
+    let Ok((cam, cam_transform)) = camera.single() else {
+        return;
+    };
+    let Some(cursor_pos) = window.cursor_position() else {
+        return;
+    };
+    let Ok(world_pos) = cam.viewport_to_world_2d(cam_transform, cursor_pos) else {
+        return;
+    };
 
     for (block_sprite, transform, sprite) in &block_q {
-        let Some(size) = sprite.custom_size else { continue };
+        let Some(size) = sprite.custom_size else {
+            continue;
+        };
         let center = transform.translation.truncate();
         let half = size * 0.5;
         if world_pos.x >= center.x - half.x
@@ -2198,10 +2310,13 @@ pub fn draw_block_tooltip(
             && world_pos.y >= center.y - half.y
             && world_pos.y <= center.y + half.y
         {
-            let Some(wb) = model.work_blocks.get(&block_sprite.work_block_id) else { continue };
-            let Some(screen_pos) = ctx.pointer_hover_pos() else { return };
+            let Some(wb) = model.work_blocks.get(&block_sprite.work_block_id) else {
+                continue;
+            };
+            let Some(screen_pos) = ctx.pointer_hover_pos() else {
+                return;
+            };
             let end_day = wb.start_day + wb.duration_days;
-            let est = &wb.estimate;
             egui::Area::new(egui::Id::new("block_stats_tooltip"))
                 .order(egui::Order::Tooltip)
                 .fixed_pos(screen_pos + egui::Vec2::new(14.0, 14.0))
@@ -2222,12 +2337,6 @@ pub fn draw_block_tooltip(
                                 ui.end_row();
                                 ui.label("Duration:");
                                 ui.label(format!("{:.1} days", wb.duration_days));
-                                ui.end_row();
-                                ui.label("Estimate:");
-                                ui.label(format!(
-                                    "opt {:.1} / ml {:.1} / pess {:.1}",
-                                    est.optimistic, est.most_likely, est.pessimistic
-                                ));
                                 ui.end_row();
                             });
                         if !wb.description.is_empty() {
@@ -2276,7 +2385,11 @@ pub fn handle_size_picker_hotkey(
     if keyboard.just_pressed(KeyCode::KeyS) {
         if let Some(id) = selected.0 {
             // Toggle on the selected block.
-            picker.target = if picker.target == Some(id) { None } else { Some(id) };
+            picker.target = if picker.target == Some(id) {
+                None
+            } else {
+                Some(id)
+            };
             picker.settings_open = false;
         }
     }
@@ -2396,7 +2509,11 @@ pub fn draw_size_settings_popup(
                         changed = true;
                     }
                     if ui
-                        .add(egui::DragValue::new(&mut size.days).range(1..=400).suffix(" d"))
+                        .add(
+                            egui::DragValue::new(&mut size.days)
+                                .range(1..=400)
+                                .suffix(" d"),
+                        )
                         .changed()
                     {
                         changed = true;

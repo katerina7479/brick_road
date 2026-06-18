@@ -83,11 +83,7 @@ pub fn sorted_blocks(model: &Model) -> Vec<&WorkBlock> {
         .values()
         .filter(|wb| wb.duration_days > 0)
         .collect();
-    blocks.sort_by(|a, b| {
-        a.start_day
-            .cmp(&b.start_day)
-            .then(a.id.0.cmp(&b.id.0))
-    });
+    blocks.sort_by(|a, b| a.start_day.cmp(&b.start_day).then(a.id.0.cmp(&b.id.0)));
     blocks
 }
 
@@ -124,11 +120,7 @@ pub struct ViewScope {
 pub fn visible_blocks<'a>(model: &'a Model, scope: &ViewScope) -> Vec<&'a WorkBlock> {
     let sorted = |children: Vec<&'a WorkBlock>| {
         let mut v = children;
-        v.sort_by(|a, b| {
-            a.start_day
-                .cmp(&b.start_day)
-                .then(a.id.0.cmp(&b.id.0))
-        });
+        v.sort_by(|a, b| a.start_day.cmp(&b.start_day).then(a.id.0.cmp(&b.id.0)));
         v
     };
 
@@ -256,14 +248,16 @@ pub fn cascade_dependencies(model: &mut Model, root: WorkBlockId) {
     let mut incoming: HashMap<WorkBlockId, Vec<(WorkBlockId, DependencyType, Day)>> =
         HashMap::new();
     for dep in model.dependencies.values() {
-        outgoing
-            .entry(dep.predecessor)
-            .or_default()
-            .push((dep.successor, dep.dependency_type, dep.lag));
-        incoming
-            .entry(dep.successor)
-            .or_default()
-            .push((dep.predecessor, dep.dependency_type, dep.lag));
+        outgoing.entry(dep.predecessor).or_default().push((
+            dep.successor,
+            dep.dependency_type,
+            dep.lag,
+        ));
+        incoming.entry(dep.successor).or_default().push((
+            dep.predecessor,
+            dep.dependency_type,
+            dep.lag,
+        ));
     }
 
     // BFS to collect all transitively reachable successors of root.
@@ -291,8 +285,7 @@ pub fn cascade_dependencies(model: &mut Model, root: WorkBlockId) {
 
     // Topological sort of the reachable subgraph via Kahn's algorithm.
     // In-degrees count only edges between reachable nodes (root excluded).
-    let mut in_deg: HashMap<WorkBlockId, usize> =
-        reachable.iter().map(|&id| (id, 0)).collect();
+    let mut in_deg: HashMap<WorkBlockId, usize> = reachable.iter().map(|&id| (id, 0)).collect();
     for &id in &reachable {
         if let Some(succs) = outgoing.get(&id) {
             for &(s, _, _) in succs {
@@ -359,7 +352,7 @@ pub fn cascade_dependencies(model: &mut Model, root: WorkBlockId) {
 }
 
 /// Compute unconstrained earliest start/end for every active block (Demand
-/// Planning mode, PRD §6.1). Uses most-likely estimates; no resource
+/// Planning mode, PRD §6.1). Uses each block's `duration_days`; no resource
 /// constraints are applied.
 ///
 /// Dependency semantics (P = predecessor, S = successor, lag in days):
@@ -377,8 +370,7 @@ pub fn forward_pass(
     let order = crate::graph::topological_sort(graph)?;
 
     // Lower bound on start day from FS/SS edges.
-    let mut min_start: HashMap<WorkBlockId, Day> =
-        graph.nodes.iter().map(|&id| (id, 0)).collect();
+    let mut min_start: HashMap<WorkBlockId, Day> = graph.nodes.iter().map(|&id| (id, 0)).collect();
     // Lower bound on end day from FF/SF edges.
     let mut min_end: HashMap<WorkBlockId, Option<Day>> =
         graph.nodes.iter().map(|&id| (id, None)).collect();
@@ -389,7 +381,7 @@ pub fn forward_pass(
         let dur = model
             .work_blocks
             .get(&id)
-            .map(|wb| wb.estimate.most_likely)
+            .map(|wb| wb.duration_days)
             .unwrap_or(0);
 
         let es_from_start = *min_start.get(&id).unwrap_or(&0);
@@ -657,7 +649,7 @@ pub fn analyze_user_placement(
 ///
 /// Resource demand comes from `plan.allocations`; capacity comes from
 /// `ResourceBlock::availability` (gaps in the timeline are treated as factor 1.0).
-/// Uses most-likely estimates.
+/// Uses each block's `duration_days`.
 ///
 /// Returns `Err(CycleError)` if the dependency graph contains a cycle.
 pub fn resource_leveled_pass(
@@ -705,7 +697,7 @@ pub fn resource_leveled_pass(
         let dur = model
             .work_blocks
             .get(&id)
-            .map(|wb| wb.estimate.most_likely)
+            .map(|wb| wb.duration_days)
             .unwrap_or(0);
 
         // Step 1: dependency-constrained minimum start (snapped to day boundary).
@@ -869,17 +861,27 @@ fn feasible_at(
         if let Some(si) = si {
             // Binary search: only intervals starting before window_end can overlap the window.
             for &(is, ie, _) in si.with_start_before(window_end) {
-                if is > t && is < window_end { pts.push(is); }
-                if ie > t && ie < window_end { pts.push(ie); }
+                if is > t && is < window_end {
+                    pts.push(is);
+                }
+                if ie > t && ie < window_end {
+                    pts.push(ie);
+                }
             }
         }
         if let Some(segs) = resource_blocks.get(&rb_id) {
             // Segments are sorted; skip those that end before the window starts.
             let lo = segs.partition_point(|seg| seg.end <= t);
             for seg in &segs[lo..] {
-                if seg.start >= window_end { break; }
-                if seg.start > t { pts.push(seg.start); }
-                if seg.end > t && seg.end < window_end { pts.push(seg.end); }
+                if seg.start >= window_end {
+                    break;
+                }
+                if seg.start > t {
+                    pts.push(seg.start);
+                }
+                if seg.end > t && seg.end < window_end {
+                    pts.push(seg.end);
+                }
             }
         }
         pts.sort();
@@ -986,15 +988,13 @@ impl SortedIntervals {
 mod tests {
     use super::*;
     use crate::graph::build_graph;
-    use crate::model::{Estimate, Model};
+    use crate::model::Model;
 
-    fn est(days: Day) -> Estimate {
-        Estimate {
-            most_likely: days,
-            optimistic: days,
-            pessimistic: days,
-            confidence: 1.0,
-        }
+    /// Create a work block with the given duration (the field the scheduler reads).
+    fn mk(m: &mut Model, name: &str, dur: Day) -> WorkBlockId {
+        let id = m.create_work_block(name);
+        m.work_blocks.get_mut(&id).unwrap().duration_days = dur;
+        id
     }
 
     /// Build a schedule from the model using the given root blocks.
@@ -1008,15 +1008,14 @@ mod tests {
 
     fn base() -> (Model, crate::model::PlanId) {
         let mut m = Model::default();
-        let wid = m.create_world("w");
-        let pid = m.create_plan("p", wid, None);
+        let pid = m.create_plan("p", None);
         (m, pid)
     }
 
     #[test]
     fn single_block_starts_at_zero() {
         let (mut m, _) = base();
-        let a = m.create_work_block("A", est(5));
+        let a = mk(&mut m, "A", 5);
         let s = run(&m, vec![a]);
         let b = &s.blocks[&a];
         assert_eq!(b.start_day, 0);
@@ -1029,8 +1028,8 @@ mod tests {
     fn finish_to_start_chain() {
         // A(3) --FS--> B(2): B.start=3, B.end=5
         let (mut m, _) = base();
-        let a = m.create_work_block("A", est(3));
-        let b = m.create_work_block("B", est(2));
+        let a = mk(&mut m, "A", 3);
+        let b = mk(&mut m, "B", 2);
         m.create_dependency(a, b, DependencyType::FinishToStart);
         let s = run(&m, vec![a, b]);
         assert_eq!(s.blocks[&a].start_day, 0);
@@ -1044,8 +1043,8 @@ mod tests {
     fn finish_to_start_with_lag() {
         // A(3) --FS+2--> B(2): B.start ≥ 3+2=5
         let (mut m, _) = base();
-        let a = m.create_work_block("A", est(3));
-        let b = m.create_work_block("B", est(2));
+        let a = mk(&mut m, "A", 3);
+        let b = mk(&mut m, "B", 2);
         let dep = m.create_dependency(a, b, DependencyType::FinishToStart);
         m.dependencies.get_mut(&dep).unwrap().lag = 2;
         let s = run(&m, vec![a, b]);
@@ -1057,8 +1056,8 @@ mod tests {
     fn negative_lag_lead() {
         // A(3) --FS-1--> B(2): B.start ≥ 3-1=2
         let (mut m, _) = base();
-        let a = m.create_work_block("A", est(3));
-        let b = m.create_work_block("B", est(2));
+        let a = mk(&mut m, "A", 3);
+        let b = mk(&mut m, "B", 2);
         let dep = m.create_dependency(a, b, DependencyType::FinishToStart);
         m.dependencies.get_mut(&dep).unwrap().lag = -1;
         let s = run(&m, vec![a, b]);
@@ -1069,8 +1068,8 @@ mod tests {
     fn start_to_start() {
         // A(3) --SS--> B(2): B.start ≥ 0 → runs in parallel
         let (mut m, _) = base();
-        let a = m.create_work_block("A", est(3));
-        let b = m.create_work_block("B", est(2));
+        let a = mk(&mut m, "A", 3);
+        let b = mk(&mut m, "B", 2);
         m.create_dependency(a, b, DependencyType::StartToStart);
         let s = run(&m, vec![a, b]);
         assert_eq!(s.blocks[&b].start_day, 0);
@@ -1081,8 +1080,8 @@ mod tests {
     fn start_to_start_with_lag() {
         // A(3) --SS+1--> B(2): B.start ≥ 1
         let (mut m, _) = base();
-        let a = m.create_work_block("A", est(3));
-        let b = m.create_work_block("B", est(2));
+        let a = mk(&mut m, "A", 3);
+        let b = mk(&mut m, "B", 2);
         let dep = m.create_dependency(a, b, DependencyType::StartToStart);
         m.dependencies.get_mut(&dep).unwrap().lag = 1;
         let s = run(&m, vec![a, b]);
@@ -1093,8 +1092,8 @@ mod tests {
     fn finish_to_finish() {
         // A(3) --FF--> B(2): B.end ≥ 3 → B.start=1
         let (mut m, _) = base();
-        let a = m.create_work_block("A", est(3));
-        let b = m.create_work_block("B", est(2));
+        let a = mk(&mut m, "A", 3);
+        let b = mk(&mut m, "B", 2);
         m.create_dependency(a, b, DependencyType::FinishToFinish);
         let s = run(&m, vec![a, b]);
         assert_eq!(s.blocks[&b].start_day, 1);
@@ -1105,8 +1104,8 @@ mod tests {
     fn start_to_finish_with_lag() {
         // A(3) --SF+4--> B(2): B.end ≥ 0+4=4 → B.start=2
         let (mut m, _) = base();
-        let a = m.create_work_block("A", est(3));
-        let b = m.create_work_block("B", est(2));
+        let a = mk(&mut m, "A", 3);
+        let b = mk(&mut m, "B", 2);
         let dep = m.create_dependency(a, b, DependencyType::StartToFinish);
         m.dependencies.get_mut(&dep).unwrap().lag = 4;
         let s = run(&m, vec![a, b]);
@@ -1118,9 +1117,9 @@ mod tests {
     fn multiple_predecessors_latest_wins() {
         // A(5) --FS--> C(1)  and  B(3) --FS--> C(1): C.start = max(5,3) = 5
         let (mut m, _) = base();
-        let a = m.create_work_block("A", est(5));
-        let b = m.create_work_block("B", est(3));
-        let c = m.create_work_block("C", est(1));
+        let a = mk(&mut m, "A", 5);
+        let b = mk(&mut m, "B", 3);
+        let c = mk(&mut m, "C", 1);
         m.create_dependency(a, c, DependencyType::FinishToStart);
         m.create_dependency(b, c, DependencyType::FinishToStart);
         let s = run(&m, vec![a, b, c]);
@@ -1132,9 +1131,9 @@ mod tests {
     fn critical_path_linear_chain() {
         // A --FS--> B --FS--> C: critical path is [A, B, C]
         let (mut m, _) = base();
-        let a = m.create_work_block("A", est(2));
-        let b = m.create_work_block("B", est(3));
-        let c = m.create_work_block("C", est(1));
+        let a = mk(&mut m, "A", 2);
+        let b = mk(&mut m, "B", 3);
+        let c = mk(&mut m, "C", 1);
         m.create_dependency(a, b, DependencyType::FinishToStart);
         m.create_dependency(b, c, DependencyType::FinishToStart);
         let s = run(&m, vec![a, b, c]);
@@ -1147,9 +1146,9 @@ mod tests {
         // B(5) --FS--> C(1)
         // C's critical predecessor is B (longer).
         let (mut m, _) = base();
-        let a = m.create_work_block("A", est(1));
-        let b = m.create_work_block("B", est(5));
-        let c = m.create_work_block("C", est(1));
+        let a = mk(&mut m, "A", 1);
+        let b = mk(&mut m, "B", 5);
+        let c = mk(&mut m, "C", 1);
         m.create_dependency(a, c, DependencyType::FinishToStart);
         m.create_dependency(b, c, DependencyType::FinishToStart);
         let s = run(&m, vec![a, b, c]);
@@ -1175,7 +1174,7 @@ mod tests {
     #[test]
     fn float_single_block_is_zero() {
         let (mut m, _) = base();
-        let a = m.create_work_block("A", est(5));
+        let a = mk(&mut m, "A", 5);
         let (_, ana) = analyze(&m, vec![a]);
         assert_eq!(*ana.float.get(&a).unwrap(), 0);
         assert_eq!(ana.critical_path, vec![a]);
@@ -1185,9 +1184,9 @@ mod tests {
     fn float_linear_chain_all_zero() {
         // A(3) --FS--> B(2) --FS--> C(1): all float = 0
         let (mut m, _) = base();
-        let a = m.create_work_block("A", est(3));
-        let b = m.create_work_block("B", est(2));
-        let c = m.create_work_block("C", est(1));
+        let a = mk(&mut m, "A", 3);
+        let b = mk(&mut m, "B", 2);
+        let c = mk(&mut m, "C", 1);
         m.create_dependency(a, b, DependencyType::FinishToStart);
         m.create_dependency(b, c, DependencyType::FinishToStart);
         let (_, ana) = analyze(&m, vec![a, b, c]);
@@ -1203,9 +1202,9 @@ mod tests {
         // B(3) --FS--> C(1)
         // B.float = LF_B − EF_B = 5 − 3 = 2
         let (mut m, _) = base();
-        let a = m.create_work_block("A", est(5));
-        let b = m.create_work_block("B", est(3));
-        let c = m.create_work_block("C", est(1));
+        let a = mk(&mut m, "A", 5);
+        let b = mk(&mut m, "B", 3);
+        let c = mk(&mut m, "C", 1);
         m.create_dependency(a, c, DependencyType::FinishToStart);
         m.create_dependency(b, c, DependencyType::FinishToStart);
         let (_, ana) = analyze(&m, vec![a, b, c]);
@@ -1222,8 +1221,8 @@ mod tests {
         // A(3) --FF--> B(2): EF_A=3, ES_B=1, EF_B=3, total=3
         // Backward: LF_B=3, LF_A ≤ LF_B − 0 = 3 → float_A = 3−3 = 0
         let (mut m, _) = base();
-        let a = m.create_work_block("A", est(3));
-        let b = m.create_work_block("B", est(2));
+        let a = mk(&mut m, "A", 3);
+        let b = mk(&mut m, "B", 2);
         m.create_dependency(a, b, DependencyType::FinishToFinish);
         let (_, ana) = analyze(&m, vec![a, b]);
         assert_eq!(*ana.float.get(&a).unwrap(), 0);
@@ -1241,9 +1240,9 @@ mod tests {
         // float_B = 10−10 = 0, float_A = 5−3 = 2, float_C = 10−10 = 0.
         // Critical path: B and C only.
         let (mut m, _) = base();
-        let b = m.create_work_block("B", est(10));
-        let a = m.create_work_block("A", est(3));
-        let c = m.create_work_block("C", est(5));
+        let b = mk(&mut m, "B", 10);
+        let a = mk(&mut m, "A", 3);
+        let c = mk(&mut m, "C", 5);
         m.create_dependency(b, c, DependencyType::FinishToFinish);
         m.create_dependency(a, c, DependencyType::FinishToStart);
         let (_, ana) = analyze(&m, vec![a, b, c]);
@@ -1260,8 +1259,8 @@ mod tests {
         // A(3) --FS+2--> B(2): EF_A=3, ES_B=5, EF_B=7, total=7
         // Backward: LF_B=7, LS_B=5, LF_A ≤ LS_B − 2 = 3 → float_A=3−3=0
         let (mut m, _) = base();
-        let a = m.create_work_block("A", est(3));
-        let b = m.create_work_block("B", est(2));
+        let a = mk(&mut m, "A", 3);
+        let b = mk(&mut m, "B", 2);
         let dep = m.create_dependency(a, b, DependencyType::FinishToStart);
         m.dependencies.get_mut(&dep).unwrap().lag = 2;
         let (_, ana) = analyze(&m, vec![a, b]);
@@ -1297,8 +1296,8 @@ mod tests {
     fn no_constraints_matches_forward_pass() {
         // Without any resource allocations, leveled == unconstrained.
         let (mut m, pid) = base();
-        let a = m.create_work_block("A", est(3));
-        let b = m.create_work_block("B", est(2));
+        let a = mk(&mut m, "A", 3);
+        let b = mk(&mut m, "B", 2);
         m.create_dependency(a, b, DependencyType::FinishToStart);
         let s = run_leveled(&m, pid, vec![a, b]);
         assert_eq!(s.blocks[&a].start_day, 0);
@@ -1310,8 +1309,8 @@ mod tests {
         // A(2) and B(3) both need resource R at full capacity → B can't start until A ends.
         let (mut m, pid) = base();
         let r = m.create_resource_block("R", ResourceType::Person);
-        let a = m.create_work_block("A", est(2));
-        let b = m.create_work_block("B", est(3));
+        let a = mk(&mut m, "A", 2);
+        let b = mk(&mut m, "B", 3);
         {
             let plan = m.plans.get_mut(&pid).unwrap();
             add_alloc(plan, r, a, 1.0);
@@ -1330,8 +1329,8 @@ mod tests {
         // A and B each need 0.5 of resource R (total 1.0 ≤ capacity 1.0) → can run in parallel.
         let (mut m, pid) = base();
         let r = m.create_resource_block("R", ResourceType::Person);
-        let a = m.create_work_block("A", est(3));
-        let b = m.create_work_block("B", est(3));
+        let a = mk(&mut m, "A", 3);
+        let b = mk(&mut m, "B", 3);
         {
             let plan = m.plans.get_mut(&pid).unwrap();
             add_alloc(plan, r, a, 0.5);
@@ -1348,8 +1347,8 @@ mod tests {
         // A needs 0.7, B needs 0.5 → combined 1.2 > 1.0 → must serialize.
         let (mut m, pid) = base();
         let r = m.create_resource_block("R", ResourceType::Person);
-        let a = m.create_work_block("A", est(2));
-        let b = m.create_work_block("B", est(2));
+        let a = mk(&mut m, "A", 2);
+        let b = mk(&mut m, "B", 2);
         {
             let plan = m.plans.get_mut(&pid).unwrap();
             add_alloc(plan, r, a, 0.7);
@@ -1379,7 +1378,7 @@ mod tests {
                 factor: 1.0,
             });
         }
-        let a = m.create_work_block("A", est(2));
+        let a = mk(&mut m, "A", 2);
         {
             let plan = m.plans.get_mut(&pid).unwrap();
             add_alloc(plan, r, a, 1.0);
@@ -1397,9 +1396,9 @@ mod tests {
         // so b starts at 3 — the resource conflict does NOT delay b here.
         let (mut m, pid) = base();
         let r = m.create_resource_block("R", ResourceType::Person);
-        let a = m.create_work_block("A", est(3)); // no resource
-        let b = m.create_work_block("B", est(2)); // needs R
-        let c = m.create_work_block("C", est(3)); // occupies R [3,6)
+        let a = mk(&mut m, "A", 3); // no resource
+        let b = mk(&mut m, "B", 2); // needs R
+        let c = mk(&mut m, "C", 3); // occupies R [3,6)
         m.create_dependency(a, b, DependencyType::FinishToStart);
         {
             let plan = m.plans.get_mut(&pid).unwrap();
@@ -1446,9 +1445,9 @@ mod tests {
                 factor: 1.0,
             });
         }
-        let a = m.create_work_block("A", est(3)); // no resource; creates dep constraint for B
-        let c = m.create_work_block("C", est(3)); // uses R at 0.8 → scheduled [5,8)
-        let b = m.create_work_block("B", est(5)); // needs R at 0.2; dep B.start ≥ 3
+        let a = mk(&mut m, "A", 3); // no resource; creates dep constraint for B
+        let c = mk(&mut m, "C", 3); // uses R at 0.8 → scheduled [5,8)
+        let b = mk(&mut m, "B", 5); // needs R at 0.2; dep B.start ≥ 3
         m.create_dependency(a, b, DependencyType::FinishToStart);
         {
             let plan = m.plans.get_mut(&pid).unwrap();
@@ -1468,9 +1467,9 @@ mod tests {
         // A(1), B(1), C(1) all need R at full capacity → serialize: [0,1), [1,2), [2,3).
         let (mut m, pid) = base();
         let r = m.create_resource_block("R", ResourceType::Person);
-        let a = m.create_work_block("A", est(1));
-        let b = m.create_work_block("B", est(1));
-        let c = m.create_work_block("C", est(1));
+        let a = mk(&mut m, "A", 1);
+        let b = mk(&mut m, "B", 1);
+        let c = mk(&mut m, "C", 1);
         {
             let plan = m.plans.get_mut(&pid).unwrap();
             add_alloc(plan, r, a, 1.0);
@@ -1507,7 +1506,7 @@ mod tests {
     #[test]
     fn user_placement_single_block_zero_float() {
         let (mut m, _) = base();
-        let a = m.create_work_block("A", est(5));
+        let a = mk(&mut m, "A", 5);
         place(&mut m, a, 0, 5);
         let ana = analyze_placed(&m, vec![a]);
         assert_eq!(ana.float[&a], 0);
@@ -1518,9 +1517,9 @@ mod tests {
     fn user_placement_linear_chain_all_critical() {
         // A(0→3) --FS--> B(3→5) --FS--> C(5→6): total = 6, all float = 0
         let (mut m, _) = base();
-        let a = m.create_work_block("A", est(3));
-        let b = m.create_work_block("B", est(2));
-        let c = m.create_work_block("C", est(1));
+        let a = mk(&mut m, "A", 3);
+        let b = mk(&mut m, "B", 2);
+        let c = mk(&mut m, "C", 1);
         m.create_dependency(a, b, DependencyType::FinishToStart);
         m.create_dependency(b, c, DependencyType::FinishToStart);
         place(&mut m, a, 0, 3);
@@ -1538,9 +1537,9 @@ mod tests {
         // A(0→5) --FS--> C(5→6)   total = 6
         // B(0→3) --FS--> C(5→6)   B.float = LF_B(5) − EF_B(3) = 2
         let (mut m, _) = base();
-        let a = m.create_work_block("A", est(5));
-        let b = m.create_work_block("B", est(3));
-        let c = m.create_work_block("C", est(1));
+        let a = mk(&mut m, "A", 5);
+        let b = mk(&mut m, "B", 3);
+        let c = mk(&mut m, "C", 1);
         m.create_dependency(a, c, DependencyType::FinishToStart);
         m.create_dependency(b, c, DependencyType::FinishToStart);
         place(&mut m, a, 0, 5);
@@ -1559,8 +1558,8 @@ mod tests {
     fn user_placement_float_with_lag() {
         // A(0→3) --FS+2--> B(5→7): LS_B=5, LF_A ≤ 5−2=3 → float_A = 3−3 = 0
         let (mut m, _) = base();
-        let a = m.create_work_block("A", est(3));
-        let b = m.create_work_block("B", est(2));
+        let a = mk(&mut m, "A", 3);
+        let b = mk(&mut m, "B", 2);
         let dep = m.create_dependency(a, b, DependencyType::FinishToStart);
         m.dependencies.get_mut(&dep).unwrap().lag = 2;
         place(&mut m, a, 0, 3);
@@ -1576,8 +1575,8 @@ mod tests {
         // total = 5; backward: LS_B = 5−4 = 1; LF_A_bound = LS_B − 0 + dur_A = 1 + 3 = 4
         // float_A = 4 − 3 = 1; float_B = 0 (B is the last block).
         let (mut m, _) = base();
-        let a = m.create_work_block("A", est(3));
-        let b = m.create_work_block("B", est(4));
+        let a = mk(&mut m, "A", 3);
+        let b = mk(&mut m, "B", 4);
         m.create_dependency(a, b, DependencyType::StartToStart);
         place(&mut m, a, 0, 3);
         place(&mut m, b, 1, 4);
@@ -1593,8 +1592,8 @@ mod tests {
         // A(0→3) --FF--> B(1→3): FF requires B.end ≥ A.end = 3; B.end = 3 (tight).
         // total = 3; backward: LF_A_bound = LF_B − 0 = 3 → float_A = 3−3 = 0; float_B = 0.
         let (mut m, _) = base();
-        let a = m.create_work_block("A", est(3));
-        let b = m.create_work_block("B", est(2));
+        let a = mk(&mut m, "A", 3);
+        let b = mk(&mut m, "B", 2);
         m.create_dependency(a, b, DependencyType::FinishToFinish);
         place(&mut m, a, 0, 3);
         place(&mut m, b, 1, 2);
@@ -1610,8 +1609,8 @@ mod tests {
         // A(0→3) --SF+4--> B(0→4): SF+4 requires B.end ≥ A.start+4 = 4; B.end = 4 (tight).
         // total = 4; backward: LF_A_bound = LF_B − 4 + dur_A = 4 − 4 + 3 = 3 → float_A = 0.
         let (mut m, _) = base();
-        let a = m.create_work_block("A", est(3));
-        let b = m.create_work_block("B", est(4));
+        let a = mk(&mut m, "A", 3);
+        let b = mk(&mut m, "B", 4);
         let dep = m.create_dependency(a, b, DependencyType::StartToFinish);
         m.dependencies.get_mut(&dep).unwrap().lag = 4;
         place(&mut m, a, 0, 3);
@@ -1626,21 +1625,25 @@ mod tests {
     #[test]
     fn sorted_blocks_skips_unplaced() {
         let mut m = Model::default();
-        let placed_id = m.create_work_block("placed", est(3));
-        let unplaced_id = m.create_work_block("unplaced", est(2));
+        let placed_id = mk(&mut m, "placed", 3);
+        // Unplaced: a block with no duration (duration_days == 0) is filtered out.
+        let unplaced_id = m.create_work_block("unplaced");
         m.work_blocks.get_mut(&placed_id).unwrap().start_day = 1;
         m.work_blocks.get_mut(&placed_id).unwrap().duration_days = 3;
 
         let result = sorted_blocks(&m);
         let ids: Vec<WorkBlockId> = result.iter().map(|wb| wb.id).collect();
         assert!(ids.contains(&placed_id), "placed block should appear");
-        assert!(!ids.contains(&unplaced_id), "unplaced block should be filtered out");
+        assert!(
+            !ids.contains(&unplaced_id),
+            "unplaced block should be filtered out"
+        );
     }
 
     // ── cascade_dependencies tests ──────────────────────────────────────────
 
     fn placed(m: &mut Model, name: &str, start: Day, dur: Day) -> WorkBlockId {
-        let id = m.create_work_block(name, est(dur));
+        let id = m.create_work_block(name);
         let wb = m.work_blocks.get_mut(&id).unwrap();
         wb.start_day = start;
         wb.duration_days = dur;
@@ -1735,8 +1738,8 @@ mod tests {
     fn forward_pass_fs_respects_integer_duration() {
         // A(4) --FS--> B(2): B must start at day 4.
         let (mut m, _) = base();
-        let a = m.create_work_block("A", est(4));
-        let b = m.create_work_block("B", est(2));
+        let a = mk(&mut m, "A", 4);
+        let b = mk(&mut m, "B", 2);
         m.create_dependency(a, b, DependencyType::FinishToStart);
         let s = run(&m, vec![a, b]);
         assert_eq!(s.blocks[&b].start_day, 4);
@@ -1931,18 +1934,23 @@ mod tests {
         use crate::graph::build_graph;
         use crate::model::{AvailabilitySegment, AvailabilityTimeline, ResourceType};
         let (mut m, pid) = base();
-        let wid = m.plans[&pid].world_id;
         let rb = m.create_resource_block("R", ResourceType::Person);
-        m.worlds.get_mut(&wid).unwrap().resource_ids.push(rb);
-        m.resource_blocks.get_mut(&rb).unwrap().availability =
-            AvailabilityTimeline {
-                segments: vec![AvailabilitySegment { start: 0, end: 10_000, factor: 1.0 }],
-            };
+        m.resource_blocks.get_mut(&rb).unwrap().availability = AvailabilityTimeline {
+            segments: vec![AvailabilitySegment {
+                start: 0,
+                end: 10_000,
+                factor: 1.0,
+            }],
+        };
 
         const N: u32 = 100;
         let mut blocks: Vec<WorkBlockId> = Vec::new();
         for i in 0..N {
-            let id = m.create_work_block(&format!("B{i}"), est(1));
+            let id = {
+                let id = m.create_work_block(format!("B{i}"));
+                m.work_blocks.get_mut(&id).unwrap().duration_days = 1;
+                id
+            };
             if let Some(&prev) = blocks.last() {
                 m.create_dependency(prev, id, DependencyType::FinishToStart);
             }
@@ -1950,13 +1958,15 @@ mod tests {
         }
         for &id in &blocks {
             m.plans.get_mut(&pid).unwrap().root_blocks.push(id);
-            m.plans.get_mut(&pid).unwrap().allocations.push(
-                crate::model::ResourceAllocation {
+            m.plans
+                .get_mut(&pid)
+                .unwrap()
+                .allocations
+                .push(crate::model::ResourceAllocation {
                     resource_id: rb,
                     work_block_id: id,
                     allocation_factor: 1.0,
-                },
-            );
+                });
         }
 
         let plan = m.plans[&pid].clone();
@@ -1977,8 +1987,16 @@ mod tests {
         // assert fires. Guard with cfg so it compiles in both modes.
         use crate::model::AvailabilitySegment;
         let segs = vec![
-            AvailabilitySegment { start: 5, end: 10, factor: 0.5 },
-            AvailabilitySegment { start: 0, end: 5,  factor: 1.0 },
+            AvailabilitySegment {
+                start: 5,
+                end: 10,
+                factor: 0.5,
+            },
+            AvailabilitySegment {
+                start: 0,
+                end: 5,
+                factor: 1.0,
+            },
         ];
         // This would give a wrong answer without sorting; the debug_assert
         // should catch it in debug mode. We just verify the sorted path works.
@@ -1995,7 +2013,7 @@ mod tests {
     // ── visible_blocks / ScopeEntry tests ──────────────────────────────────────
 
     fn placed_block(m: &mut Model, name: &str, start: Day, dur: Day) -> WorkBlockId {
-        let id = m.create_work_block(name, est(dur));
+        let id = m.create_work_block(name);
         let wb = m.work_blocks.get_mut(&id).unwrap();
         wb.start_day = start;
         wb.duration_days = dur;
@@ -2020,16 +2038,30 @@ mod tests {
         let var_b = m.create_variant("Variant B", parent);
         let child_a = placed_block(&mut m, "Child A1", 0, 3);
         let child_b = placed_block(&mut m, "Child B1", 0, 4);
-        m.work_blocks.get_mut(&parent).unwrap().variants.extend([var_a, var_b]);
+        m.work_blocks
+            .get_mut(&parent)
+            .unwrap()
+            .variants
+            .extend([var_a, var_b]);
         m.variants.get_mut(&var_a).unwrap().children.push(child_a);
         m.variants.get_mut(&var_b).unwrap().children.push(child_b);
 
-        let scope_a = ViewScope { scope_stack: vec![ScopeEntry::Variant(var_a)] };
-        let ids_a: Vec<WorkBlockId> = visible_blocks(&m, &scope_a).iter().map(|wb| wb.id).collect();
+        let scope_a = ViewScope {
+            scope_stack: vec![ScopeEntry::Variant(var_a)],
+        };
+        let ids_a: Vec<WorkBlockId> = visible_blocks(&m, &scope_a)
+            .iter()
+            .map(|wb| wb.id)
+            .collect();
         assert_eq!(ids_a, vec![child_a], "variant A scope shows only child A");
 
-        let scope_b = ViewScope { scope_stack: vec![ScopeEntry::Variant(var_b)] };
-        let ids_b: Vec<WorkBlockId> = visible_blocks(&m, &scope_b).iter().map(|wb| wb.id).collect();
+        let scope_b = ViewScope {
+            scope_stack: vec![ScopeEntry::Variant(var_b)],
+        };
+        let ids_b: Vec<WorkBlockId> = visible_blocks(&m, &scope_b)
+            .iter()
+            .map(|wb| wb.id)
+            .collect();
         assert_eq!(ids_b, vec![child_b], "variant B scope shows only child B");
     }
 
@@ -2041,11 +2073,17 @@ mod tests {
         let var_b = m.create_variant("Variant B", parent);
         let child_a = placed_block(&mut m, "CA", 0, 3);
         let child_b = placed_block(&mut m, "CB", 4, 2);
-        m.work_blocks.get_mut(&parent).unwrap().variants.extend([var_a, var_b]);
+        m.work_blocks
+            .get_mut(&parent)
+            .unwrap()
+            .variants
+            .extend([var_a, var_b]);
         m.variants.get_mut(&var_a).unwrap().children.push(child_a);
         m.variants.get_mut(&var_b).unwrap().children.push(child_b);
 
-        let scope = ViewScope { scope_stack: vec![ScopeEntry::Block(parent)] };
+        let scope = ViewScope {
+            scope_stack: vec![ScopeEntry::Block(parent)],
+        };
         let ids: Vec<WorkBlockId> = visible_blocks(&m, &scope).iter().map(|wb| wb.id).collect();
         assert!(ids.contains(&child_a), "block scope includes child A");
         assert!(ids.contains(&child_b), "block scope includes child B");
@@ -2055,11 +2093,13 @@ mod tests {
     fn visible_blocks_variant_scope_falls_back_when_no_placed_children() {
         let mut m = Model::default();
         let top = placed_block(&mut m, "Top", 0, 3);
-        let parent = m.create_work_block("Parent", est(5)); // not placed
+        let parent = m.create_work_block("Parent"); // not placed (duration_days == 0)
         let vid = m.create_variant("V", parent);
         // vid has no children at all
 
-        let scope = ViewScope { scope_stack: vec![ScopeEntry::Variant(vid)] };
+        let scope = ViewScope {
+            scope_stack: vec![ScopeEntry::Variant(vid)],
+        };
         let ids: Vec<WorkBlockId> = visible_blocks(&m, &scope).iter().map(|wb| wb.id).collect();
         assert_eq!(ids, vec![top], "falls back to top-level sorted blocks");
     }

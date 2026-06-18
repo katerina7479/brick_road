@@ -14,34 +14,19 @@ id_newtype!(WorkBlockId);
 id_newtype!(VariantId);
 id_newtype!(ResourceBlockId);
 id_newtype!(DependencyId);
-id_newtype!(MilestoneId);
-id_newtype!(WorldId);
 id_newtype!(PlanId);
 
 /// Timeline position or duration in whole working days from the plan origin.
 /// Rendering boundaries must cast: `day as f32 * PIXELS_PER_DAY`.
 pub type Day = i32;
 
-/// Three-point effort estimate in workdays.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Estimate {
-    pub most_likely: Day,
-    pub optimistic: Day,
-    pub pessimistic: Day,
-    /// Subjective confidence that the true value falls in the given range (0.0–1.0).
-    pub confidence: f32,
-}
-
-/// A unit of work. Leaf blocks carry their own estimate; blocks with variants
+/// A unit of work. Leaf blocks carry their own duration; blocks with variants
 /// represent a choice between alternative implementations, each potentially
 /// containing further child blocks.
 #[derive(Debug, Clone, PartialEq)]
 pub struct WorkBlock {
     pub id: WorkBlockId,
     pub name: String,
-    /// Effort estimate for this block as a leaf. Ignored by the scheduler when
-    /// `variants` is non-empty (rolled up from chosen variant's children instead).
-    pub estimate: Estimate,
     /// Alternative implementations of this block (mutually exclusive).
     pub variants: Vec<VariantId>,
     /// User-defined placement: start offset in days from the plan origin.
@@ -72,27 +57,6 @@ pub struct WorkBlock {
 pub struct TShirtSize {
     pub label: String,
     pub days: Day,
-}
-
-/// Per-confidence-level multipliers that control how wide the uncertainty spread
-/// is relative to the most-likely duration.
-/// Applied as: optimistic = duration × opt_factor, pessimistic = duration × pes_factor.
-#[derive(Debug, Clone, PartialEq)]
-pub struct ConfidenceFactors {
-    /// Optimistic factor at 50% confidence (default 0.5).
-    pub opt_50: f32,
-    /// Pessimistic factor at 50% confidence (default 2.0).
-    pub pes_50: f32,
-    /// Optimistic factor at 75% confidence (default 0.7).
-    pub opt_75: f32,
-    /// Pessimistic factor at 75% confidence (default 1.4).
-    pub pes_75: f32,
-}
-
-impl Default for ConfidenceFactors {
-    fn default() -> Self {
-        Self { opt_50: 0.5, pes_50: 2.0, opt_75: 0.7, pes_75: 1.4 }
-    }
 }
 
 /// Calendar settings for the plan: anchors "day 0" to a real date and defines
@@ -191,15 +155,6 @@ pub struct Dependency {
     pub lag: Day,
 }
 
-/// A significant named date in the plan timeline.
-/// Date is in days relative to the plan origin.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Milestone {
-    pub id: MilestoneId,
-    pub name: String,
-    pub date: Day,
-}
-
 /// Assignment of a fraction of a resource's capacity to a work block.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ResourceAllocation {
@@ -209,22 +164,11 @@ pub struct ResourceAllocation {
     pub allocation_factor: f32,
 }
 
-/// Shared reality: the pool of resources (people, teams, equipment, budgets)
-/// that plans are evaluated against.
-#[derive(Debug, Clone, PartialEq)]
-pub struct World {
-    pub id: WorldId,
-    pub name: String,
-    pub resource_ids: Vec<ResourceBlockId>,
-}
-
-/// A proposed future: a named scenario that selects blocks and variants
-/// and evaluates them against a specific World.
+/// A proposed future: a named scenario that selects blocks and variants.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Plan {
     pub id: PlanId,
     pub name: String,
-    pub world_id: WorldId,
     /// Top-level work blocks in this plan (roots of the hierarchy).
     pub root_blocks: Vec<WorkBlockId>,
     /// For blocks that have variants, the selected variant in this plan.
@@ -246,14 +190,10 @@ pub struct Model {
     pub variants: HashMap<VariantId, Variant>,
     pub resource_blocks: HashMap<ResourceBlockId, ResourceBlock>,
     pub dependencies: HashMap<DependencyId, Dependency>,
-    pub milestones: HashMap<MilestoneId, Milestone>,
-    pub worlds: HashMap<WorldId, World>,
     pub plans: HashMap<PlanId, Plan>,
     pub calendar: CalendarConfig,
     /// Ordered list of t-shirt sizes for estimation. Loaded from DB at startup.
     pub t_shirt_sizes: Vec<TShirtSize>,
-    /// User-configurable uncertainty spread factors per confidence level.
-    pub confidence_factors: ConfidenceFactors,
 }
 
 impl Model {
@@ -263,18 +203,13 @@ impl Model {
         id
     }
 
-    pub fn create_work_block(
-        &mut self,
-        name: impl Into<String>,
-        estimate: Estimate,
-    ) -> WorkBlockId {
+    pub fn create_work_block(&mut self, name: impl Into<String>) -> WorkBlockId {
         let id = WorkBlockId(self.alloc_id());
         self.work_blocks.insert(
             id,
             WorkBlock {
                 id,
                 name: name.into(),
-                estimate,
                 variants: vec![],
                 start_day: 0,
                 duration_days: 0,
@@ -341,36 +276,9 @@ impl Model {
         id
     }
 
-    pub fn create_milestone(&mut self, name: impl Into<String>, date: Day) -> MilestoneId {
-        let id = MilestoneId(self.alloc_id());
-        self.milestones.insert(
-            id,
-            Milestone {
-                id,
-                name: name.into(),
-                date,
-            },
-        );
-        id
-    }
-
-    pub fn create_world(&mut self, name: impl Into<String>) -> WorldId {
-        let id = WorldId(self.alloc_id());
-        self.worlds.insert(
-            id,
-            World {
-                id,
-                name: name.into(),
-                resource_ids: vec![],
-            },
-        );
-        id
-    }
-
     pub fn create_plan(
         &mut self,
         name: impl Into<String>,
-        world_id: WorldId,
         branch_start_day: Option<Day>,
     ) -> PlanId {
         let id = PlanId(self.alloc_id());
@@ -379,7 +287,6 @@ impl Model {
             Plan {
                 id,
                 name: name.into(),
-                world_id,
                 root_blocks: vec![],
                 selected_variants: HashMap::new(),
                 allocations: vec![],
@@ -413,14 +320,6 @@ impl Model {
         self.dependencies.get(&id)
     }
 
-    pub fn get_milestone(&self, id: MilestoneId) -> Option<&Milestone> {
-        self.milestones.get(&id)
-    }
-
-    pub fn get_world(&self, id: WorldId) -> Option<&World> {
-        self.worlds.get(&id)
-    }
-
     pub fn get_plan(&self, id: PlanId) -> Option<&Plan> {
         self.plans.get(&id)
     }
@@ -430,15 +329,6 @@ impl Model {
 mod tests {
     use super::*;
 
-    fn est() -> Estimate {
-        Estimate {
-            most_likely: 3,
-            optimistic: 1,
-            pessimistic: 7,
-            confidence: 0.8,
-        }
-    }
-
     #[test]
     fn default_model_is_empty() {
         let m = Model::default();
@@ -446,15 +336,13 @@ mod tests {
         assert!(m.variants.is_empty());
         assert!(m.resource_blocks.is_empty());
         assert!(m.dependencies.is_empty());
-        assert!(m.milestones.is_empty());
-        assert!(m.worlds.is_empty());
         assert!(m.plans.is_empty());
     }
 
     #[test]
     fn create_and_retrieve_work_block() {
         let mut m = Model::default();
-        let id = m.create_work_block("task A", est());
+        let id = m.create_work_block("task A");
         let block = m.get_work_block(id).unwrap();
         assert_eq!(block.name, "task A");
         assert_eq!(block.id, id);
@@ -464,21 +352,19 @@ mod tests {
     #[test]
     fn ids_are_unique() {
         let mut m = Model::default();
-        let a = m.create_work_block("a", est());
-        let b = m.create_work_block("b", est());
+        let a = m.create_work_block("a");
+        let b = m.create_work_block("b");
         let v = m.create_variant("v", a);
-        let w = m.create_world("w");
         assert_ne!(a, b);
         assert_ne!(a.0, v.0);
-        assert_ne!(v.0, w.0);
     }
 
     #[test]
     fn variant_linking() {
         let mut m = Model::default();
-        let block_id = m.create_work_block("parent", est());
+        let block_id = m.create_work_block("parent");
         let var_id = m.create_variant("fast path", block_id);
-        let child_id = m.create_work_block("child", est());
+        let child_id = m.create_work_block("child");
 
         m.work_blocks
             .get_mut(&block_id)
@@ -500,24 +386,19 @@ mod tests {
         let m = Model::default();
         assert!(m.get_work_block(WorkBlockId(999)).is_none());
         assert!(m.get_variant(VariantId(999)).is_none());
-        assert!(m.get_world(WorldId(999)).is_none());
     }
 
     #[test]
     fn create_and_retrieve_all_entity_types() {
         let mut m = Model::default();
-        let world_id = m.create_world("baseline");
-        let plan_id = m.create_plan("plan A", world_id, None);
+        let plan_id = m.create_plan("plan A", None);
         let res_id = m.create_resource_block("Alice", ResourceType::Person);
-        let ms_id = m.create_milestone("launch", 90);
-        let block_a = m.create_work_block("a", est());
-        let block_b = m.create_work_block("b", est());
+        let block_a = m.create_work_block("a");
+        let block_b = m.create_work_block("b");
         let dep_id = m.create_dependency(block_a, block_b, DependencyType::FinishToStart);
 
-        assert_eq!(m.get_world(world_id).unwrap().name, "baseline");
-        assert_eq!(m.get_plan(plan_id).unwrap().world_id, world_id);
+        assert_eq!(m.get_plan(plan_id).unwrap().name, "plan A");
         assert_eq!(m.get_resource_block(res_id).unwrap().name, "Alice");
-        assert_eq!(m.get_milestone(ms_id).unwrap().date, 90);
         let dep = m.get_dependency(dep_id).unwrap();
         assert_eq!(dep.predecessor, block_a);
         assert_eq!(dep.successor, block_b);

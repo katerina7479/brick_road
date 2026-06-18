@@ -9,7 +9,11 @@ use crate::model::{CalendarConfig, Day};
 /// A day is non-working if:
 /// - Its ISO weekday number (Mon=1 … Sun=7) exceeds `working_days_per_week`, or
 /// - It appears in `config.non_working_dates`.
-fn is_working_day(date: NaiveDate, working_days_per_week: u8, non_working: &HashSet<NaiveDate>) -> bool {
+fn is_working_day(
+    date: NaiveDate,
+    working_days_per_week: u8,
+    non_working: &HashSet<NaiveDate>,
+) -> bool {
     if non_working.contains(&date) {
         return false;
     }
@@ -81,7 +85,11 @@ pub fn date_to_day(date: NaiveDate, config: &CalendarConfig) -> i32 {
 
 /// Returns the first calendar day in (year, month) that is a working day under `config`.
 /// Returns `None` if the month contains no working days.
-pub fn first_working_day_of_month(year: i32, month: u32, config: &CalendarConfig) -> Option<NaiveDate> {
+pub fn first_working_day_of_month(
+    year: i32,
+    month: u32,
+    config: &CalendarConfig,
+) -> Option<NaiveDate> {
     let non_working: std::collections::HashSet<NaiveDate> =
         config.non_working_dates.iter().copied().collect();
     let mut day = NaiveDate::from_ymd_opt(year, month, 1)?;
@@ -100,11 +108,18 @@ pub fn first_working_day_of_month(year: i32, month: u32, config: &CalendarConfig
 ///
 /// Returns the number of calendar days from `start_date` to complete
 /// `effort_days` working days of work.
-pub fn effort_to_calendar_days(effort_days: Day, start_date: NaiveDate, config: &CalendarConfig) -> i64 {
-    let finish = day_to_date(effort_days, &CalendarConfig {
-        start_date,
-        ..config.clone()
-    });
+pub fn effort_to_calendar_days(
+    effort_days: Day,
+    start_date: NaiveDate,
+    config: &CalendarConfig,
+) -> i64 {
+    let finish = day_to_date(
+        effort_days,
+        &CalendarConfig {
+            start_date,
+            ..config.clone()
+        },
+    );
     (finish - start_date).num_days()
 }
 
@@ -184,7 +199,11 @@ mod tests {
         let cfg = mon_fri_config();
         for day in [0, 1, 5, 10, 20] {
             let date = day_to_date(day, &cfg);
-            assert_eq!(date_to_day(date, &cfg), day, "roundtrip failed for day {day}");
+            assert_eq!(
+                date_to_day(date, &cfg),
+                day,
+                "roundtrip failed for day {day}"
+            );
         }
     }
 

@@ -54,7 +54,10 @@ fn main() {
         .insert_resource(SelectedPlan::default())
         .add_systems(Startup, (setup_db, setup_camera))
         .add_systems(Startup, setup_demo_schedule.after(setup_db))
-        .add_systems(PostStartup, update_analysis.before(blocks::reconcile_block_sprites))
+        .add_systems(
+            PostStartup,
+            update_analysis.before(blocks::reconcile_block_sprites),
+        )
         .add_systems(
             PostStartup,
             labels::compute_nesting_depths.before(blocks::reconcile_block_sprites),
@@ -64,13 +67,22 @@ fn main() {
             schedule::update_visible_blocks.before(blocks::reconcile_block_sprites),
         )
         .add_systems(PostStartup, blocks::reconcile_block_sprites)
-        .add_systems(PostStartup, sync_weekend_bands.after(blocks::reconcile_block_sprites))
-        .add_systems(PostStartup, sync_period_bands.after(blocks::reconcile_block_sprites))
+        .add_systems(
+            PostStartup,
+            sync_weekend_bands.after(blocks::reconcile_block_sprites),
+        )
+        .add_systems(
+            PostStartup,
+            sync_period_bands.after(blocks::reconcile_block_sprites),
+        )
         .add_systems(
             PostStartup,
             labels::spawn_labels.after(blocks::reconcile_block_sprites),
         )
-        .add_systems(Update, (camera_nav_keys, update_camera_target, smooth_camera).chain())
+        .add_systems(
+            Update,
+            (camera_nav_keys, update_camera_target, smooth_camera).chain(),
+        )
         .add_systems(Update, draw_grid)
         .add_systems(Update, draw_branch_markers)
         .add_systems(Update, handle_fork_hover)
@@ -127,27 +139,21 @@ fn main() {
             Update,
             blocks::sync_block_sprites
                 .after(blocks::handle_block_drag)
-                .after(blocks::reconcile_block_sprites)
-                ,
+                .after(blocks::reconcile_block_sprites),
         )
         .add_systems(
             Update,
-            blocks::draw_block_borders
-                .after(blocks::sync_block_sprites)
-                ,
+            blocks::draw_block_borders.after(blocks::sync_block_sprites),
         )
         .add_systems(
             Update,
             blocks::sync_past_overlays
                 .after(blocks::reconcile_block_sprites)
-                .after(schedule::update_today_marker)
-                ,
+                .after(schedule::update_today_marker),
         )
         .add_systems(
             Update,
-            blocks::sync_compare_overlays
-                .after(blocks::reconcile_block_sprites)
-                ,
+            blocks::sync_compare_overlays.after(blocks::reconcile_block_sprites),
         )
         .add_systems(
             Update,
@@ -158,12 +164,7 @@ fn main() {
         )
         .add_systems(Update, blocks::draw_block_handles)
         .add_systems(Update, blocks::update_cursor_icon)
-        .add_systems(
-            Update,
-            blocks::draw_dependency_edges
-                .after(update_analysis)
-                ,
-        )
+        .add_systems(Update, blocks::draw_dependency_edges.after(update_analysis))
         .add_systems(
             Update,
             labels::spawn_labels
@@ -177,22 +178,17 @@ fn main() {
         .add_systems(Update, labels::draw_nesting_indicators)
         .add_systems(
             Update,
-            blocks::sync_block_labels
-                .after(blocks::reconcile_block_sprites)
-                ,
+            blocks::sync_block_labels.after(blocks::reconcile_block_sprites),
         )
         .add_systems(
             Update,
             blocks::sync_block_label_names
                 .after(blocks::reconcile_block_sprites)
-                .before(blocks::sync_block_labels)
-                ,
+                .before(blocks::sync_block_labels),
         )
         .add_systems(
             Update,
-            blocks::sync_description_dots
-                .after(blocks::reconcile_block_sprites)
-                ,
+            blocks::sync_description_dots.after(blocks::reconcile_block_sprites),
         )
         .add_systems(EguiPrimaryContextPass, top_bar_ui)
         .add_systems(EguiPrimaryContextPass, calendar_ruler_ui.after(top_bar_ui))
@@ -222,13 +218,17 @@ fn draw_grid(
     cam_q: Query<(&Transform, &Projection), With<Camera2d>>,
     windows: Query<&Window>,
 ) {
-    let line_color       = Color::srgba(0.42, 0.46, 0.60, 0.13);
-    let past_line_color  = Color::srgba(0.38, 0.42, 0.55, 0.06);
-    let baseline_color   = Color::srgba(0.50, 0.55, 0.70, 0.28);
+    let line_color = Color::srgba(0.42, 0.46, 0.60, 0.13);
+    let past_line_color = Color::srgba(0.38, 0.42, 0.55, 0.06);
+    let baseline_color = Color::srgba(0.50, 0.55, 0.70, 0.28);
     let today_line_color = Color::from(LinearRgba::new(4.0, 2.0, 0.5, 1.0)); // HDR → Bloom
 
-    let Ok((cam_t, proj)) = cam_q.single() else { return };
-    let Projection::Orthographic(ortho) = proj else { return };
+    let Ok((cam_t, proj)) = cam_q.single() else {
+        return;
+    };
+    let Projection::Orthographic(ortho) = proj else {
+        return;
+    };
     let Ok(window) = windows.single() else { return };
 
     let scale = ortho.scale;
@@ -239,26 +239,38 @@ fn draw_grid(
     let half_w = (window.width() * 0.5 + PIXELS_PER_DAY) * scale;
     let half_h = (window.height() * 0.5 + 100.0) * scale;
 
-    let x_left   = cam_x - half_w;
-    let x_right  = cam_x + half_w;
+    let x_left = cam_x - half_w;
+    let x_right = cam_x + half_w;
     let y_bottom = cam_y - half_h;
-    let y_top    = cam_y + half_h;
+    let y_top = cam_y + half_h;
 
     let day_min = (x_left / PIXELS_PER_DAY).floor() as i32;
     let day_max = (x_right / PIXELS_PER_DAY).ceil() as i32;
 
     for day in day_min..=day_max {
         let x = day as f32 * PIXELS_PER_DAY;
-        let color = if day < today.day { past_line_color } else { line_color };
+        let color = if day < today.day {
+            past_line_color
+        } else {
+            line_color
+        };
         gizmos.line_2d(Vec2::new(x, y_bottom), Vec2::new(x, y_top), color);
     }
 
-    gizmos.line_2d(Vec2::new(x_left, 0.0), Vec2::new(x_right, 0.0), baseline_color);
+    gizmos.line_2d(
+        Vec2::new(x_left, 0.0),
+        Vec2::new(x_right, 0.0),
+        baseline_color,
+    );
 
     // Prominent today marker — draw 3 lines 2px apart so it reads as a thick bar at all zooms.
     let x_today = today.day as f32 * PIXELS_PER_DAY;
     for dx in [-2.0_f32, 0.0, 2.0] {
-        gizmos.line_2d(Vec2::new(x_today + dx, y_bottom), Vec2::new(x_today + dx, y_top), today_line_color);
+        gizmos.line_2d(
+            Vec2::new(x_today + dx, y_bottom),
+            Vec2::new(x_today + dx, y_top),
+            today_line_color,
+        );
     }
 }
 
@@ -313,7 +325,11 @@ fn sync_weekend_bands(
     let holiday_color = Color::srgba(0.72, 0.28, 0.28, 0.11);
 
     for (x, is_holiday) in weekend_band_positions(span, &model) {
-        let color = if is_holiday { holiday_color } else { weekend_color };
+        let color = if is_holiday {
+            holiday_color
+        } else {
+            weekend_color
+        };
         commands.spawn((
             WeekendBand,
             Sprite {
@@ -405,7 +421,11 @@ fn period_band_spans(config: &model::CalendarConfig, span_days: i32) -> Vec<(f32
 }
 
 fn next_year_month(year: i32, month: u32) -> (i32, u32) {
-    if month == 12 { (year + 1, 1) } else { (year, month + 1) }
+    if month == 12 {
+        (year + 1, 1)
+    } else {
+        (year, month + 1)
+    }
 }
 
 fn x_start_of_month(year: i32, month: u32, config: &model::CalendarConfig) -> f32 {
@@ -446,10 +466,7 @@ fn sync_period_bands(
 /// dragged or resized blocks leave `total_duration_days` stale. This system
 /// recomputes it from `model.work_blocks` on every frame the model changes so
 /// the background band and label systems always span the full timeline.
-fn sync_total_duration(
-    model: Res<model::Model>,
-    mut schedule: ResMut<schedule::Schedule>,
-) {
+fn sync_total_duration(model: Res<model::Model>, mut schedule: ResMut<schedule::Schedule>) {
     if !model.is_changed() {
         return;
     }
@@ -473,7 +490,7 @@ struct ForkHoverState {
 }
 
 fn setup_demo_schedule(mut model: ResMut<model::Model>, mut commands: Commands) {
-    use model::{DependencyType, Estimate};
+    use model::DependencyType;
     // Skip seeding if the DB already has plans — prevents duplicate Demo Plan on every restart.
     // But we still need to build and insert the Schedule resource from the loaded data so that
     // all downstream systems (side_panel_ui, draw_create_mode_overlay, spawn_day_labels, etc.)
@@ -499,21 +516,19 @@ fn setup_demo_schedule(mut model: ResMut<model::Model>, mut commands: Commands) 
         return;
     }
 
-    let est = |d: Day| Estimate {
-        most_likely: d,
-        optimistic: (d as f32 * 0.7).round() as Day,
-        pessimistic: (d as f32 * 1.5).round() as Day,
-        confidence: 0.8,
+    let plan_id = model.create_plan("Demo Plan", None);
+
+    let seed_block = |model: &mut model::Model, name: &str, dur: Day| {
+        let id = model.create_work_block(name);
+        model.work_blocks.get_mut(&id).unwrap().duration_days = dur;
+        id
     };
 
-    let world_id = model.create_world("Demo");
-    let plan_id = model.create_plan("Demo Plan", world_id, None);
-
-    let design = model.create_work_block("Design", est(5));
-    let build = model.create_work_block("Build", est(8));
-    let test = model.create_work_block("Test", est(4));
-    let review = model.create_work_block("Review", est(2));
-    let deploy = model.create_work_block("Deploy", est(1));
+    let design = seed_block(&mut model, "Design", 5);
+    let build = seed_block(&mut model, "Build", 8);
+    let test = seed_block(&mut model, "Test", 4);
+    let review = seed_block(&mut model, "Review", 2);
+    let deploy = seed_block(&mut model, "Deploy", 1);
 
     model.create_dependency(design, build, DependencyType::FinishToStart);
     model.create_dependency(build, test, DependencyType::FinishToStart);
@@ -538,10 +553,7 @@ fn setup_demo_schedule(mut model: ResMut<model::Model>, mut commands: Commands) 
     }
 }
 
-fn update_analysis(
-    model: Res<model::Model>,
-    mut sa: ResMut<analysis::ScheduleAnalysis>,
-) {
+fn update_analysis(model: Res<model::Model>, mut sa: ResMut<analysis::ScheduleAnalysis>) {
     if !model.is_changed() {
         return;
     }
@@ -592,7 +604,9 @@ fn handle_fork_hover(
     }
 
     let Ok(window) = windows.single() else { return };
-    let Ok((cam, cam_gt)) = camera.single() else { return };
+    let Ok((cam, cam_gt)) = camera.single() else {
+        return;
+    };
 
     let world_x = window
         .cursor_position()
@@ -607,9 +621,8 @@ fn handle_fork_hover(
         if let Some(fork_day) = fork.hovered_day {
             let active_id = schedule.plan_id;
             if let Some(active_plan) = model.plans.get(&active_id).cloned() {
-                let wid = active_plan.world_id;
                 let n = model.plans.len() + 1;
-                let new_id = model.create_plan(format!("Plan {n}"), wid, Some(fork_day.max(0)));
+                let new_id = model.create_plan(format!("Plan {n}"), Some(fork_day.max(0)));
                 // Copy root blocks and selected variants from the active plan.
                 if let Some(new_plan) = model.plans.get_mut(&new_id) {
                     new_plan.root_blocks = active_plan.root_blocks.clone();
@@ -641,30 +654,48 @@ fn draw_branch_markers(
     cam_q: Query<(&Transform, &Projection), With<Camera2d>>,
     windows: Query<&Window>,
 ) {
-    let Ok((cam_t, proj)) = cam_q.single() else { return };
-    let Projection::Orthographic(ortho) = proj else { return };
+    let Ok((cam_t, proj)) = cam_q.single() else {
+        return;
+    };
+    let Projection::Orthographic(ortho) = proj else {
+        return;
+    };
     let Ok(window) = windows.single() else { return };
     let half_h = (window.height() * 0.5 * ortho.scale).max(800.0);
 
     let active_id = schedule.plan_id;
 
     // Branch-point markers for non-active plans.
-    let mut branch_plans: Vec<&model::Plan> = model.plans.values()
+    let mut branch_plans: Vec<&model::Plan> = model
+        .plans
+        .values()
         .filter(|p| p.id != active_id && p.branch_start_day.is_some())
         .collect();
     branch_plans.sort_by_key(|p| p.id.0);
 
     for (idx, plan) in branch_plans.iter().enumerate() {
-        let Some(branch_day) = plan.branch_start_day else { continue };
+        let Some(branch_day) = plan.branch_start_day else {
+            continue;
+        };
         let x = branch_day as f32 * PIXELS_PER_DAY;
         let lc = blocks::BRANCH_PALETTE[idx % blocks::BRANCH_PALETTE.len()];
         // The selected branch is drawn brighter and fully opaque so it's clear
         // which one the Delete key will remove.
         let selected = selected_plan.0 == Some(plan.id);
         let color = if selected {
-            Color::from(LinearRgba::new(lc.red * 1.4, lc.green * 1.4, lc.blue * 1.4, 1.0))
+            Color::from(LinearRgba::new(
+                lc.red * 1.4,
+                lc.green * 1.4,
+                lc.blue * 1.4,
+                1.0,
+            ))
         } else {
-            Color::from(LinearRgba::new(lc.red * 0.7, lc.green * 0.7, lc.blue * 0.7, 0.55))
+            Color::from(LinearRgba::new(
+                lc.red * 0.7,
+                lc.green * 0.7,
+                lc.blue * 0.7,
+                0.55,
+            ))
         };
 
         // Vertical branch line.
@@ -677,8 +708,16 @@ fn draw_branch_markers(
         // Fork symbol: two diagonal lines diverging from the branch point.
         let fork_y = cam_t.translation.y + half_h * 0.30;
         let arm = ortho.scale * 18.0;
-        gizmos.line_2d(Vec2::new(x, fork_y), Vec2::new(x - arm, fork_y + arm), color);
-        gizmos.line_2d(Vec2::new(x, fork_y), Vec2::new(x + arm, fork_y + arm), color);
+        gizmos.line_2d(
+            Vec2::new(x, fork_y),
+            Vec2::new(x - arm, fork_y + arm),
+            color,
+        );
+        gizmos.line_2d(
+            Vec2::new(x, fork_y),
+            Vec2::new(x + arm, fork_y + arm),
+            color,
+        );
     }
 
     // Fork-hover indicator: ghost line at hovered day.
@@ -693,8 +732,16 @@ fn draw_branch_markers(
         // Small fork arms on the hover indicator.
         let fork_y = cam_t.translation.y + half_h * 0.30;
         let arm = ortho.scale * 14.0;
-        gizmos.line_2d(Vec2::new(x, fork_y), Vec2::new(x - arm, fork_y + arm), ghost);
-        gizmos.line_2d(Vec2::new(x, fork_y), Vec2::new(x + arm, fork_y + arm), ghost);
+        gizmos.line_2d(
+            Vec2::new(x, fork_y),
+            Vec2::new(x - arm, fork_y + arm),
+            ghost,
+        );
+        gizmos.line_2d(
+            Vec2::new(x, fork_y),
+            Vec2::new(x + arm, fork_y + arm),
+            ghost,
+        );
     }
 }
 
@@ -713,8 +760,12 @@ fn calendar_ruler_ui(
     windows: Query<&Window>,
 ) {
     let Ok(ctx) = contexts.ctx_mut() else { return };
-    let Ok((cam_t, proj)) = cam_q.single() else { return };
-    let Projection::Orthographic(ortho) = proj else { return };
+    let Ok((cam_t, proj)) = cam_q.single() else {
+        return;
+    };
+    let Projection::Orthographic(ortho) = proj else {
+        return;
+    };
     let Ok(window) = windows.single() else { return };
 
     let scale = ortho.scale;
@@ -914,7 +965,9 @@ fn handle_branch_selection(
         }
     }
     let Ok(window) = windows.single() else { return };
-    let Ok((cam, cam_gt)) = camera.single() else { return };
+    let Ok((cam, cam_gt)) = camera.single() else {
+        return;
+    };
     let Some(world) = window
         .cursor_position()
         .and_then(|c| cam.viewport_to_world_2d(cam_gt, c).ok())
@@ -977,10 +1030,7 @@ fn delete_plan(model: &mut model::Model, plan_id: model::PlanId) {
         return;
     };
     for block in plan.root_blocks {
-        let still_rooted = model
-            .plans
-            .values()
-            .any(|p| p.root_blocks.contains(&block));
+        let still_rooted = model.plans.values().any(|p| p.root_blocks.contains(&block));
         if !still_rooted {
             blocks::delete_work_block(model, block);
         }
@@ -992,29 +1042,30 @@ mod tests {
     use super::*;
     use chrono::NaiveDate;
 
-    fn est() -> model::Estimate {
-        model::Estimate { most_likely: 3, optimistic: 1, pessimistic: 7, confidence: 0.8 }
-    }
-
     #[test]
     fn delete_plan_keeps_shared_blocks_removes_exclusive() {
         let mut m = model::Model::default();
-        let w = m.create_world("w");
-        let root = m.create_plan("root", w, None);
-        let shared = m.create_work_block("shared", est());
+        let root = m.create_plan("root", None);
+        let shared = m.create_work_block("shared");
         m.plans.get_mut(&root).unwrap().root_blocks.push(shared);
 
         // A fork copies the parent's root_blocks (same `shared` id) and gains
         // its own exclusive block.
-        let fork = m.create_plan("fork", w, Some(0));
-        let exclusive = m.create_work_block("exclusive", est());
+        let fork = m.create_plan("fork", Some(0));
+        let exclusive = m.create_work_block("exclusive");
         m.plans.get_mut(&fork).unwrap().root_blocks = vec![shared, exclusive];
 
         delete_plan(&mut m, fork);
 
         assert!(!m.plans.contains_key(&fork), "fork plan removed");
-        assert!(m.work_blocks.contains_key(&shared), "block shared with root is kept");
-        assert!(!m.work_blocks.contains_key(&exclusive), "block only the fork owned is removed");
+        assert!(
+            m.work_blocks.contains_key(&shared),
+            "block shared with root is kept"
+        );
+        assert!(
+            !m.work_blocks.contains_key(&exclusive),
+            "block only the fork owned is removed"
+        );
         assert!(m.plans.contains_key(&root), "root plan untouched");
     }
 
@@ -1022,7 +1073,11 @@ mod tests {
     fn week_bands_at_every_wdpw_boundary() {
         let model = model::Model::default();
         let positions = weekend_band_positions(10, &model);
-        let xs: Vec<f32> = positions.iter().filter(|(_, h)| !h).map(|(x, _)| *x).collect();
+        let xs: Vec<f32> = positions
+            .iter()
+            .filter(|(_, h)| !h)
+            .map(|(x, _)| *x)
+            .collect();
         // Default wdpw=5; bands at day 5, 10, 15 (span + wdpw).
         assert!(xs.contains(&(5.0 * PIXELS_PER_DAY)));
         assert!(xs.contains(&(10.0 * PIXELS_PER_DAY)));
@@ -1042,8 +1097,11 @@ mod tests {
         model.calendar.start_date = NaiveDate::from_ymd_opt(2025, 1, 6).unwrap(); // Monday
         model.calendar.non_working_dates = vec![NaiveDate::from_ymd_opt(2025, 1, 7).unwrap()]; // Tuesday
         let positions = weekend_band_positions(20, &model);
-        let holiday_xs: Vec<f32> =
-            positions.iter().filter(|(_, h)| *h).map(|(x, _)| *x).collect();
+        let holiday_xs: Vec<f32> = positions
+            .iter()
+            .filter(|(_, h)| *h)
+            .map(|(x, _)| *x)
+            .collect();
         // date_to_day(Tue Jan 7 holiday, Mon Jan 6 start) = 0 → boundary = 1 → x = 100.0
         assert!(holiday_xs.contains(&(1.0 * PIXELS_PER_DAY)));
     }
@@ -1053,8 +1111,7 @@ mod tests {
         let mut model = model::Model::default();
         model.calendar.start_date = NaiveDate::from_ymd_opt(2025, 1, 6).unwrap();
         // Holiday 200 working days out — far beyond span=5.
-        model.calendar.non_working_dates =
-            vec![calendar::day_to_date(200, &model.calendar)];
+        model.calendar.non_working_dates = vec![calendar::day_to_date(200, &model.calendar)];
         let positions = weekend_band_positions(5, &model);
         assert_eq!(positions.iter().filter(|(_, h)| *h).count(), 0);
     }
@@ -1094,7 +1151,13 @@ mod tests {
         let base_alpha = QUARTER_TINT_ALPHA;
         let jan = &bands[0];
         let feb = &bands[1];
-        assert!((jan.2[3] - base_alpha).abs() < 1e-5, "Jan should have full alpha");
-        assert!((feb.2[3] - base_alpha * 0.7).abs() < 1e-5, "Feb should have 0.7× alpha");
+        assert!(
+            (jan.2[3] - base_alpha).abs() < 1e-5,
+            "Jan should have full alpha"
+        );
+        assert!(
+            (feb.2[3] - base_alpha * 0.7).abs() < 1e-5,
+            "Feb should have 0.7× alpha"
+        );
     }
 }

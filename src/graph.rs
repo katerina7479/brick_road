@@ -164,20 +164,10 @@ fn collect_active_blocks(model: &Model, plan: &Plan) -> HashSet<WorkBlockId> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{Estimate, Model, Plan};
-
-    fn est() -> Estimate {
-        Estimate {
-            most_likely: 1,
-            optimistic: 1,
-            pessimistic: 1,
-            confidence: 1.0,
-        }
-    }
+    use crate::model::{Model, Plan};
 
     fn empty_plan(model: &mut Model) -> Plan {
-        let world_id = model.create_world("w");
-        let plan_id = model.create_plan("p", world_id, None);
+        let plan_id = model.create_plan("p", None);
         model.plans.remove(&plan_id).unwrap()
     }
 
@@ -193,12 +183,11 @@ mod tests {
     #[test]
     fn linear_chain() {
         let mut model = Model::default();
-        let world_id = model.create_world("w");
-        let plan_id = model.create_plan("p", world_id, None);
+        let plan_id = model.create_plan("p", None);
 
-        let a = model.create_work_block("A", est());
-        let b = model.create_work_block("B", est());
-        let c = model.create_work_block("C", est());
+        let a = model.create_work_block("A");
+        let b = model.create_work_block("B");
+        let c = model.create_work_block("C");
         model.create_dependency(a, b, DependencyType::FinishToStart);
         model.create_dependency(b, c, DependencyType::FinishToStart);
 
@@ -216,13 +205,12 @@ mod tests {
     #[test]
     fn diamond() {
         let mut model = Model::default();
-        let world_id = model.create_world("w");
-        let plan_id = model.create_plan("p", world_id, None);
+        let plan_id = model.create_plan("p", None);
 
-        let a = model.create_work_block("A", est());
-        let b = model.create_work_block("B", est());
-        let c = model.create_work_block("C", est());
-        let d = model.create_work_block("D", est());
+        let a = model.create_work_block("A");
+        let b = model.create_work_block("B");
+        let c = model.create_work_block("C");
+        let d = model.create_work_block("D");
         // A → B, A → C, B → D, C → D
         model.create_dependency(a, b, DependencyType::FinishToStart);
         model.create_dependency(a, c, DependencyType::FinishToStart);
@@ -250,12 +238,11 @@ mod tests {
     #[test]
     fn cycle_detected() {
         let mut model = Model::default();
-        let world_id = model.create_world("w");
-        let plan_id = model.create_plan("p", world_id, None);
+        let plan_id = model.create_plan("p", None);
 
-        let a = model.create_work_block("A", est());
-        let b = model.create_work_block("B", est());
-        let c = model.create_work_block("C", est());
+        let a = model.create_work_block("A");
+        let b = model.create_work_block("B");
+        let c = model.create_work_block("C");
         model.create_dependency(a, b, DependencyType::FinishToStart);
         model.create_dependency(b, c, DependencyType::FinishToStart);
         model.create_dependency(c, a, DependencyType::FinishToStart); // closes cycle
@@ -276,12 +263,11 @@ mod tests {
     #[test]
     fn variant_selection_expands_correct_children() {
         let mut model = Model::default();
-        let world_id = model.create_world("w");
-        let plan_id = model.create_plan("p", world_id, None);
+        let plan_id = model.create_plan("p", None);
 
-        let parent = model.create_work_block("parent", est());
-        let child_a = model.create_work_block("child_a", est());
-        let child_b = model.create_work_block("child_b", est());
+        let parent = model.create_work_block("parent");
+        let child_a = model.create_work_block("child_a");
+        let child_b = model.create_work_block("child_b");
         let var_a = model.create_variant("fast", parent);
         let var_b = model.create_variant("slow", parent);
         model
@@ -316,11 +302,10 @@ mod tests {
         // A block with variants but no selection in plan.selected_variants
         // must appear in the graph as a leaf — no children expanded.
         let mut model = Model::default();
-        let world_id = model.create_world("w");
-        let plan_id = model.create_plan("p", world_id, None);
+        let plan_id = model.create_plan("p", None);
 
-        let parent = model.create_work_block("parent", est());
-        let child = model.create_work_block("child", est());
+        let parent = model.create_work_block("parent");
+        let child = model.create_work_block("child");
         let var_a = model.create_variant("v", parent);
         model.variants.get_mut(&var_a).unwrap().children.push(child);
         model.work_blocks.get_mut(&parent).unwrap().variants = vec![var_a];
@@ -344,11 +329,10 @@ mod tests {
         // Blocks not in plan.root_blocks and not reachable via variants
         // must not appear in the graph, even if dependencies reference them.
         let mut model = Model::default();
-        let world_id = model.create_world("w");
-        let plan_id = model.create_plan("p", world_id, None);
+        let plan_id = model.create_plan("p", None);
 
-        let a = model.create_work_block("A", est());
-        let b = model.create_work_block("B", est()); // NOT in plan
+        let a = model.create_work_block("A");
+        let b = model.create_work_block("B"); // NOT in plan
         model.create_dependency(a, b, DependencyType::FinishToStart);
 
         let plan = {
