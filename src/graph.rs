@@ -131,11 +131,15 @@ pub fn topological_sort(graph: &DependencyGraph) -> Result<Vec<WorkBlockId>, Cyc
 }
 
 /// BFS from plan root blocks, expanding children via selected variants.
+///
+/// Roots are the plan's *effective* root blocks: its own blocks plus those
+/// inherited live from its parent branch, minus any inherited blocks the plan
+/// has hidden. For a non-branch plan this is exactly `plan.root_blocks`.
 fn collect_active_blocks(model: &Model, plan: &Plan) -> HashSet<WorkBlockId> {
     let mut active = HashSet::new();
     let mut queue = VecDeque::new();
 
-    for &root in &plan.root_blocks {
+    for root in model.effective_root_blocks_of(plan) {
         if active.insert(root) {
             queue.push_back(root);
         }
