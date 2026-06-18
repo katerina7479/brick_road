@@ -51,6 +51,7 @@ fn main() {
         .insert_resource(blocks::CompareBlockSpriteMap::default())
         .insert_resource(labels::NestingDepthMap::default())
         .insert_resource(ForkHoverState::default())
+        .insert_resource(SelectedPlan::default())
         .add_systems(Startup, (setup_db, setup_camera))
         .add_systems(Startup, setup_demo_schedule.after(setup_db))
         .add_systems(PostStartup, update_analysis.before(blocks::reconcile_block_sprites))
@@ -73,6 +74,11 @@ fn main() {
         .add_systems(Update, draw_grid)
         .add_systems(Update, draw_branch_markers)
         .add_systems(Update, handle_fork_hover)
+        .add_systems(
+            Update,
+            handle_branch_selection.before(blocks::handle_block_selection),
+        )
+        .add_systems(Update, handle_branch_delete.after(blocks::handle_name_edit))
         .add_systems(Update, schedule::update_today_marker)
         .add_systems(Update, sync_total_duration)
         .add_systems(Update, sync_weekend_bands.after(sync_total_duration))
@@ -630,6 +636,7 @@ fn draw_branch_markers(
     mut gizmos: Gizmos,
     model: Res<model::Model>,
     schedule: Res<schedule::Schedule>,
+    selected_plan: Res<SelectedPlan>,
     fork: Res<ForkHoverState>,
     cam_q: Query<(&Transform, &Projection), With<Camera2d>>,
     windows: Query<&Window>,
@@ -651,7 +658,14 @@ fn draw_branch_markers(
         let Some(branch_day) = plan.branch_start_day else { continue };
         let x = branch_day as f32 * PIXELS_PER_DAY;
         let lc = blocks::BRANCH_PALETTE[idx % blocks::BRANCH_PALETTE.len()];
-        let color = Color::from(LinearRgba::new(lc.red * 0.7, lc.green * 0.7, lc.blue * 0.7, 0.55));
+        // The selected branch is drawn brighter and fully opaque so it's clear
+        // which one the Delete key will remove.
+        let selected = selected_plan.0 == Some(plan.id);
+        let color = if selected {
+            Color::from(LinearRgba::new(lc.red * 1.4, lc.green * 1.4, lc.blue * 1.4, 1.0))
+        } else {
+            Color::from(LinearRgba::new(lc.red * 0.7, lc.green * 0.7, lc.blue * 0.7, 0.55))
+        };
 
         // Vertical branch line.
         gizmos.line_2d(
@@ -795,28 +809,12 @@ fn calendar_ruler_ui(
 fn top_bar_ui(
     mut contexts: EguiContexts,
     mut target: ResMut<CameraTarget>,
-    mut model: ResMut<model::Model>,
+    model: Res<model::Model>,
     scope: Res<schedule::ViewScope>,
-    schedule: Res<schedule::Schedule>,
     windows: Query<&Window>,
     today: Res<schedule::TodayMarker>,
-    conn: NonSend<rusqlite::Connection>,
 ) {
     let Ok(ctx) = contexts.ctx_mut() else { return };
-
-    // Forked plans (those anchored at a branch day), oldest first, for the
-    // branch list. The root plan has `branch_start_day == None` and is omitted.
-    let active_id = schedule.plan_id;
-    let mut branches: Vec<(model::PlanId, String)> = model
-        .plans
-        .values()
-        .filter(|p| p.branch_start_day.is_some())
-        .map(|p| (p.id, p.name.clone()))
-        .collect();
-    branches.sort_by_key(|(id, _)| id.0);
-
-    let mut plan_to_delete: Option<model::PlanId> = None;
-
     egui::TopBottomPanel::top("top_bar")
         .frame(
             egui::Frame::new()
@@ -834,29 +832,6 @@ fn top_bar_ui(
                 if ui.add(btn).on_hover_text("Fit to view [F]").clicked() {
                     if let Some(new_target) = camera::fit_to_blocks(&model, &scope, &windows) {
                         *target = new_target;
-                    }
-                }
-
-                // Branch list: each forked plan with a delete (✕) button.
-                if !branches.is_empty() {
-                    ui.separator();
-                    ui.label(
-                        egui::RichText::new("Branches:")
-                            .color(egui::Color32::from_rgb(170, 150, 120)),
-                    );
-                    for (id, name) in &branches {
-                        ui.label(
-                            egui::RichText::new(name).color(egui::Color32::from_rgb(210, 214, 228)),
-                        );
-                        let del = ui
-                            .small_button(egui::RichText::new("✕").color(egui::Color32::from_rgb(
-                                230, 120, 120,
-                            )))
-                            .on_hover_text("Delete this branch");
-                        // Never delete the active plan out from under the editor.
-                        if del.clicked() && *id != active_id {
-                            plan_to_delete = Some(*id);
-                        }
                     }
                 }
 
@@ -878,9 +853,115 @@ fn top_bar_ui(
                 });
             });
         });
+}
 
-    if let Some(del_id) = plan_to_delete {
-        delete_plan(&mut model, del_id);
+/// The branch (forked plan) whose marker is currently selected, if any.
+/// Selecting a branch by clicking its marker arms the Delete key to remove it.
+#[derive(Resource, Default)]
+pub struct SelectedPlan(pub Option<model::PlanId>);
+
+/// Returns the non-active forked plan whose branch marker is within `hit_world`
+/// units of `world_x`, nearest first. Used both to select a branch on click and
+/// to keep block-creation clicks from landing on a marker.
+pub fn branch_plan_at_x(
+    model: &model::Model,
+    active_id: model::PlanId,
+    world_x: f32,
+    hit_world: f32,
+) -> Option<model::PlanId> {
+    let mut best: Option<(f32, model::PlanId)> = None;
+    for plan in model.plans.values() {
+        if plan.id == active_id {
+            continue;
+        }
+        let Some(day) = plan.branch_start_day else {
+            continue;
+        };
+        let dist = (world_x - day as f32 * PIXELS_PER_DAY).abs();
+        if dist <= hit_world && best.is_none_or(|(bd, _)| dist < bd) {
+            best = Some((dist, plan.id));
+        }
+    }
+    best.map(|(_, id)| id)
+}
+
+/// Left-click on (or very near) a branch marker selects that branch; the Delete
+/// key then removes it. Selecting a branch clears any block/dependency
+/// selection so Delete is unambiguous.
+fn handle_branch_selection(
+    mut egui_ctx: EguiContexts,
+    windows: Query<&Window>,
+    camera: Query<(&Camera, &GlobalTransform), With<Camera2d>>,
+    cam_proj: Query<&Projection, With<Camera2d>>,
+    mouse: Res<ButtonInput<MouseButton>>,
+    keyboard: Res<ButtonInput<KeyCode>>,
+    model: Res<model::Model>,
+    schedule: Res<schedule::Schedule>,
+    mut selected_plan: ResMut<SelectedPlan>,
+    mut selected_block: ResMut<blocks::SelectedBlock>,
+    mut selected_dep: ResMut<blocks::SelectedDependency>,
+) {
+    if !mouse.just_pressed(MouseButton::Left) {
+        return;
+    }
+    // Ctrl+click is the fork gesture, not selection.
+    if keyboard.pressed(KeyCode::ControlLeft) || keyboard.pressed(KeyCode::ControlRight) {
+        return;
+    }
+    if let Ok(ctx) = egui_ctx.ctx_mut() {
+        if ctx.is_pointer_over_area() {
+            return;
+        }
+    }
+    let Ok(window) = windows.single() else { return };
+    let Ok((cam, cam_gt)) = camera.single() else { return };
+    let Some(world) = window
+        .cursor_position()
+        .and_then(|c| cam.viewport_to_world_2d(cam_gt, c).ok())
+    else {
+        return;
+    };
+    let scale = cam_proj
+        .single()
+        .ok()
+        .and_then(|p| match p {
+            Projection::Orthographic(o) => Some(o.scale),
+            _ => None,
+        })
+        .unwrap_or(1.0);
+
+    // ~6 screen pixels of grab tolerance on either side of the marker line.
+    if let Some(id) = branch_plan_at_x(&model, schedule.plan_id, world.x, 6.0 * scale) {
+        selected_plan.0 = Some(id);
+        selected_block.0 = None;
+        selected_dep.0 = None;
+    }
+}
+
+/// Deletes the selected branch on Delete/Backspace. Block deletion lives in
+/// `blocks::handle_block_delete`; the two never collide because selecting a
+/// branch clears the block selection and vice versa.
+fn handle_branch_delete(
+    mut egui_ctx: EguiContexts,
+    keyboard: Res<ButtonInput<KeyCode>>,
+    name_edit: Res<blocks::NameEditState>,
+    mut selected_plan: ResMut<SelectedPlan>,
+    mut model: ResMut<model::Model>,
+    conn: NonSend<rusqlite::Connection>,
+) {
+    if name_edit.editing.is_some() {
+        return;
+    }
+    if let Ok(ctx) = egui_ctx.ctx_mut() {
+        if ctx.wants_keyboard_input() {
+            return;
+        }
+    }
+    if !(keyboard.just_pressed(KeyCode::Delete) || keyboard.just_pressed(KeyCode::Backspace)) {
+        return;
+    }
+    if let Some(id) = selected_plan.0.take() {
+        delete_plan(&mut model, id);
         if let Err(e) = db::save_model(&conn, &model) {
             error!("save_model failed: {e}");
         }

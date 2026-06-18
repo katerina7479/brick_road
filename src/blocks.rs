@@ -563,6 +563,7 @@ pub fn handle_block_selection(
     mouse: Res<ButtonInput<MouseButton>>,
     mut selected: ResMut<SelectedBlock>,
     mut selected_dep: ResMut<SelectedDependency>,
+    mut selected_plan: ResMut<crate::SelectedPlan>,
     block_query: Query<(&BlockSprite, &Transform, &Sprite)>,
     name_edit: Res<NameEditState>,
     mut model: ResMut<model::Model>,
@@ -602,6 +603,25 @@ pub fn handle_block_selection(
     let Ok(world_pos) = camera.viewport_to_world_2d(camera_transform, cursor_pos) else {
         return;
     };
+
+    // A click on (or near) a branch marker belongs to `handle_branch_selection`;
+    // defer to it and don't also select/create a block. Any other click clears
+    // the branch selection, keeping block and branch selection mutually
+    // exclusive so the Delete key is unambiguous.
+    let marker_scale = cam_proj
+        .single()
+        .ok()
+        .and_then(|p| match p {
+            Projection::Orthographic(o) => Some(o.scale),
+            _ => None,
+        })
+        .unwrap_or(1.0);
+    if crate::branch_plan_at_x(&model, active_schedule.plan_id, world_pos.x, 6.0 * marker_scale)
+        .is_some()
+    {
+        return;
+    }
+    selected_plan.0 = None;
 
     // Hit-test against the block sprites.
     let mut clicked: Option<WorkBlockId> = None;
