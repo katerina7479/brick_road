@@ -603,6 +603,15 @@ pub fn handle_block_selection(
         return;
     };
 
+    // Below the active plan's content lies the band strip (other plans shown as
+    // parallel bands). Clicks there belong to the band handlers (switch /
+    // rename), never to block creation or selection — otherwise clicking a band
+    // would also drop a stray block into the active plan. The active plan's own
+    // blocks are always above this line, so legitimate clicks are unaffected.
+    if world_pos.y < crate::bands::band_strip_top(&model, active_schedule.plan_id) {
+        return;
+    }
+
     // Hit-test against the block sprites.
     let mut clicked: Option<WorkBlockId> = None;
     for (block_sprite, transform, sprite) in &block_query {
@@ -2133,12 +2142,16 @@ pub fn draw_create_mode_overlay(
                 .get(&plan_id)
                 .and_then(|p| p.branch_start_day)
                 .unwrap_or(0);
-            // No cursor in bulk-create mode: stack each new block one lane down
-            // (by current block count) so they don't pile onto the same spot.
+            // No cursor in bulk-create mode: stack each new block one lane below
+            // the lowest existing block in the active plan's *effective* set
+            // (inherited + own), so additions never pile onto an inherited row.
             let new_row = model
-                .plans
-                .get(&plan_id)
-                .map(|p| p.root_blocks.len() as i32)
+                .effective_root_blocks(plan_id)
+                .iter()
+                .filter_map(|id| model.work_blocks.get(id))
+                .map(|wb| wb.row)
+                .max()
+                .map(|r| r + 1)
                 .unwrap_or(0);
             if let Some(wb) = model.work_blocks.get_mut(&new_id) {
                 wb.start_day = branch_min;

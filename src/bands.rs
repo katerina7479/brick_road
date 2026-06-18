@@ -80,8 +80,10 @@ pub struct BandSpriteMap {
 }
 
 /// World-space Y just below the active plan's lowest block — where the band
-/// strip begins. Bands stack downward from here.
-fn band_strip_top(model: &Model, active_id: PlanId) -> f32 {
+/// strip begins. Bands stack downward from here. Everything below this Y is
+/// band territory: block creation/selection is suppressed there so band clicks
+/// (switch / rename) are unambiguous.
+pub fn band_strip_top(model: &Model, active_id: PlanId) -> f32 {
     let mut min_y = 0.0_f32;
     for id in model.effective_root_blocks(active_id) {
         if let Some(wb) = model.work_blocks.get(&id) {
@@ -133,7 +135,9 @@ pub fn compute_band_layout(model: &Model, active_id: PlanId) -> Vec<BandLayout> 
         out.push(BandLayout {
             plan_id: plan.id,
             index,
-            center_y: strip_top - index as f32 * BAND_PITCH,
+            // +1 so the first band sits a full pitch below `strip_top`, keeping
+            // every band (and its label) strictly inside band territory.
+            center_y: strip_top - (index + 1) as f32 * BAND_PITCH,
             name: plan.name.clone(),
             branch_start_day: plan.branch_start_day,
             day_min: if day_min == Day::MAX { 0 } else { day_min },
@@ -373,8 +377,8 @@ pub fn handle_band_label_doubleclick(
     }
 }
 
-/// egui overlay: a focused single-line field for renaming the band being
-/// edited. Enter commits + saves; Escape cancels.
+/// egui overlay: manage the band being edited — rename it (Enter commits,
+/// Escape cancels) or delete the whole branch.
 pub fn draw_band_rename_overlay(
     mut contexts: bevy_egui::EguiContexts,
     mut rename: ResMut<BandRenameState>,
@@ -386,7 +390,8 @@ pub fn draw_band_rename_overlay(
 
     let mut commit = false;
     let mut cancel = false;
-    bevy_egui::egui::Window::new("Rename branch")
+    let mut delete = false;
+    bevy_egui::egui::Window::new("Branch")
         .collapsible(false)
         .resizable(false)
         .anchor(bevy_egui::egui::Align2::CENTER_TOP, [0.0, 60.0])
@@ -411,9 +416,27 @@ pub fn draw_band_rename_overlay(
                     cancel = true;
                 }
             });
+            ui.separator();
+            // Deleting a branch drops it and the blocks it owns; inherited
+            // blocks (shared with the parent) are left untouched.
+            if ui
+                .button(
+                    bevy_egui::egui::RichText::new("Delete branch")
+                        .color(bevy_egui::egui::Color32::from_rgb(230, 120, 120)),
+                )
+                .clicked()
+            {
+                delete = true;
+            }
         });
 
-    if commit {
+    if delete {
+        delete_branch(&mut model, plan_id);
+        if let Err(e) = db::save_model(&conn, &model) {
+            error!("save_model failed: {e}");
+        }
+        rename.editing = None;
+    } else if commit {
         let name = rename.buf.trim().to_string();
         if !name.is_empty() {
             if let Some(plan) = model.plans.get_mut(&plan_id) {
@@ -426,5 +449,31 @@ pub fn draw_band_rename_overlay(
         rename.editing = None;
     } else if cancel {
         rename.editing = None;
+    }
+}
+
+/// Deletes a branch plan: reparents any direct child branches to this plan's
+/// parent so they don't dangle, removes the plan, then deletes the blocks the
+/// branch *owned* (its `root_blocks`) unless another plan still roots them.
+/// Inherited blocks — shared live with the parent — are left untouched.
+fn delete_branch(model: &mut Model, plan_id: PlanId) {
+    let Some(plan) = model.plans.get(&plan_id).cloned() else {
+        return;
+    };
+    let new_parent = plan.parent;
+    for p in model.plans.values_mut() {
+        if p.parent == Some(plan_id) {
+            p.parent = new_parent;
+        }
+    }
+    model.plans.remove(&plan_id);
+    for block in plan.root_blocks {
+        let still_rooted = model
+            .plans
+            .values()
+            .any(|p| p.root_blocks.contains(&block));
+        if !still_rooted {
+            blocks::delete_work_block(model, block);
+        }
     }
 }

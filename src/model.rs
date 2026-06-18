@@ -399,8 +399,13 @@ impl Model {
     }
 
     /// The effective top-level blocks of a plan: its parent's effective blocks
-    /// (live, recursively) minus this plan's `removed_inherited`, then its own
-    /// `root_blocks`. Inherited blocks come first, then the plan's own additions.
+    /// (live, recursively) from the fork point forward, minus this plan's
+    /// `removed_inherited`, then its own `root_blocks`. Inherited blocks come
+    /// first, then the plan's own additions.
+    ///
+    /// A branch diverges *forward* from its `branch_start_day`: it shares the
+    /// trunk before the fork (those blocks are not part of the branch) and only
+    /// inherits parent blocks that start on or after that day.
     pub fn effective_root_blocks(&self, plan_id: PlanId) -> Vec<WorkBlockId> {
         let Some(plan) = self.plans.get(&plan_id) else {
             return Vec::new();
@@ -419,6 +424,16 @@ impl Model {
         if let Some(parent) = plan.parent {
             if parent != plan.id {
                 for id in self.effective_root_blocks(parent) {
+                    // Only inherit the parent's timeline from the fork point
+                    // forward. Blocks before `branch_start_day` are shared trunk
+                    // history and not part of this branch.
+                    if let Some(fork_day) = plan.branch_start_day {
+                        if let Some(wb) = self.work_blocks.get(&id) {
+                            if wb.start_day < fork_day {
+                                continue;
+                            }
+                        }
+                    }
                     if !plan.removed_inherited.contains(&id) && seen.insert(id) {
                         out.push(id);
                     }
@@ -585,5 +600,73 @@ mod tests {
         assert_eq!(dep.predecessor, block_a);
         assert_eq!(dep.successor, block_b);
         assert_eq!(dep.dependency_type, DependencyType::FinishToStart);
+    }
+
+    /// Places a block at `start_day` and roots it in `plan`.
+    fn place(m: &mut Model, plan: PlanId, name: &str, start: Day) -> WorkBlockId {
+        let id = m.create_work_block(name, est());
+        let wb = m.work_blocks.get_mut(&id).unwrap();
+        wb.start_day = start;
+        wb.duration_days = 5;
+        m.plans.get_mut(&plan).unwrap().root_blocks.push(id);
+        id
+    }
+
+    /// A branch inherits the parent's blocks from the fork point forward, but
+    /// not the shared trunk before it.
+    #[test]
+    fn branch_inherits_only_forward_of_fork() {
+        let mut m = Model::default();
+        let w = m.create_world("w");
+        let main = m.create_plan("main", w, None);
+        let before = place(&mut m, main, "before", 0);
+        let after = place(&mut m, main, "after", 10);
+
+        let branch = m.create_plan("branch", w, Some(5));
+        m.plans.get_mut(&branch).unwrap().parent = Some(main);
+        let own = place(&mut m, branch, "own", 8);
+
+        let eff = m.effective_root_blocks(branch);
+        assert!(!eff.contains(&before), "trunk before the fork is not inherited");
+        assert!(eff.contains(&after), "blocks at/after the fork are inherited");
+        assert!(eff.contains(&own), "branch's own blocks are included");
+    }
+
+    /// `removed_inherited` hides an inherited block in the branch only.
+    #[test]
+    fn branch_can_hide_inherited_block() {
+        let mut m = Model::default();
+        let w = m.create_world("w");
+        let main = m.create_plan("main", w, None);
+        let a = place(&mut m, main, "a", 10);
+        let b = place(&mut m, main, "b", 12);
+
+        let branch = m.create_plan("branch", w, Some(0));
+        m.plans.get_mut(&branch).unwrap().parent = Some(main);
+        m.plans.get_mut(&branch).unwrap().removed_inherited.insert(a);
+
+        let eff = m.effective_root_blocks(branch);
+        assert!(!eff.contains(&a), "hidden inherited block is excluded from branch");
+        assert!(eff.contains(&b), "other inherited blocks remain");
+        // The parent is untouched — hiding is per-branch.
+        assert!(m.effective_root_blocks(main).contains(&a));
+    }
+
+    /// `is_inherited` is true only for top-level blocks a branch shares live
+    /// with its parent, never for the parent's own view or owned additions.
+    #[test]
+    fn is_inherited_distinguishes_shared_from_owned() {
+        let mut m = Model::default();
+        let w = m.create_world("w");
+        let main = m.create_plan("main", w, None);
+        let shared = place(&mut m, main, "shared", 10);
+
+        let branch = m.create_plan("branch", w, Some(0));
+        m.plans.get_mut(&branch).unwrap().parent = Some(main);
+        let owned = place(&mut m, branch, "owned", 11);
+
+        assert!(m.is_inherited(branch, shared), "shared parent block is inherited");
+        assert!(!m.is_inherited(branch, owned), "branch's own block is not inherited");
+        assert!(!m.is_inherited(main, shared), "a root plan never inherits");
     }
 }
