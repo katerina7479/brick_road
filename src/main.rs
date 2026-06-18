@@ -6,7 +6,6 @@ use bevy_egui::{egui, EguiContexts, EguiPlugin, EguiPrimaryContextPass};
 use chrono::Datelike;
 
 pub mod analysis;
-pub mod bands;
 pub mod blocks;
 pub mod calendar;
 pub mod camera;
@@ -51,8 +50,6 @@ fn main() {
         .insert_resource(blocks::ComparePlanState::default())
         .insert_resource(blocks::CompareBlockSpriteMap::default())
         .insert_resource(labels::NestingDepthMap::default())
-        .insert_resource(bands::BandSpriteMap::default())
-        .insert_resource(bands::BandRenameState::default())
         .insert_resource(ForkHoverState::default())
         .add_systems(Startup, (setup_db, setup_camera))
         .add_systems(Startup, setup_demo_schedule.after(setup_db))
@@ -75,18 +72,6 @@ fn main() {
         .add_systems(Update, (camera_nav_keys, update_camera_target, smooth_camera).chain())
         .add_systems(Update, draw_grid)
         .add_systems(Update, draw_branch_markers)
-        .add_systems(Update, bands::draw_band_connectors)
-        .add_systems(Update, bands::render_bands.after(blocks::reconcile_block_sprites))
-        .add_systems(
-            Update,
-            bands::handle_band_label_doubleclick.before(blocks::handle_block_selection),
-        )
-        .add_systems(
-            Update,
-            bands::handle_band_click
-                .before(blocks::handle_block_selection)
-                .after(bands::handle_band_label_doubleclick),
-        )
         .add_systems(Update, handle_fork_hover)
         .add_systems(Update, schedule::update_today_marker)
         .add_systems(Update, sync_total_duration)
@@ -210,7 +195,6 @@ fn main() {
         .add_systems(EguiPrimaryContextPass, blocks::draw_block_tooltip)
         .add_systems(EguiPrimaryContextPass, blocks::draw_size_picker_popup)
         .add_systems(EguiPrimaryContextPass, blocks::draw_size_settings_popup)
-        .add_systems(EguiPrimaryContextPass, bands::draw_band_rename_overlay)
         .run();
 }
 
@@ -489,17 +473,7 @@ fn setup_demo_schedule(mut model: ResMut<model::Model>, mut commands: Commands) 
     // all downstream systems (side_panel_ui, draw_create_mode_overlay, spawn_day_labels, etc.)
     // have a valid Schedule on the very first Update tick.
     if !model.plans.is_empty() {
-        // Default the active plan to a *root* plan (no parent), with the lowest
-        // id for determinism, so a branch never opens as the active full-size
-        // plan on launch. Branches render as bands until switched to.
-        let default_plan = model
-            .plans
-            .values()
-            .filter(|p| p.parent.is_none())
-            .min_by_key(|p| p.id.0)
-            .or_else(|| model.plans.values().min_by_key(|p| p.id.0))
-            .cloned();
-        if let Some(plan) = default_plan {
+        if let Some(plan) = model.plans.values().next().cloned() {
             let graph = graph::build_graph(&model, &plan);
             if let Ok(sched) = schedule::forward_pass(&model, &plan, &graph) {
                 commands.insert_resource(sched);
@@ -620,17 +594,13 @@ fn handle_fork_hover(
             if let Some(active_plan) = model.plans.get(&active_id).cloned() {
                 let wid = active_plan.world_id;
                 let n = model.plans.len() + 1;
-                let new_id = model.create_plan(format!("Branch {n}"), wid, Some(fork_day.max(0)));
-                // A branch is a LIVE view of the plan it forks from: it inherits
-                // the parent's effective blocks (and keeps inheriting new ones)
-                // rather than copying them once. Selected variants carry over so
-                // inherited blocks resolve the same way until the branch diverges.
+                let new_id = model.create_plan(format!("Plan {n}"), wid, Some(fork_day.max(0)));
+                // Copy root blocks and selected variants from the active plan.
                 if let Some(new_plan) = model.plans.get_mut(&new_id) {
-                    new_plan.parent = Some(active_id);
+                    new_plan.root_blocks = active_plan.root_blocks.clone();
                     new_plan.selected_variants = active_plan.selected_variants.clone();
                 }
-                // "Switch to it": the new branch becomes the active, full-size plan.
-                bands::switch_active_plan(&model, &mut schedule, new_id);
+                *schedule = schedule::Schedule::new(active_id);
                 if let Err(e) = db::save_model(&conn, &model) {
                     error!("save_model failed: {e}");
                 }
@@ -639,12 +609,18 @@ fn handle_fork_hover(
     }
 }
 
-/// Draws the fork-hover indicator using gizmos: when `ForkHoverState` has a
-/// hovered day, a ghost vertical line plus small fork arms show where a new
-/// branch would diverge on Ctrl+click. Per-plan branch connectors are drawn by
-/// `bands::draw_band_connectors`.
+/// Draws branch-point markers and fork-hover indicators using gizmos.
+///
+/// For each non-active plan with a `branch_start_day`, draws:
+///   - A vertical colored line at that day spanning the viewport
+///   - A small fork symbol (two short diagonal lines diverging upward)
+///
+/// When `ForkHoverState` has a hovered day, draws a ghost vertical line
+/// showing where a new plan would branch from.
 fn draw_branch_markers(
     mut gizmos: Gizmos,
+    model: Res<model::Model>,
+    schedule: Res<schedule::Schedule>,
     fork: Res<ForkHoverState>,
     cam_q: Query<(&Transform, &Projection), With<Camera2d>>,
     windows: Query<&Window>,
@@ -653,6 +629,34 @@ fn draw_branch_markers(
     let Projection::Orthographic(ortho) = proj else { return };
     let Ok(window) = windows.single() else { return };
     let half_h = (window.height() * 0.5 * ortho.scale).max(800.0);
+
+    let active_id = schedule.plan_id;
+
+    // Branch-point markers for non-active plans.
+    let mut branch_plans: Vec<&model::Plan> = model.plans.values()
+        .filter(|p| p.id != active_id && p.branch_start_day.is_some())
+        .collect();
+    branch_plans.sort_by_key(|p| p.id.0);
+
+    for (idx, plan) in branch_plans.iter().enumerate() {
+        let Some(branch_day) = plan.branch_start_day else { continue };
+        let x = branch_day as f32 * PIXELS_PER_DAY;
+        let lc = blocks::BRANCH_PALETTE[idx % blocks::BRANCH_PALETTE.len()];
+        let color = Color::from(LinearRgba::new(lc.red * 0.7, lc.green * 0.7, lc.blue * 0.7, 0.55));
+
+        // Vertical branch line.
+        gizmos.line_2d(
+            Vec2::new(x, cam_t.translation.y + half_h),
+            Vec2::new(x, cam_t.translation.y - half_h),
+            color,
+        );
+
+        // Fork symbol: two diagonal lines diverging from the branch point.
+        let fork_y = cam_t.translation.y + half_h * 0.30;
+        let arm = ortho.scale * 18.0;
+        gizmos.line_2d(Vec2::new(x, fork_y), Vec2::new(x - arm, fork_y + arm), color);
+        gizmos.line_2d(Vec2::new(x, fork_y), Vec2::new(x + arm, fork_y + arm), color);
+    }
 
     // Fork-hover indicator: ghost line at hovered day.
     if let Some(hovered_day) = fork.hovered_day {
@@ -783,7 +787,6 @@ fn top_bar_ui(
     mut contexts: EguiContexts,
     mut target: ResMut<CameraTarget>,
     model: Res<model::Model>,
-    active: Res<schedule::Schedule>,
     scope: Res<schedule::ViewScope>,
     windows: Query<&Window>,
     today: Res<schedule::TodayMarker>,
@@ -804,7 +807,7 @@ fn top_bar_ui(
                     .fill(egui::Color32::TRANSPARENT)
                     .stroke(egui::Stroke::NONE);
                 if ui.add(btn).on_hover_text("Fit to view [F]").clicked() {
-                    if let Some(new_target) = camera::fit_to_blocks(&model, active.plan_id, &scope, &windows) {
+                    if let Some(new_target) = camera::fit_to_blocks(&model, &scope, &windows) {
                         *target = new_target;
                     }
                 }
@@ -815,7 +818,7 @@ fn top_bar_ui(
                         target.pos.x = x;
                     }
                     if ui.small_button("Fit to view [F]").clicked() {
-                        if let Some(new_target) = camera::fit_to_blocks(&model, active.plan_id, &scope, &windows) {
+                        if let Some(new_target) = camera::fit_to_blocks(&model, &scope, &windows) {
                             *target = new_target;
                         }
                     }

@@ -1799,7 +1799,6 @@ pub fn handle_block_delete(
     mut selected_dep: ResMut<SelectedDependency>,
     name_edit: Res<NameEditState>,
     mut model: ResMut<model::Model>,
-    active_schedule: Res<schedule::Schedule>,
     mut undo: ResMut<UndoStack>,
     conn: NonSend<rusqlite::Connection>,
 ) {
@@ -1819,18 +1818,8 @@ pub fn handle_block_delete(
                 error!("save_model failed: {e}");
             }
         } else if let Some(id) = selected.0 {
-            let plan_id = active_schedule.plan_id;
-            if model.is_inherited(plan_id, id) {
-                // In a branch, an inherited block is shared live with its parent.
-                // "Removing" it hides it in this branch only — record it in the
-                // plan's `removed_inherited` set rather than destroying the block.
-                if let Some(plan) = model.plans.get_mut(&plan_id) {
-                    plan.removed_inherited.insert(id);
-                }
-            } else {
-                undo.last_deletion = Some(build_deletion_snapshot(&model, id));
-                delete_work_block(&mut model, id);
-            }
+            undo.last_deletion = Some(build_deletion_snapshot(&model, id));
+            delete_work_block(&mut model, id);
             if let Err(e) = db::save_model(&conn, &model) {
                 error!("save_model failed: {e}");
             }

@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use bevy::prelude::Resource;
 use chrono::NaiveDate;
@@ -235,13 +235,6 @@ pub struct Plan {
     /// clamped to ≥ d (the working-day offset of "today" at branch creation).
     /// `None` for the baseline plan, which may contain historical blocks.
     pub branch_start_day: Option<Day>,
-    /// The plan this branch forked from, if any. A branch inherits its parent's
-    /// effective blocks (live, recursively) minus `removed_inherited`, then its
-    /// own `root_blocks`.
-    pub parent: Option<PlanId>,
-    /// Inherited block ids hidden in this branch — removed in the branch without
-    /// affecting the parent.
-    pub removed_inherited: HashSet<WorkBlockId>,
 }
 
 /// Central data store. All entities are keyed by their ID type.
@@ -391,65 +384,9 @@ impl Model {
                 selected_variants: HashMap::new(),
                 allocations: vec![],
                 branch_start_day,
-                parent: None,
-                removed_inherited: HashSet::new(),
             },
         );
         id
-    }
-
-    /// The effective top-level blocks of a plan: its parent's effective blocks
-    /// (live, recursively) minus this plan's `removed_inherited`, then its own
-    /// `root_blocks`. Inherited blocks come first, then the plan's own additions.
-    pub fn effective_root_blocks(&self, plan_id: PlanId) -> Vec<WorkBlockId> {
-        let Some(plan) = self.plans.get(&plan_id) else {
-            return Vec::new();
-        };
-        self.effective_root_blocks_of(plan)
-    }
-
-    /// Like [`effective_root_blocks`], but resolves from a `Plan` *reference*
-    /// rather than looking the plan up by id. Callers that work with a modified
-    /// clone of a plan (e.g. swapping in a different `root_blocks` set before
-    /// scheduling) must use this so the clone's own fields are honored; the
-    /// parent chain is still resolved live from the model by id.
-    pub fn effective_root_blocks_of(&self, plan: &Plan) -> Vec<WorkBlockId> {
-        let mut out: Vec<WorkBlockId> = Vec::new();
-        let mut seen: HashSet<WorkBlockId> = HashSet::new();
-        if let Some(parent) = plan.parent {
-            if parent != plan.id {
-                for id in self.effective_root_blocks(parent) {
-                    if !plan.removed_inherited.contains(&id) && seen.insert(id) {
-                        out.push(id);
-                    }
-                }
-            }
-        }
-        for &id in &plan.root_blocks {
-            if seen.insert(id) {
-                out.push(id);
-            }
-        }
-        out
-    }
-
-    /// Whether `block` is a top-level block this plan inherits live from its
-    /// parent branch — present in the parent's effective roots and not owned by
-    /// `plan_id` itself. Plans with no parent never inherit; a block the plan
-    /// has added to its own `root_blocks` is owned, not inherited. Used to
-    /// decide whether deleting a block in a branch should *hide* it (add to
-    /// `removed_inherited`) rather than destroy the shared block globally.
-    pub fn is_inherited(&self, plan_id: PlanId, block: WorkBlockId) -> bool {
-        let Some(plan) = self.plans.get(&plan_id) else {
-            return false;
-        };
-        let Some(parent) = plan.parent else {
-            return false;
-        };
-        if plan.root_blocks.contains(&block) {
-            return false;
-        }
-        self.effective_root_blocks(parent).contains(&block)
     }
 
     /// Sets the internal ID counter. Used by load_model after deserialising

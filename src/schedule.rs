@@ -111,20 +111,6 @@ pub struct ViewScope {
     pub scope_stack: Vec<ScopeEntry>,
 }
 
-/// A plan's effective top-level blocks (inherited from its parent, minus removed,
-/// plus its own), placed (`duration_days > 0`) and sorted by start day. Used as
-/// the top-level view and as the drill-in fallback.
-fn plan_top_blocks(model: &Model, plan_id: PlanId) -> Vec<&WorkBlock> {
-    let mut blocks: Vec<&WorkBlock> = model
-        .effective_root_blocks(plan_id)
-        .into_iter()
-        .filter_map(|id| model.work_blocks.get(&id))
-        .filter(|wb| wb.duration_days > 0)
-        .collect();
-    blocks.sort_by(|a, b| a.start_day.cmp(&b.start_day).then(a.id.0.cmp(&b.id.0)));
-    blocks
-}
-
 /// Returns the blocks visible at the current view scope, sorted by
 /// ascending `start_day` with id as a tie-breaker.
 ///
@@ -135,11 +121,7 @@ fn plan_top_blocks(model: &Model, plan_id: PlanId) -> Vec<&WorkBlock> {
 /// - `ScopeEntry::Block(id)`: placed children from *all* variants of the
 ///   focused block (legacy / programmatic path). Falls back to `sorted_blocks`
 ///   when the block has no placed variant children.
-pub fn visible_blocks<'a>(
-    model: &'a Model,
-    plan_id: PlanId,
-    scope: &ViewScope,
-) -> Vec<&'a WorkBlock> {
+pub fn visible_blocks<'a>(model: &'a Model, scope: &ViewScope) -> Vec<&'a WorkBlock> {
     let sorted = |children: Vec<&'a WorkBlock>| {
         let mut v = children;
         v.sort_by(|a, b| {
@@ -163,7 +145,7 @@ pub fn visible_blocks<'a>(
                     return sorted(children);
                 }
             }
-            plan_top_blocks(model, plan_id)
+            sorted_blocks(model)
         }
         Some(ScopeEntry::Block(focused_id)) => {
             if let Some(wb) = model.work_blocks.get(focused_id) {
@@ -184,9 +166,9 @@ pub fn visible_blocks<'a>(
                     }
                 }
             }
-            plan_top_blocks(model, plan_id)
+            sorted_blocks(model)
         }
-        None => plan_top_blocks(model, plan_id),
+        None => sorted_blocks(model),
     }
 }
 
@@ -205,14 +187,13 @@ pub struct VisibleBlocks {
 /// during block drag/resize (where only position changes, not the visible set).
 pub fn update_visible_blocks(
     model: Res<Model>,
-    schedule: Res<Schedule>,
     scope: Res<ViewScope>,
     mut cache: ResMut<VisibleBlocks>,
 ) {
-    if !model.is_changed() && !scope.is_changed() && !schedule.is_changed() {
+    if !model.is_changed() && !scope.is_changed() {
         return;
     }
-    let new_ids: Vec<WorkBlockId> = visible_blocks(&model, schedule.plan_id, &scope)
+    let new_ids: Vec<WorkBlockId> = visible_blocks(&model, &scope)
         .into_iter()
         .map(|wb| wb.id)
         .collect();
@@ -2013,84 +1994,73 @@ mod tests {
 
     // ── visible_blocks / ScopeEntry tests ──────────────────────────────────────
 
-    /// Fresh model with one empty baseline plan; returns (model, plan_id).
-    fn model_with_plan() -> (Model, PlanId) {
-        let mut m = Model::default();
-        let wid = m.create_world("W");
-        let plan = m.create_plan("P", wid, None);
-        (m, plan)
-    }
-
-    fn placed_block(m: &mut Model, plan: PlanId, name: &str, start: Day, dur: Day) -> WorkBlockId {
+    fn placed_block(m: &mut Model, name: &str, start: Day, dur: Day) -> WorkBlockId {
         let id = m.create_work_block(name, est(dur));
         let wb = m.work_blocks.get_mut(&id).unwrap();
         wb.start_day = start;
         wb.duration_days = dur;
-        if let Some(p) = m.plans.get_mut(&plan) {
-            p.root_blocks.push(id);
-        }
         id
     }
 
     #[test]
     fn visible_blocks_empty_scope_returns_sorted_blocks() {
-        let (mut m, plan) = model_with_plan();
-        let a = placed_block(&mut m, plan, "A", 0, 2);
-        let b = placed_block(&mut m, plan, "B", 3, 1);
+        let mut m = Model::default();
+        let a = placed_block(&mut m, "A", 0, 2);
+        let b = placed_block(&mut m, "B", 3, 1);
         let scope = ViewScope::default();
-        let ids: Vec<WorkBlockId> = visible_blocks(&m, plan, &scope).iter().map(|wb| wb.id).collect();
+        let ids: Vec<WorkBlockId> = visible_blocks(&m, &scope).iter().map(|wb| wb.id).collect();
         assert_eq!(ids, vec![a, b]);
     }
 
     #[test]
     fn visible_blocks_variant_scope_shows_only_that_variants_children() {
-        let (mut m, plan) = model_with_plan();
-        let parent = placed_block(&mut m, plan, "Parent", 0, 5);
+        let mut m = Model::default();
+        let parent = placed_block(&mut m, "Parent", 0, 5);
         let var_a = m.create_variant("Variant A", parent);
         let var_b = m.create_variant("Variant B", parent);
-        let child_a = placed_block(&mut m, plan, "Child A1", 0, 3);
-        let child_b = placed_block(&mut m, plan, "Child B1", 0, 4);
+        let child_a = placed_block(&mut m, "Child A1", 0, 3);
+        let child_b = placed_block(&mut m, "Child B1", 0, 4);
         m.work_blocks.get_mut(&parent).unwrap().variants.extend([var_a, var_b]);
         m.variants.get_mut(&var_a).unwrap().children.push(child_a);
         m.variants.get_mut(&var_b).unwrap().children.push(child_b);
 
         let scope_a = ViewScope { scope_stack: vec![ScopeEntry::Variant(var_a)] };
-        let ids_a: Vec<WorkBlockId> = visible_blocks(&m, plan, &scope_a).iter().map(|wb| wb.id).collect();
+        let ids_a: Vec<WorkBlockId> = visible_blocks(&m, &scope_a).iter().map(|wb| wb.id).collect();
         assert_eq!(ids_a, vec![child_a], "variant A scope shows only child A");
 
         let scope_b = ViewScope { scope_stack: vec![ScopeEntry::Variant(var_b)] };
-        let ids_b: Vec<WorkBlockId> = visible_blocks(&m, plan, &scope_b).iter().map(|wb| wb.id).collect();
+        let ids_b: Vec<WorkBlockId> = visible_blocks(&m, &scope_b).iter().map(|wb| wb.id).collect();
         assert_eq!(ids_b, vec![child_b], "variant B scope shows only child B");
     }
 
     #[test]
     fn visible_blocks_block_scope_shows_all_variant_children() {
-        let (mut m, plan) = model_with_plan();
-        let parent = placed_block(&mut m, plan, "Parent", 0, 5);
+        let mut m = Model::default();
+        let parent = placed_block(&mut m, "Parent", 0, 5);
         let var_a = m.create_variant("Variant A", parent);
         let var_b = m.create_variant("Variant B", parent);
-        let child_a = placed_block(&mut m, plan, "CA", 0, 3);
-        let child_b = placed_block(&mut m, plan, "CB", 4, 2);
+        let child_a = placed_block(&mut m, "CA", 0, 3);
+        let child_b = placed_block(&mut m, "CB", 4, 2);
         m.work_blocks.get_mut(&parent).unwrap().variants.extend([var_a, var_b]);
         m.variants.get_mut(&var_a).unwrap().children.push(child_a);
         m.variants.get_mut(&var_b).unwrap().children.push(child_b);
 
         let scope = ViewScope { scope_stack: vec![ScopeEntry::Block(parent)] };
-        let ids: Vec<WorkBlockId> = visible_blocks(&m, plan, &scope).iter().map(|wb| wb.id).collect();
+        let ids: Vec<WorkBlockId> = visible_blocks(&m, &scope).iter().map(|wb| wb.id).collect();
         assert!(ids.contains(&child_a), "block scope includes child A");
         assert!(ids.contains(&child_b), "block scope includes child B");
     }
 
     #[test]
     fn visible_blocks_variant_scope_falls_back_when_no_placed_children() {
-        let (mut m, plan) = model_with_plan();
-        let top = placed_block(&mut m, plan, "Top", 0, 3);
+        let mut m = Model::default();
+        let top = placed_block(&mut m, "Top", 0, 3);
         let parent = m.create_work_block("Parent", est(5)); // not placed
         let vid = m.create_variant("V", parent);
         // vid has no children at all
 
         let scope = ViewScope { scope_stack: vec![ScopeEntry::Variant(vid)] };
-        let ids: Vec<WorkBlockId> = visible_blocks(&m, plan, &scope).iter().map(|wb| wb.id).collect();
+        let ids: Vec<WorkBlockId> = visible_blocks(&m, &scope).iter().map(|wb| wb.id).collect();
         assert_eq!(ids, vec![top], "falls back to top-level sorted blocks");
     }
 }
