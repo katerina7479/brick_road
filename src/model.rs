@@ -318,6 +318,36 @@ impl Model {
         Some(new_id)
     }
 
+    /// Links a main block into every branch that forks at or before the block's
+    /// start day, as a ghost (shared id).
+    ///
+    /// **Call only right after creating a *new* block in main.** The copy model
+    /// tracks membership (a branch's `root_blocks`) but not removals, so a block
+    /// absent from a branch is ambiguous: never-inherited vs removed-by-user.
+    /// At creation the id is brand new (neither), so appending is unambiguous.
+    /// Calling this on an already-existing block would re-add ghosts a branch
+    /// had removed — don't. Only main's own blocks propagate (a branch-owned
+    /// block is a no-op).
+    pub fn link_main_block_to_branches(&mut self, block_id: WorkBlockId) {
+        let Some(main_id) = self.main_plan_id() else {
+            return;
+        };
+        if !self.plans[&main_id].root_blocks.contains(&block_id) {
+            return;
+        }
+        let Some(start) = self.work_blocks.get(&block_id).map(|wb| wb.start_day) else {
+            return;
+        };
+        for plan in self.plans.values_mut() {
+            let Some(fork) = plan.branch_start_day else {
+                continue; // branches only
+            };
+            if start >= fork && !plan.root_blocks.contains(&block_id) {
+                plan.root_blocks.push(block_id);
+            }
+        }
+    }
+
     /// Adds a new owned block to `plan_id` at the given placement and returns its
     /// id. Only that plan gains the block — other plans (e.g. main) are
     /// untouched. No-op returning the id even if the plan is missing.
@@ -455,6 +485,68 @@ mod tests {
             !m.plans[&main].root_blocks.contains(&owned),
             "a branch-owned block must not appear in main"
         );
+    }
+
+    #[test]
+    fn new_main_block_propagates_to_branches_at_or_after_fork() {
+        let mut m = Model::default();
+        let main = m.create_plan("main", None);
+        let branch = m.fork_main(10).unwrap();
+
+        // A new main block after the fork links into the branch as a ghost.
+        let after = placed(&mut m, main, "after", 15, 3);
+        m.link_main_block_to_branches(after);
+        assert!(m.plans[&branch].root_blocks.contains(&after));
+
+        // One exactly at the fork day also links (consistent with fork_main's >=).
+        let at = placed(&mut m, main, "at", 10, 3);
+        m.link_main_block_to_branches(at);
+        assert!(m.plans[&branch].root_blocks.contains(&at));
+
+        // One before the fork does not.
+        let before = placed(&mut m, main, "before", 4, 3);
+        m.link_main_block_to_branches(before);
+        assert!(!m.plans[&branch].root_blocks.contains(&before));
+    }
+
+    #[test]
+    fn propagation_only_links_branches_after_the_block() {
+        let mut m = Model::default();
+        let main = m.create_plan("main", None);
+        let early = m.fork_main(10).unwrap();
+        let late = m.fork_main(50).unwrap();
+        let mid = placed(&mut m, main, "mid", 20, 3);
+        m.link_main_block_to_branches(mid);
+        assert!(m.plans[&early].root_blocks.contains(&mid), "fork before the block gets it");
+        assert!(!m.plans[&late].root_blocks.contains(&mid), "fork after the block does not");
+    }
+
+    #[test]
+    fn propagation_ignores_branch_owned_blocks() {
+        // A block owned by a branch must not propagate to other branches or main.
+        let mut m = Model::default();
+        let main = m.create_plan("main", None);
+        let a = m.fork_main(0).unwrap();
+        let b = m.fork_main(0).unwrap();
+        let owned = m.add_block_to_plan(a, "owned", 5, 3, 0);
+        m.link_main_block_to_branches(owned);
+        assert!(!m.plans[&b].root_blocks.contains(&owned));
+        assert!(!m.plans[&main].root_blocks.contains(&owned));
+    }
+
+    #[test]
+    fn propagation_is_idempotent_for_an_already_linked_block() {
+        // Linking a block a branch already holds must not duplicate it. (This is
+        // the only safe re-call; see the method docs — link is otherwise
+        // creation-only because removals aren't tracked.)
+        let mut m = Model::default();
+        let main = m.create_plan("main", None);
+        let branch = m.fork_main(10).unwrap();
+        let blk = placed(&mut m, main, "blk", 20, 3);
+        m.link_main_block_to_branches(blk);
+        m.link_main_block_to_branches(blk);
+        let count = m.plans[&branch].root_blocks.iter().filter(|&&id| id == blk).count();
+        assert_eq!(count, 1, "block appears once, not duplicated");
     }
 
     #[test]

@@ -145,7 +145,10 @@ pub fn layout_bands(model: &Model) -> Vec<BandLayout> {
             });
         }
 
-        let rows = (max_row + 1).max(MIN_LANE_ROWS);
+        // +2, not +1: one row to hold the last block (max_row is 0-based) and
+        // one empty row of slack below it, so there's always space to click-add
+        // a new row to the branch.
+        let rows = (max_row + 2).max(MIN_LANE_ROWS);
         let lane_bottom = row0_y - (rows - 1) as f32 * ROW_HEIGHT - ROW_HEIGHT * 0.7;
 
         out.push(BandLayout {
@@ -487,5 +490,29 @@ pub fn draw_plan_rename_overlay(
         rename.editing = None;
     } else if cancel {
         rename.editing = None;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A lane keeps an empty row of slack below its lowest block, so there's
+    /// always space to click-add a new row to the branch.
+    #[test]
+    fn lane_has_a_clickable_gap_row_below_last_block() {
+        let mut m = Model::default();
+        let _main = m.create_plan("main", None);
+        let branch = m.fork_main(0).unwrap();
+        m.add_block_to_plan(branch, "b", 0, 3, 2); // lowest block at row 2
+
+        let bands = layout_bands(&m);
+        let band = bands.iter().find(|b| b.plan_id == branch).unwrap();
+
+        // The center of the empty row just below (row 3) must fall inside the
+        // lane bounds, i.e. a click there lands in this band.
+        let gap_row_y = band.row0_y - 3.0 * ROW_HEIGHT;
+        assert!(gap_row_y > band.lane_bottom, "gap row is above the lane bottom");
+        assert!(gap_row_y <= band.lane_top, "gap row is below the lane top");
     }
 }

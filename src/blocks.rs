@@ -766,6 +766,9 @@ pub fn handle_block_selection(
             if let Some(plan) = model.plans.get_mut(&plan_id) {
                 plan.root_blocks.push(new_id);
             }
+            // A new block on main links through to existing branches as a ghost
+            // (those whose fork day is at/before its start). No-op off main.
+            model.link_main_block_to_branches(new_id);
             if let Err(e) = db::save_model(&conn, &model) {
                 error!("save_model failed: {e}");
             }
@@ -2167,6 +2170,8 @@ pub fn draw_create_mode_overlay(
             if let Some(plan) = model.plans.get_mut(&plan_id) {
                 plan.root_blocks.push(new_id);
             }
+            // A new block on main links through to existing branches as a ghost.
+            model.link_main_block_to_branches(new_id);
             if let Err(e) = db::save_model(&conn, &model) {
                 error!("save_model failed: {e}");
             }
