@@ -188,6 +188,10 @@ pub fn cascade_dependencies(model: &mut Model, root: WorkBlockId) {
         HashMap::new();
     let mut incoming: HashMap<WorkBlockId, Vec<(WorkBlockId, DependencyType, Day)>> =
         HashMap::new();
+    // Cascade follows ALL dependencies, across plans. A block's position is
+    // shared by id, so moving it should push everything that depends on it —
+    // including a branch's dependent when you move a block main shares as a
+    // ghost. (Plan-scoping lives in build_graph, for a plan's own schedule.)
     for dep in model.dependencies.values() {
         outgoing.entry(dep.predecessor).or_default().push((
             dep.successor,
@@ -1589,6 +1593,25 @@ mod tests {
         wb.start_day = start;
         wb.duration_days = dur;
         id
+    }
+
+    #[test]
+    fn cascade_follows_deps_across_plans() {
+        // Cascade is global: moving a block pushes a dependent even when the dep
+        // belongs to a branch — so moving a block that main shares with a branch
+        // as a ghost pushes the branch's own dependent block.
+        let mut m = Model::default();
+        let a = placed(&mut m, "A", 0, 5);
+        let b = placed(&mut m, "B", 5, 3);
+        let branch = m.create_plan("branch", Some(0));
+        m.create_dependency_in(branch, a, b, DependencyType::FinishToStart);
+
+        m.work_blocks.get_mut(&a).unwrap().duration_days = 8;
+        cascade_dependencies(&mut m, a);
+        assert_eq!(
+            m.work_blocks[&b].start_day, 8,
+            "branch dep cascades when its predecessor moves"
+        );
     }
 
     #[test]

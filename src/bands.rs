@@ -22,11 +22,14 @@ use bevy::window::SystemCursorIcon;
 use crate::{
     constants::{PIXELS_PER_DAY, ROW_HEIGHT},
     db,
-    model::{Day, Model, Plan, PlanId, WorkBlockId},
+    model::{Day, DependencyType, Model, Plan, PlanId, WorkBlockId},
 };
 
 /// Pixels from a lane block's right edge that count as the resize handle.
 const EDGE_GRAB_PX: f32 = 8.0;
+/// Visual radius of a dependency edge handle dot, and its hit-test radius.
+const HANDLE_RADIUS: f32 = 4.0;
+const HANDLE_HIT_PX: f32 = 8.0;
 
 /// Gap between main's lowest block and the first lane / between lanes.
 const BAND_GAP: f32 = ROW_HEIGHT * 0.7;
@@ -86,6 +89,27 @@ pub struct LaneBlockRename {
     pub editing: Option<WorkBlockId>,
     pub buf: String,
     last_click: Option<(WorkBlockId, f32)>,
+}
+
+/// In-progress drag to create a branch-local dependency: dragging from one lane
+/// block's edge handle to another in the same lane. `from_right` records which
+/// edge was grabbed (right = the predecessor's finish, left = its start).
+#[derive(Resource, Default)]
+pub struct LaneDepDrag {
+    from: Option<(WorkBlockId, PlanId)>,
+    from_right: bool,
+}
+
+/// Dependency type implied by the source edge (which handle was grabbed) and the
+/// target edge (which half it was dropped on). The drag source is the
+/// predecessor. Mirrors main's `dep_type_from_edges`.
+fn dep_type_from_edges(from_right: bool, to_finish: bool) -> DependencyType {
+    match (from_right, to_finish) {
+        (true, false) => DependencyType::FinishToStart,
+        (true, true) => DependencyType::FinishToFinish,
+        (false, false) => DependencyType::StartToStart,
+        (false, true) => DependencyType::StartToFinish,
+    }
 }
 
 /// One block in a lane, world coordinates.
@@ -679,8 +703,9 @@ pub fn handle_lane_block_edit(
     mut selection: ResMut<LaneSelection>,
     mut rename: ResMut<LaneBlockRename>,
     mut main_selected: ResMut<crate::blocks::SelectedBlock>,
+    dep_drag: Res<LaneDepDrag>,
 ) {
-    if rename.editing.is_some() {
+    if rename.editing.is_some() || dep_drag.from.is_some() {
         return;
     }
     if let Ok(ctx) = egui_ctx.ctx_mut() {
@@ -766,9 +791,160 @@ pub fn handle_lane_block_edit(
         return;
     }
 
-    if mouse.just_released(MouseButton::Left) && drag.active.take().is_some() {
-        if let Err(e) = db::save_model(&conn, &model) {
-            error!("save_model failed: {e}");
+    if mouse.just_released(MouseButton::Left) {
+        if let Some(a) = drag.active.take() {
+            // Push dependents to satisfy deps, exactly like main does on a
+            // drag/resize. Cascade is global, so a dep from a ghost (a block main
+            // shares) to an owned block pushes the owned block too.
+            crate::schedule::cascade_dependencies(&mut model, a.block);
+            if let Err(e) = db::save_model(&conn, &model) {
+                error!("save_model failed: {e}");
+            }
+        }
+    }
+}
+
+/// Drag from a lane block's edge handle to another lane block in the same lane
+/// to create a branch-local dependency. Mirrors main's `handle_dep_drag`, but
+/// the new dep carries the branch's plan id so it never affects main.
+pub fn handle_lane_dep_drag(
+    mut egui_ctx: bevy_egui::EguiContexts,
+    windows: Query<&Window>,
+    camera: Query<(&Camera, &GlobalTransform), With<Camera2d>>,
+    mouse: Res<ButtonInput<MouseButton>>,
+    mut drag: ResMut<LaneDepDrag>,
+    mut model: ResMut<Model>,
+    conn: NonSend<rusqlite::Connection>,
+) {
+    if let Ok(ctx) = egui_ctx.ctx_mut() {
+        if ctx.is_pointer_over_area() {
+            drag.from = None;
+            return;
+        }
+    }
+    let Some(world) = cursor_world(&windows, &camera) else {
+        return;
+    };
+
+    // Press on an edge handle starts the drag (right = predecessor's finish).
+    if mouse.just_pressed(MouseButton::Left) {
+        for band in layout_bands(&model) {
+            for b in &band.blocks {
+                let left = Vec2::new(b.cx - b.w * 0.5, b.cy);
+                let right = Vec2::new(b.cx + b.w * 0.5, b.cy);
+                if (world - right).length() < HANDLE_HIT_PX {
+                    drag.from = Some((b.id, band.plan_id));
+                    drag.from_right = true;
+                    return;
+                }
+                if (world - left).length() < HANDLE_HIT_PX {
+                    drag.from = Some((b.id, band.plan_id));
+                    drag.from_right = false;
+                    return;
+                }
+            }
+        }
+        return;
+    }
+
+    // Release on another block in the same lane creates the dependency.
+    if mouse.just_released(MouseButton::Left) {
+        let Some((from_id, from_plan)) = drag.from.take() else {
+            return;
+        };
+        let Some(hit) = lane_block_at(&model, world) else {
+            return;
+        };
+        if hit.plan != from_plan || hit.id == from_id {
+            return;
+        }
+        let to_finish = world.x >= (hit.left_x + hit.right_x) * 0.5;
+        let dep_type = dep_type_from_edges(drag.from_right, to_finish);
+        let exists = model.dependencies.values().any(|d| {
+            d.plan_id == from_plan
+                && d.predecessor == from_id
+                && d.successor == hit.id
+                && d.dependency_type == dep_type
+        });
+        if !exists {
+            model.create_dependency_in(from_plan, from_id, hit.id, dep_type);
+            if let Err(e) = db::save_model(&conn, &model) {
+                error!("save_model failed: {e}");
+            }
+        }
+    }
+}
+
+/// Draws branch-local dependency edges, edge handles, and the in-progress
+/// drag preview in lane space.
+pub fn draw_lane_dependencies(
+    mut gizmos: Gizmos,
+    model: Res<Model>,
+    drag: Res<LaneDepDrag>,
+    windows: Query<&Window>,
+    camera: Query<(&Camera, &GlobalTransform), With<Camera2d>>,
+) {
+    let edge = Color::srgba(0.35, 0.85, 0.85, 0.65);
+    let dot = Color::srgba(0.35, 0.85, 0.85, 0.5);
+
+    for band in layout_bands(&model) {
+        // (left x, right x, y) for each block in this lane.
+        let geom: std::collections::HashMap<WorkBlockId, (f32, f32, f32)> = band
+            .blocks
+            .iter()
+            .map(|b| (b.id, (b.cx - b.w * 0.5, b.cx + b.w * 0.5, b.cy)))
+            .collect();
+
+        for dep in model.dependencies.values() {
+            if dep.plan_id != band.plan_id {
+                continue;
+            }
+            let (Some(&(pxl, pxr, py)), Some(&(sxl, sxr, sy))) =
+                (geom.get(&dep.predecessor), geom.get(&dep.successor))
+            else {
+                continue;
+            };
+            let (src, dst) = match dep.dependency_type {
+                DependencyType::FinishToStart => (Vec2::new(pxr, py), Vec2::new(sxl, sy)),
+                DependencyType::StartToStart => (Vec2::new(pxl, py), Vec2::new(sxl, sy)),
+                DependencyType::FinishToFinish => (Vec2::new(pxr, py), Vec2::new(sxr, sy)),
+                DependencyType::StartToFinish => (Vec2::new(pxl, py), Vec2::new(sxr, sy)),
+            };
+            gizmos.line_2d(src, dst, edge);
+            // Arrowhead at the destination.
+            let dir = (dst - src).normalize_or_zero();
+            if dir != Vec2::ZERO {
+                let perp = Vec2::new(-dir.y, dir.x);
+                gizmos.line_2d(dst, dst - dir * 8.0 + perp * 4.0, edge);
+                gizmos.line_2d(dst, dst - dir * 8.0 - perp * 4.0, edge);
+            }
+        }
+
+        // Edge handles on every lane block.
+        for b in &band.blocks {
+            gizmos.circle_2d(Vec2::new(b.cx - b.w * 0.5, b.cy), HANDLE_RADIUS, dot);
+            gizmos.circle_2d(Vec2::new(b.cx + b.w * 0.5, b.cy), HANDLE_RADIUS, dot);
+        }
+    }
+
+    // Drag preview: line from the grabbed handle to the cursor.
+    if let Some((from_id, from_plan)) = drag.from {
+        if let Some(world) = cursor_world(&windows, &camera) {
+            for band in layout_bands(&model) {
+                if band.plan_id != from_plan {
+                    continue;
+                }
+                for b in &band.blocks {
+                    if b.id == from_id {
+                        let x = if drag.from_right {
+                            b.cx + b.w * 0.5
+                        } else {
+                            b.cx - b.w * 0.5
+                        };
+                        gizmos.line_2d(Vec2::new(x, b.cy), world, Color::WHITE);
+                    }
+                }
+            }
         }
     }
 }

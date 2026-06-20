@@ -57,7 +57,12 @@ pub fn build_graph(model: &Model, plan: &Plan) -> DependencyGraph {
     }
 
     for dep in model.dependencies.values() {
-        if nodes.contains(&dep.predecessor) && nodes.contains(&dep.successor) {
+        // Dependencies are branch-local: only this plan's own deps shape its
+        // graph, so a branch's deps never affect main's schedule and vice versa.
+        if dep.plan_id == plan.id
+            && nodes.contains(&dep.predecessor)
+            && nodes.contains(&dep.successor)
+        {
             edges.entry(dep.predecessor).or_default().push(Edge {
                 successor: dep.successor,
                 dependency_type: dep.dependency_type,
@@ -252,5 +257,36 @@ mod tests {
         assert!(!graph.nodes.contains(&b));
         let order = topological_sort(&graph).unwrap();
         assert_eq!(order, vec![a]);
+    }
+
+    #[test]
+    fn dependencies_are_branch_local() {
+        // A dependency added in a branch must not shape main's graph, even when
+        // both endpoints are blocks main also has.
+        let mut model = Model::default();
+        let main = model.create_plan("main", None);
+        let branch = model.create_plan("branch", Some(0));
+        let a = model.create_work_block("A");
+        let b = model.create_work_block("B");
+        // Same two blocks live in both plans; the dep belongs to the branch.
+        model.plans.get_mut(&main).unwrap().root_blocks = vec![a, b];
+        model.plans.get_mut(&branch).unwrap().root_blocks = vec![a, b];
+        model.create_dependency_in(branch, a, b, DependencyType::FinishToStart);
+
+        let main_plan = model.plans[&main].clone();
+        let main_graph = build_graph(&model, &main_plan);
+        assert_eq!(
+            main_graph.in_degree.get(&b),
+            Some(&0),
+            "branch dep must not appear in main's graph"
+        );
+
+        let branch_plan = model.plans[&branch].clone();
+        let branch_graph = build_graph(&model, &branch_plan);
+        assert_eq!(
+            branch_graph.in_degree.get(&b),
+            Some(&1),
+            "the dep shapes the branch's own graph"
+        );
     }
 }
