@@ -200,16 +200,11 @@ fn avail_at(rb: &ResourceBlock, t: Day) -> f32 {
 mod tests {
     use super::*;
     use crate::model::{
-        AvailabilitySegment, AvailabilityTimeline, Day, Estimate, Model, ResourceAllocation,
-        ResourceType,
+        AvailabilitySegment, AvailabilityTimeline, Day, Model, ResourceAllocation, ResourceType,
     };
 
-    fn est(d: Day) -> Estimate {
-        Estimate { most_likely: d, optimistic: d, pessimistic: d, confidence: 1.0 }
-    }
-
     fn placed(model: &mut Model, name: &str, start: Day, dur: Day) -> WorkBlockId {
-        let id = model.create_work_block(name, est(dur));
+        let id = model.create_work_block(name);
         let wb = model.work_blocks.get_mut(&id).unwrap();
         wb.start_day = start;
         wb.duration_days = dur;
@@ -217,8 +212,7 @@ mod tests {
     }
 
     fn make_plan(model: &mut Model, allocs: Vec<ResourceAllocation>) -> crate::model::PlanId {
-        let wid = model.create_world("w");
-        let pid = model.create_plan("p", wid, None);
+        let pid = model.create_plan("p", None);
         model.plans.get_mut(&pid).unwrap().allocations = allocs;
         pid
     }
@@ -343,7 +337,11 @@ mod tests {
     // ── analyze_resources tests ─────────────────────────────────────────────
 
     fn alloc(rb: ResourceBlockId, wb: WorkBlockId, factor: f32) -> ResourceAllocation {
-        ResourceAllocation { resource_id: rb, work_block_id: wb, allocation_factor: factor }
+        ResourceAllocation {
+            resource_id: rb,
+            work_block_id: wb,
+            allocation_factor: factor,
+        }
     }
 
     #[test]
@@ -358,9 +356,7 @@ mod tests {
     fn serialized_blocks_no_conflict() {
         // A [0,3) then B [3,6) on R — no overlap, no conflict.
         let mut m = Model::default();
-        let wid = m.create_world("w");
         let r = m.create_resource_block("R", ResourceType::Person);
-        m.worlds.get_mut(&wid).unwrap().resource_ids.push(r);
         let a = placed(&mut m, "A", 0, 3);
         let b = placed(&mut m, "B", 3, 3);
         let pid = make_plan(&mut m, vec![alloc(r, a, 1.0), alloc(r, b, 1.0)]);
@@ -372,9 +368,7 @@ mod tests {
     fn overlapping_full_blocks_conflict() {
         // A [0,5) and B [2,8) both at factor 1.0 → demand 2.0 in [2,5).
         let mut m = Model::default();
-        let wid = m.create_world("w");
         let r = m.create_resource_block("R", ResourceType::Person);
-        m.worlds.get_mut(&wid).unwrap().resource_ids.push(r);
         let a = placed(&mut m, "A", 0, 5);
         let b = placed(&mut m, "B", 2, 6);
         let pid = make_plan(&mut m, vec![alloc(r, a, 1.0), alloc(r, b, 1.0)]);
@@ -396,9 +390,7 @@ mod tests {
     fn partial_allocations_sum_under_capacity_no_conflict() {
         // Two blocks at 0.5 each, fully overlapping → demand 1.0 = capacity.
         let mut m = Model::default();
-        let wid = m.create_world("w");
         let r = m.create_resource_block("R", ResourceType::Person);
-        m.worlds.get_mut(&wid).unwrap().resource_ids.push(r);
         let a = placed(&mut m, "A", 0, 4);
         let b = placed(&mut m, "B", 0, 4);
         let pid = make_plan(&mut m, vec![alloc(r, a, 0.5), alloc(r, b, 0.5)]);
@@ -410,9 +402,7 @@ mod tests {
     fn partial_allocations_exceed_capacity_conflict() {
         // Two blocks at 0.6 each, overlapping → demand 1.2 > 1.0.
         let mut m = Model::default();
-        let wid = m.create_world("w");
         let r = m.create_resource_block("R", ResourceType::Person);
-        m.worlds.get_mut(&wid).unwrap().resource_ids.push(r);
         let a = placed(&mut m, "A", 0, 4);
         let b = placed(&mut m, "B", 0, 4);
         let pid = make_plan(&mut m, vec![alloc(r, a, 0.6), alloc(r, b, 0.6)]);
@@ -426,11 +416,13 @@ mod tests {
     fn reduced_availability_causes_conflict() {
         // R available at factor 0.5; one block allocated at 1.0 → overload.
         let mut m = Model::default();
-        let wid = m.create_world("w");
         let r = m.create_resource_block("R", ResourceType::Person);
-        m.worlds.get_mut(&wid).unwrap().resource_ids.push(r);
         m.resource_blocks.get_mut(&r).unwrap().availability = AvailabilityTimeline {
-            segments: vec![AvailabilitySegment { start: 0, end: 10, factor: 0.5 }],
+            segments: vec![AvailabilitySegment {
+                start: 0,
+                end: 10,
+                factor: 0.5,
+            }],
         };
         let a = placed(&mut m, "A", 0, 5);
         let pid = make_plan(&mut m, vec![alloc(r, a, 1.0)]);
@@ -447,22 +439,35 @@ mod tests {
         // A block placed entirely in that gap at factor 1.2 exceeds capacity 1.0
         // (the gap-is-full-capacity rule), producing a conflict with capacity=1.0.
         let mut m = Model::default();
-        let wid = m.create_world("w");
         let r = m.create_resource_block("R", ResourceType::Person);
-        m.worlds.get_mut(&wid).unwrap().resource_ids.push(r);
         m.resource_blocks.get_mut(&r).unwrap().availability = AvailabilityTimeline {
             segments: vec![
-                AvailabilitySegment { start: 0, end: 5, factor: 0.5 },
-                AvailabilitySegment { start: 8, end: 12, factor: 0.5 },
+                AvailabilitySegment {
+                    start: 0,
+                    end: 5,
+                    factor: 0.5,
+                },
+                AvailabilitySegment {
+                    start: 8,
+                    end: 12,
+                    factor: 0.5,
+                },
             ],
         };
         let a = placed(&mut m, "A", 5, 3); // [5, 8) — entirely in the gap
         let pid = make_plan(&mut m, vec![alloc(r, a, 1.2)]);
         let plan = m.plans[&pid].clone();
         let cs = analyze_resources(&m, &plan);
-        assert_eq!(cs.len(), 1, "expected exactly one conflict window in the gap");
+        assert_eq!(
+            cs.len(),
+            1,
+            "expected exactly one conflict window in the gap"
+        );
         let c = &cs[0];
-        assert!((c.capacity - 1.0).abs() < 1e-5, "gap capacity must default to 1.0");
+        assert!(
+            (c.capacity - 1.0).abs() < 1e-5,
+            "gap capacity must default to 1.0"
+        );
         assert!((c.demand - 1.2).abs() < 1e-5);
         assert!((c.overload - 0.2).abs() < 1e-5);
         assert_eq!(c.window_start, 5);
