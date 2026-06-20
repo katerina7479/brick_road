@@ -87,10 +87,22 @@ pub fn sorted_blocks(model: &Model) -> Vec<&WorkBlock> {
     blocks
 }
 
-/// Returns the plan's placed blocks (`duration_days > 0`), sorted by ascending
-/// `start_day` with `id` as a tie-breaker.
-pub fn visible_blocks(model: &Model) -> Vec<&WorkBlock> {
-    sorted_blocks(model)
+/// Returns the given plan's placed blocks (`duration_days > 0`), sorted by
+/// ascending `start_day` with `id` as a tie-breaker. Only the plan's own
+/// `root_blocks` are returned, so other plans' blocks (e.g. a branch's) never
+/// render on this plan's surface.
+pub fn visible_blocks(model: &Model, plan_id: PlanId) -> Vec<&WorkBlock> {
+    let Some(plan) = model.plans.get(&plan_id) else {
+        return Vec::new();
+    };
+    let mut blocks: Vec<&WorkBlock> = plan
+        .root_blocks
+        .iter()
+        .filter_map(|id| model.work_blocks.get(id))
+        .filter(|wb| wb.duration_days > 0)
+        .collect();
+    blocks.sort_by(|a, b| a.start_day.cmp(&b.start_day).then(a.id.0.cmp(&b.id.0)));
+    blocks
 }
 
 /// Cached result of `visible_blocks()`, recomputed only when `Model` changes.
@@ -106,11 +118,18 @@ pub struct VisibleBlocks {
 /// Only writes to `cache.ids` when the content actually changes, so downstream
 /// systems that check `visible_blocks.is_changed()` do not fire on every frame
 /// during block drag/resize (where only position changes, not the visible set).
-pub fn update_visible_blocks(model: Res<Model>, mut cache: ResMut<VisibleBlocks>) {
-    if !model.is_changed() {
+pub fn update_visible_blocks(
+    model: Res<Model>,
+    schedule: Res<Schedule>,
+    mut cache: ResMut<VisibleBlocks>,
+) {
+    if !model.is_changed() && !schedule.is_changed() {
         return;
     }
-    let new_ids: Vec<WorkBlockId> = visible_blocks(&model).into_iter().map(|wb| wb.id).collect();
+    let new_ids: Vec<WorkBlockId> = visible_blocks(&model, schedule.plan_id)
+        .into_iter()
+        .map(|wb| wb.id)
+        .collect();
     if new_ids != cache.ids {
         cache.ids = new_ids;
     }
@@ -1948,8 +1967,25 @@ mod tests {
         let a = placed_block(&mut m, "A", 0, 2);
         let b = placed_block(&mut m, "B", 3, 1);
         // Unplaced block (duration_days == 0) must be omitted.
-        m.create_work_block("unplaced");
-        let ids: Vec<WorkBlockId> = visible_blocks(&m).iter().map(|wb| wb.id).collect();
+        let unplaced = m.create_work_block("unplaced");
+        let plan = m.create_plan("p", None);
+        m.plans.get_mut(&plan).unwrap().root_blocks = vec![a, b, unplaced];
+        let ids: Vec<WorkBlockId> = visible_blocks(&m, plan).iter().map(|wb| wb.id).collect();
         assert_eq!(ids, vec![a, b]);
+    }
+
+    #[test]
+    fn visible_blocks_excludes_other_plans_blocks() {
+        // A block owned by another plan (e.g. a branch) must not appear in this
+        // plan's visible set, even though it lives in the same Model.
+        let mut m = Model::default();
+        let mine = placed_block(&mut m, "mine", 0, 2);
+        let theirs = placed_block(&mut m, "theirs", 1, 2);
+        let main = m.create_plan("main", None);
+        let branch = m.create_plan("branch", Some(0));
+        m.plans.get_mut(&main).unwrap().root_blocks = vec![mine];
+        m.plans.get_mut(&branch).unwrap().root_blocks = vec![theirs];
+        let ids: Vec<WorkBlockId> = visible_blocks(&m, main).iter().map(|wb| wb.id).collect();
+        assert_eq!(ids, vec![mine]);
     }
 }

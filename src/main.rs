@@ -6,6 +6,7 @@ use bevy_egui::{egui, EguiContexts, EguiPlugin, EguiPrimaryContextPass};
 use chrono::Datelike;
 
 pub mod analysis;
+pub mod bands;
 pub mod blocks;
 pub mod calendar;
 pub mod camera;
@@ -50,6 +51,8 @@ fn main() {
         .insert_resource(blocks::CompareBlockSpriteMap::default())
         .insert_resource(ForkHoverState::default())
         .insert_resource(SelectedPlan::default())
+        .insert_resource(bands::BandEntities::default())
+        .insert_resource(bands::PlanRenameState::default())
         .add_systems(Startup, (setup_db, setup_camera))
         .add_systems(Startup, setup_demo_schedule.after(setup_db))
         .add_systems(
@@ -79,6 +82,13 @@ fn main() {
         )
         .add_systems(Update, draw_grid)
         .add_systems(Update, draw_branch_markers)
+        .add_systems(Update, bands::draw_band_overlays)
+        .add_systems(Update, bands::sync_band_visuals)
+        .add_systems(Update, bands::handle_band_rename_click)
+        .add_systems(
+            Update,
+            bands::handle_band_block_create.before(blocks::handle_block_selection),
+        )
         .add_systems(Update, handle_fork_hover)
         .add_systems(
             Update,
@@ -186,6 +196,7 @@ fn main() {
         .add_systems(EguiPrimaryContextPass, blocks::draw_block_tooltip)
         .add_systems(EguiPrimaryContextPass, blocks::draw_size_picker_popup)
         .add_systems(EguiPrimaryContextPass, blocks::draw_size_settings_popup)
+        .add_systems(EguiPrimaryContextPass, bands::draw_plan_rename_overlay)
         .run();
 }
 
@@ -578,7 +589,6 @@ fn update_analysis(model: Res<model::Model>, mut sa: ResMut<analysis::ScheduleAn
 fn handle_fork_hover(
     mut fork: ResMut<ForkHoverState>,
     mut model: ResMut<model::Model>,
-    mut schedule: ResMut<schedule::Schedule>,
     windows: Query<&Window>,
     camera: Query<(&Camera, &GlobalTransform), With<Camera2d>>,
     mouse: Res<ButtonInput<MouseButton>>,
@@ -604,19 +614,14 @@ fn handle_fork_hover(
 
     fork.hovered_day = world_x.map(|x| (x / PIXELS_PER_DAY).floor() as model::Day);
 
-    // Ctrl+Left-click: fork the active plan from the hovered day.
+    // Ctrl+Left-click: fork main into a new branch at the hovered day.
     let ctrl = keyboard.pressed(KeyCode::ControlLeft) || keyboard.pressed(KeyCode::ControlRight);
     if ctrl && mouse.just_pressed(MouseButton::Left) {
         if let Some(fork_day) = fork.hovered_day {
-            let active_id = schedule.plan_id;
-            if let Some(active_plan) = model.plans.get(&active_id).cloned() {
-                let n = model.plans.len() + 1;
-                let new_id = model.create_plan(format!("Plan {n}"), Some(fork_day.max(0)));
-                // Copy root blocks from the active plan.
-                if let Some(new_plan) = model.plans.get_mut(&new_id) {
-                    new_plan.root_blocks = active_plan.root_blocks.clone();
-                }
-                *schedule = schedule::Schedule::new(active_id);
+            // Fork main into a new branch at the hovered day (clamped ≥ 0). The
+            // branch inherits main's blocks from the fork day forward; see
+            // Model::fork_main for the semantics, which is unit-tested.
+            if model.fork_main(fork_day.max(0)).is_some() {
                 if let Err(e) = db::save_model(&conn, &model) {
                     error!("save_model failed: {e}");
                 }
@@ -848,11 +853,14 @@ fn calendar_ruler_ui(
 fn top_bar_ui(
     mut contexts: EguiContexts,
     mut target: ResMut<CameraTarget>,
-    model: Res<model::Model>,
+    mut model: ResMut<model::Model>,
+    mut schedule: ResMut<schedule::Schedule>,
     windows: Query<&Window>,
     today: Res<schedule::TodayMarker>,
+    conn: NonSend<rusqlite::Connection>,
 ) {
     let Ok(ctx) = contexts.ctx_mut() else { return };
+    let mut clear_all = false;
     egui::TopBottomPanel::top("top_bar")
         .frame(
             egui::Frame::new()
@@ -868,7 +876,7 @@ fn top_bar_ui(
                     .fill(egui::Color32::TRANSPARENT)
                     .stroke(egui::Stroke::NONE);
                 if ui.add(btn).on_hover_text("Fit to view [F]").clicked() {
-                    if let Some(new_target) = camera::fit_to_blocks(&model, &windows) {
+                    if let Some(new_target) = camera::fit_to_blocks(&model, schedule.plan_id, &windows) {
                         *target = new_target;
                     }
                 }
@@ -879,7 +887,7 @@ fn top_bar_ui(
                         target.pos.x = x;
                     }
                     if ui.small_button("Fit to view [F]").clicked() {
-                        if let Some(new_target) = camera::fit_to_blocks(&model, &windows) {
+                        if let Some(new_target) = camera::fit_to_blocks(&model, schedule.plan_id, &windows) {
                             *target = new_target;
                         }
                     }
@@ -888,9 +896,29 @@ fn top_bar_ui(
                             *target = camera::home_target(window);
                         }
                     }
+                    // Dev: wipe all blocks, branches, and links; keep one empty
+                    // main plan to start fresh from.
+                    if ui
+                        .small_button(
+                            egui::RichText::new("⌫ Clear all")
+                                .color(egui::Color32::from_rgb(230, 120, 120)),
+                        )
+                        .on_hover_text("Dev: delete all blocks, branches, and links")
+                        .clicked()
+                    {
+                        clear_all = true;
+                    }
                 });
             });
         });
+
+    if clear_all {
+        let main_id = model.clear_all_work();
+        *schedule = schedule::Schedule::new(main_id);
+        if let Err(e) = db::save_model(&conn, &model) {
+            error!("save_model failed: {e}");
+        }
+    }
 }
 
 /// The branch (forked plan) whose marker is currently selected, if any.
@@ -1001,25 +1029,9 @@ fn handle_branch_delete(
         return;
     }
     if let Some(id) = selected_plan.0.take() {
-        delete_plan(&mut model, id);
+        model.delete_plan(id);
         if let Err(e) = db::save_model(&conn, &model) {
             error!("save_model failed: {e}");
-        }
-    }
-}
-
-/// Removes a forked plan and any work blocks it solely owned. A fork copies the
-/// parent's `root_blocks` (the same block ids), so blocks still rooted by
-/// another plan are left intact — only blocks orphaned by the removal are
-/// deleted.
-fn delete_plan(model: &mut model::Model, plan_id: model::PlanId) {
-    let Some(plan) = model.plans.remove(&plan_id) else {
-        return;
-    };
-    for block in plan.root_blocks {
-        let still_rooted = model.plans.values().any(|p| p.root_blocks.contains(&block));
-        if !still_rooted {
-            blocks::delete_work_block(model, block);
         }
     }
 }
@@ -1028,33 +1040,6 @@ fn delete_plan(model: &mut model::Model, plan_id: model::PlanId) {
 mod tests {
     use super::*;
     use chrono::NaiveDate;
-
-    #[test]
-    fn delete_plan_keeps_shared_blocks_removes_exclusive() {
-        let mut m = model::Model::default();
-        let root = m.create_plan("root", None);
-        let shared = m.create_work_block("shared");
-        m.plans.get_mut(&root).unwrap().root_blocks.push(shared);
-
-        // A fork copies the parent's root_blocks (same `shared` id) and gains
-        // its own exclusive block.
-        let fork = m.create_plan("fork", Some(0));
-        let exclusive = m.create_work_block("exclusive");
-        m.plans.get_mut(&fork).unwrap().root_blocks = vec![shared, exclusive];
-
-        delete_plan(&mut m, fork);
-
-        assert!(!m.plans.contains_key(&fork), "fork plan removed");
-        assert!(
-            m.work_blocks.contains_key(&shared),
-            "block shared with root is kept"
-        );
-        assert!(
-            !m.work_blocks.contains_key(&exclusive),
-            "block only the fork owned is removed"
-        );
-        assert!(m.plans.contains_key(&root), "root plan untouched");
-    }
 
     #[test]
     fn week_bands_at_every_wdpw_boundary() {

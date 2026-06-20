@@ -119,6 +119,7 @@ pub fn camera_nav_keys(
     keyboard: Res<ButtonInput<KeyCode>>,
     mut target: ResMut<CameraTarget>,
     model: Res<Model>,
+    schedule: Res<schedule::Schedule>,
     windows: Query<&Window>,
 ) {
     if egui_ctx
@@ -133,7 +134,7 @@ pub fn camera_nav_keys(
         *target = home_target(window);
     }
     if keyboard.just_pressed(KeyCode::KeyF) {
-        if let Some(new_target) = fit_to_blocks(&model, &windows) {
+        if let Some(new_target) = fit_to_blocks(&model, schedule.plan_id, &windows) {
             *target = new_target;
         }
     }
@@ -142,14 +143,18 @@ pub fn camera_nav_keys(
 /// Computes a `CameraTarget` that fits the visible (placed) blocks into the
 /// timeline area with a 15% padding margin.
 /// Returns `None` when there are no placed visible blocks or no window.
-pub fn fit_to_blocks(model: &Model, windows: &Query<&Window>) -> Option<CameraTarget> {
+pub fn fit_to_blocks(
+    model: &Model,
+    plan_id: crate::model::PlanId,
+    windows: &Query<&Window>,
+) -> Option<CameraTarget> {
     let Ok(window) = windows.single() else {
         return None;
     };
     let window_w = window.width();
     let window_h = window.height();
 
-    let visible: Vec<_> = schedule::visible_blocks(model)
+    let visible: Vec<_> = schedule::visible_blocks(model, plan_id)
         .into_iter()
         .filter(|wb| wb.duration_days > 0)
         .collect();
