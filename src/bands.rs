@@ -17,6 +17,7 @@
 
 use bevy::prelude::*;
 use bevy::sprite::Anchor;
+use bevy::window::SystemCursorIcon;
 
 use crate::{
     constants::{PIXELS_PER_DAY, ROW_HEIGHT},
@@ -51,10 +52,12 @@ pub struct PlanRenameState {
     pub buf: String,
 }
 
-/// The currently selected owned (non-ghost) lane block, if any. Drives the
-/// selection highlight and arms the Delete key for lane blocks.
+/// The currently selected lane block as `(block, plan)`, if any. Carries the
+/// plan because a ghost can appear in several branches — Delete must remove it
+/// from the exact lane it was selected in. Drives the selection highlight and
+/// arms the Delete key for lane blocks.
 #[derive(Resource, Default)]
-pub struct LaneSelection(pub Option<WorkBlockId>);
+pub struct LaneSelection(pub Option<(WorkBlockId, PlanId)>);
 
 /// How an in-progress lane-block drag is changing the block.
 #[derive(Clone, Copy, PartialEq)]
@@ -262,7 +265,7 @@ pub fn draw_band_overlays(
             if !b.owned {
                 rect(&mut gizmos, b, Color::from(b.color));
             }
-            if selection.0 == Some(b.id) {
+            if selection.0 == Some((b.id, band.plan_id)) {
                 rect(&mut gizmos, b, Color::srgba(1.0, 1.0, 1.0, 0.9));
             }
         }
@@ -403,8 +406,9 @@ pub fn handle_band_block_create(
         return;
     };
 
-    // A double-click on an existing owned block is a rename, not a create.
-    if owned_block_at(&model, world).is_some() {
+    // A double-click on an existing lane block (ghost or owned) is a
+    // rename/select, not a create.
+    if lane_block_at(&model, world).is_some() {
         return;
     }
 
@@ -588,8 +592,9 @@ pub fn draw_plan_rename_overlay(
 
 // ── owned lane-block editing ────────────────────────────────────────────────
 
-/// An owned lane block under the cursor, with the geometry needed to drag,
-/// resize, and re-derive its row during a move.
+/// A lane block under the cursor, with the geometry needed to drag, resize, and
+/// re-derive its row during a move. `owned` distinguishes the branch's own
+/// blocks (editable) from inherited ghosts (selectable + removable only).
 struct LaneHit {
     id: WorkBlockId,
     plan: PlanId,
@@ -597,15 +602,13 @@ struct LaneHit {
     row0_y: f32,
     left_x: f32,
     right_x: f32,
+    owned: bool,
 }
 
-/// Finds the owned (non-ghost) lane block under `world`, if any.
-fn owned_block_at(model: &Model, world: Vec2) -> Option<LaneHit> {
+/// Finds the lane block (ghost or owned) under `world`, if any.
+fn lane_block_at(model: &Model, world: Vec2) -> Option<LaneHit> {
     for band in layout_bands(model) {
         for b in &band.blocks {
-            if !b.owned {
-                continue;
-            }
             let hw = b.w * 0.5;
             let hh = GHOST_HEIGHT * 0.5;
             if world.x >= b.cx - hw
@@ -620,11 +623,27 @@ fn owned_block_at(model: &Model, world: Vec2) -> Option<LaneHit> {
                     row0_y: band.row0_y,
                     left_x: b.cx - hw,
                     right_x: b.cx + hw,
+                    owned: b.owned,
                 });
             }
         }
     }
     None
+}
+
+/// The cursor hint for a lane block under `world`, mirroring main's feedback:
+/// resize at the right edge of an owned block, move over its interior, and a
+/// pointer over a ghost (selectable but read-only). `None` when over no block.
+pub fn lane_cursor_at(model: &Model, world: Vec2) -> Option<SystemCursorIcon> {
+    let hit = lane_block_at(model, world)?;
+    if !hit.owned {
+        return Some(SystemCursorIcon::Pointer);
+    }
+    if (world.x - hit.right_x).abs() <= EDGE_GRAB_PX {
+        Some(SystemCursorIcon::EwResize)
+    } else {
+        Some(SystemCursorIcon::Move)
+    }
 }
 
 /// Cursor → world helper shared by the lane interaction systems.
@@ -678,8 +697,19 @@ pub fn handle_lane_block_edit(
         if keyboard.pressed(KeyCode::ControlLeft) || keyboard.pressed(KeyCode::ControlRight) {
             return; // fork gesture
         }
-        if let Some(hit) = owned_block_at(&model, world) {
-            // Double-click → rename; otherwise begin a drag.
+        if let Some(hit) = lane_block_at(&model, world) {
+            // Any lane block selects (so Delete can remove a ghost from the
+            // branch); lane and main selection are exclusive.
+            selection.0 = Some((hit.id, hit.plan));
+            main_selected.0 = None;
+
+            // Ghosts are read-only — they track main, so no drag/resize/rename.
+            if !hit.owned {
+                rename.last_click = None;
+                return;
+            }
+
+            // Double-click an owned block → rename; otherwise begin a drag.
             let now = time.elapsed_secs();
             let double =
                 matches!(rename.last_click, Some((id, t)) if id == hit.id && now - t < 0.4);
@@ -695,8 +725,6 @@ pub fn handle_lane_block_edit(
             }
             rename.last_click = Some((hit.id, now));
 
-            selection.0 = Some(hit.id);
-            main_selected.0 = None; // lane and main selection are exclusive
             let mode = if (world.x - hit.right_x).abs() <= EDGE_GRAB_PX {
                 LaneDragMode::Resize
             } else {
@@ -757,8 +785,10 @@ pub fn clear_lane_selection_on_main_select(
     }
 }
 
-/// Delete/Backspace removes the selected owned lane block (and the underlying
-/// WorkBlock, since it's owned by exactly this branch).
+/// Delete/Backspace removes the selected lane block from its branch. For an
+/// owned block this deletes the underlying WorkBlock; for a ghost it just
+/// removes the membership, hiding the inherited block in this branch only (the
+/// block stays in main). `Model::remove_block_from_plan` handles both.
 pub fn handle_lane_block_delete(
     mut egui_ctx: bevy_egui::EguiContexts,
     keyboard: Res<ButtonInput<KeyCode>>,
@@ -778,21 +808,12 @@ pub fn handle_lane_block_delete(
     if !(keyboard.just_pressed(KeyCode::Delete) || keyboard.just_pressed(KeyCode::Backspace)) {
         return;
     }
-    let Some(id) = selection.0.take() else {
+    let Some((id, plan)) = selection.0.take() else {
         return;
     };
-    // Find the branch that owns it and remove it there (deletes the block since
-    // an owned block is rooted by exactly one plan).
-    let plan = model
-        .plans
-        .values()
-        .find(|p| p.branch_start_day.is_some() && p.root_blocks.contains(&id))
-        .map(|p| p.id);
-    if let Some(plan) = plan {
-        model.remove_block_from_plan(plan, id);
-        if let Err(e) = db::save_model(&conn, &model) {
-            error!("save_model failed: {e}");
-        }
+    model.remove_block_from_plan(plan, id);
+    if let Err(e) = db::save_model(&conn, &model) {
+        error!("save_model failed: {e}");
     }
 }
 

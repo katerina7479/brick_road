@@ -613,6 +613,25 @@ mod tests {
     }
 
     #[test]
+    fn removing_a_ghost_from_one_branch_keeps_it_in_others() {
+        // A main block inherited by two branches: removing it from one branch
+        // leaves it in the other branch and in main.
+        let mut m = Model::default();
+        let main = m.create_plan("main", None);
+        let shared = placed(&mut m, main, "shared", 0, 3);
+        let a = m.fork_main(0).unwrap();
+        let b = m.fork_main(0).unwrap();
+        assert!(m.plans[&a].root_blocks.contains(&shared));
+        assert!(m.plans[&b].root_blocks.contains(&shared));
+
+        m.remove_block_from_plan(a, shared);
+        assert!(!m.plans[&a].root_blocks.contains(&shared), "removed from branch a");
+        assert!(m.plans[&b].root_blocks.contains(&shared), "still in branch b");
+        assert!(m.plans[&main].root_blocks.contains(&shared), "still in main");
+        assert!(m.work_blocks.contains_key(&shared), "block kept");
+    }
+
+    #[test]
     fn set_block_duration_clamps_to_at_least_one() {
         let mut m = Model::default();
         let id = m.create_work_block("b");
