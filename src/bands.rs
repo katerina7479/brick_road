@@ -21,8 +21,11 @@ use bevy::sprite::Anchor;
 use crate::{
     constants::{PIXELS_PER_DAY, ROW_HEIGHT},
     db,
-    model::{Day, Model, Plan, PlanId},
+    model::{Day, Model, Plan, PlanId, WorkBlockId},
 };
+
+/// Pixels from a lane block's right edge that count as the resize handle.
+const EDGE_GRAB_PX: f32 = 8.0;
 
 /// Gap between main's lowest block and the first lane / between lanes.
 const BAND_GAP: f32 = ROW_HEIGHT * 0.7;
@@ -48,8 +51,43 @@ pub struct PlanRenameState {
     pub buf: String,
 }
 
+/// The currently selected owned (non-ghost) lane block, if any. Drives the
+/// selection highlight and arms the Delete key for lane blocks.
+#[derive(Resource, Default)]
+pub struct LaneSelection(pub Option<WorkBlockId>);
+
+/// How an in-progress lane-block drag is changing the block.
+#[derive(Clone, Copy, PartialEq)]
+enum LaneDragMode {
+    Move,
+    Resize,
+}
+
+/// In-progress drag of an owned lane block.
+struct LaneDragActive {
+    block: WorkBlockId,
+    plan: PlanId,
+    mode: LaneDragMode,
+    /// Cursor x minus the block's start-day x at grab time (Move only).
+    grab_offset: f32,
+}
+
+#[derive(Resource, Default)]
+pub struct LaneDrag {
+    active: Option<LaneDragActive>,
+}
+
+/// Inline rename of an owned lane block (reuses the egui overlay pattern).
+#[derive(Resource, Default)]
+pub struct LaneBlockRename {
+    pub editing: Option<WorkBlockId>,
+    pub buf: String,
+    last_click: Option<(WorkBlockId, f32)>,
+}
+
 /// One block in a lane, world coordinates.
 struct BandBlock {
+    id: WorkBlockId,
     cx: f32,
     cy: f32,
     w: f32,
@@ -122,7 +160,9 @@ pub fn layout_bands(model: &Model) -> Vec<BandLayout> {
 
     for branch in branches {
         let fork = branch.branch_start_day.unwrap_or(0);
-        let row0_y = lane_top - ROW_HEIGHT * 0.7;
+        // Drop row 0 a full row below the divider, leaving a header band for the
+        // plan name with clear space above the first row of blocks.
+        let row0_y = lane_top - ROW_HEIGHT;
 
         let mut blocks = Vec::new();
         let mut max_row = 0;
@@ -136,6 +176,7 @@ pub fn layout_bands(model: &Model) -> Vec<BandLayout> {
             max_row = max_row.max(wb.row);
             let w = (wb.duration_days as f32 * PIXELS_PER_DAY).max(1.0);
             blocks.push(BandBlock {
+                id: *id,
                 cx: wb.start_day as f32 * PIXELS_PER_DAY + w * 0.5,
                 cy: row0_y - wb.row as f32 * ROW_HEIGHT,
                 w,
@@ -156,7 +197,7 @@ pub fn layout_bands(model: &Model) -> Vec<BandLayout> {
             fork_day: fork,
             name: branch.name.clone(),
             name_x: fork as f32 * PIXELS_PER_DAY + 4.0,
-            name_y: lane_top - 10.0,
+            name_y: lane_top - 13.0,
             row0_y,
             lane_top,
             lane_bottom,
@@ -180,6 +221,7 @@ pub fn bands_top_y(model: &Model) -> Option<f32> {
 pub fn draw_band_overlays(
     mut gizmos: Gizmos,
     model: Res<Model>,
+    selection: Res<LaneSelection>,
     cam_q: Query<(&Transform, &Projection), With<Camera2d>>,
     windows: Query<&Window>,
 ) {
@@ -195,6 +237,18 @@ pub fn draw_band_overlays(
     let half_w = window.width() * 0.5 * ortho.scale + PIXELS_PER_DAY;
     let cam_x = cam_t.translation.x;
     let divider = Color::srgba(0.55, 0.60, 0.78, 0.30);
+    let rect = |gizmos: &mut Gizmos, b: &BandBlock, color: Color| {
+        let hw = b.w * 0.5;
+        let hh = GHOST_HEIGHT * 0.5;
+        let tl = Vec2::new(b.cx - hw, b.cy + hh);
+        let tr = Vec2::new(b.cx + hw, b.cy + hh);
+        let br = Vec2::new(b.cx + hw, b.cy - hh);
+        let bl = Vec2::new(b.cx - hw, b.cy - hh);
+        gizmos.line_2d(tl, tr, color);
+        gizmos.line_2d(tr, br, color);
+        gizmos.line_2d(br, bl, color);
+        gizmos.line_2d(bl, tl, color);
+    };
 
     for band in layout_bands(&model) {
         gizmos.line_2d(
@@ -203,20 +257,14 @@ pub fn draw_band_overlays(
             divider,
         );
         for b in &band.blocks {
-            if b.owned {
-                continue; // solid bar drawn as an entity
+            // Ghosts: colored outline (transparent interior). Owned: solid bar
+            // drawn as an entity, so only outline it when selected.
+            if !b.owned {
+                rect(&mut gizmos, b, Color::from(b.color));
             }
-            let hw = b.w * 0.5;
-            let hh = GHOST_HEIGHT * 0.5;
-            let tl = Vec2::new(b.cx - hw, b.cy + hh);
-            let tr = Vec2::new(b.cx + hw, b.cy + hh);
-            let br = Vec2::new(b.cx + hw, b.cy - hh);
-            let bl = Vec2::new(b.cx - hw, b.cy - hh);
-            let c = Color::from(b.color);
-            gizmos.line_2d(tl, tr, c);
-            gizmos.line_2d(tr, br, c);
-            gizmos.line_2d(br, bl, c);
-            gizmos.line_2d(bl, tl, c);
+            if selection.0 == Some(b.id) {
+                rect(&mut gizmos, b, Color::srgba(1.0, 1.0, 1.0, 0.9));
+            }
         }
     }
 }
@@ -355,10 +403,21 @@ pub fn handle_band_block_create(
         return;
     };
 
+    // A double-click on an existing owned block is a rename, not a create.
+    if owned_block_at(&model, world).is_some() {
+        return;
+    }
+
     let bands = layout_bands(&model);
     let Some(band) = band_at(&bands, world) else {
         return;
     };
+
+    // The header strip above row 0 is reserved for the plan name — a double-click
+    // there renames the plan, so don't also create a block.
+    if world.y > band.row0_y + GHOST_HEIGHT * 0.5 {
+        return;
+    }
 
     // Require a double-click (≤ 0.4s) to create, matching main's empty-space create.
     let now = time.elapsed_secs();
@@ -434,62 +493,352 @@ pub fn handle_band_rename_click(
     }
 }
 
-/// egui overlay: focused single-line field for the lane being renamed.
+/// Outcome of an inline rename field for one frame.
+enum RenameOutcome {
+    Editing,
+    Commit,
+    Cancel,
+}
+
+/// Draws a single-line text field anchored in-place at `world_pos`, mapped to
+/// the screen via the camera. Enter commits, Escape cancels, clicking away
+/// commits. Shared by the plan-name and lane-block rename overlays.
+fn inline_rename_field(
+    ctx: &bevy_egui::egui::Context,
+    id: &str,
+    buf: &mut String,
+    world_pos: Vec2,
+    camera: &Query<(&Camera, &GlobalTransform), With<Camera2d>>,
+    keys: &ButtonInput<KeyCode>,
+) -> RenameOutcome {
+    if keys.just_pressed(KeyCode::Escape) {
+        return RenameOutcome::Cancel;
+    }
+    let entered = keys.just_pressed(KeyCode::Enter) || keys.just_pressed(KeyCode::NumpadEnter);
+
+    let screen = camera
+        .single()
+        .ok()
+        .and_then(|(cam, gt)| cam.world_to_viewport(gt, world_pos.extend(0.0)).ok())
+        .map(|v| bevy_egui::egui::pos2(v.x, v.y - 10.0))
+        .unwrap_or(bevy_egui::egui::pos2(60.0, 80.0));
+
+    let mut commit = entered;
+    bevy_egui::egui::Area::new(bevy_egui::egui::Id::new(id))
+        .fixed_pos(screen)
+        .show(ctx, |ui| {
+            let resp = ui.add(
+                bevy_egui::egui::TextEdit::singleline(buf)
+                    .min_size(bevy_egui::egui::Vec2::new(140.0, 20.0)),
+            );
+            resp.request_focus();
+            if resp.lost_focus() {
+                commit = true;
+            }
+        });
+
+    if commit {
+        RenameOutcome::Commit
+    } else {
+        RenameOutcome::Editing
+    }
+}
+
+/// In-place text field for renaming a branch, anchored at its lane name.
 pub fn draw_plan_rename_overlay(
     mut contexts: bevy_egui::EguiContexts,
     mut rename: ResMut<PlanRenameState>,
     mut model: ResMut<Model>,
     conn: NonSend<rusqlite::Connection>,
+    camera: Query<(&Camera, &GlobalTransform), With<Camera2d>>,
+    keys: Res<ButtonInput<KeyCode>>,
 ) {
     let Some(plan_id) = rename.editing else {
+        return;
+    };
+    let Some(pos) = layout_bands(&model)
+        .iter()
+        .find(|b| b.plan_id == plan_id)
+        .map(|b| Vec2::new(b.name_x, b.name_y))
+    else {
+        rename.editing = None;
         return;
     };
     let Ok(ctx) = contexts.ctx_mut() else {
         return;
     };
 
-    let mut commit = false;
-    let mut cancel = false;
-    bevy_egui::egui::Window::new("Rename plan")
-        .collapsible(false)
-        .resizable(false)
-        .anchor(bevy_egui::egui::Align2::CENTER_TOP, [0.0, 60.0])
-        .show(ctx, |ui| {
-            let resp = ui.add(
-                bevy_egui::egui::TextEdit::singleline(&mut rename.buf)
-                    .desired_width(220.0)
-                    .hint_text("Plan name"),
-            );
-            resp.request_focus();
-            if resp.lost_focus() && ui.input(|i| i.key_pressed(bevy_egui::egui::Key::Enter)) {
-                commit = true;
-            }
-            if ui.input(|i| i.key_pressed(bevy_egui::egui::Key::Escape)) {
-                cancel = true;
-            }
-            ui.horizontal(|ui| {
-                if ui.button("Save").clicked() {
-                    commit = true;
+    match inline_rename_field(&ctx, "plan_rename", &mut rename.buf, pos, &camera, &keys) {
+        RenameOutcome::Editing => {}
+        RenameOutcome::Commit => {
+            let name = rename.buf.trim().to_string();
+            if !name.is_empty() {
+                if let Some(plan) = model.plans.get_mut(&plan_id) {
+                    plan.name = name;
                 }
-                if ui.button("Cancel").clicked() {
-                    cancel = true;
+                if let Err(e) = db::save_model(&conn, &model) {
+                    error!("save_model failed: {e}");
                 }
-            });
-        });
+            }
+            rename.editing = None;
+        }
+        RenameOutcome::Cancel => rename.editing = None,
+    }
+}
 
-    if commit {
-        let name = rename.buf.trim().to_string();
-        if !name.is_empty() {
-            if let Some(plan) = model.plans.get_mut(&plan_id) {
-                plan.name = name;
+// ── owned lane-block editing ────────────────────────────────────────────────
+
+/// An owned lane block under the cursor, with the geometry needed to drag,
+/// resize, and re-derive its row during a move.
+struct LaneHit {
+    id: WorkBlockId,
+    plan: PlanId,
+    fork_day: Day,
+    row0_y: f32,
+    left_x: f32,
+    right_x: f32,
+}
+
+/// Finds the owned (non-ghost) lane block under `world`, if any.
+fn owned_block_at(model: &Model, world: Vec2) -> Option<LaneHit> {
+    for band in layout_bands(model) {
+        for b in &band.blocks {
+            if !b.owned {
+                continue;
             }
-            if let Err(e) = db::save_model(&conn, &model) {
-                error!("save_model failed: {e}");
+            let hw = b.w * 0.5;
+            let hh = GHOST_HEIGHT * 0.5;
+            if world.x >= b.cx - hw
+                && world.x <= b.cx + hw
+                && world.y >= b.cy - hh
+                && world.y <= b.cy + hh
+            {
+                return Some(LaneHit {
+                    id: b.id,
+                    plan: band.plan_id,
+                    fork_day: band.fork_day,
+                    row0_y: band.row0_y,
+                    left_x: b.cx - hw,
+                    right_x: b.cx + hw,
+                });
             }
         }
+    }
+    None
+}
+
+/// Cursor → world helper shared by the lane interaction systems.
+fn cursor_world(
+    windows: &Query<&Window>,
+    camera: &Query<(&Camera, &GlobalTransform), With<Camera2d>>,
+) -> Option<Vec2> {
+    let window = windows.single().ok()?;
+    let (cam, cam_gt) = camera.single().ok()?;
+    window
+        .cursor_position()
+        .and_then(|c| cam.viewport_to_world_2d(cam_gt, c).ok())
+}
+
+/// Select, move, and resize owned lane blocks. Mirrors main's block drag/resize
+/// but operates in lane space on the branch that owns the block:
+/// - Press on an owned block selects it; near the right edge starts a resize,
+///   otherwise a move. A double-click opens the rename overlay instead.
+/// - Held: move slides `start_day` (clamped ≥ the fork day) and re-derives the
+///   row from the cursor; resize tracks `duration_days`.
+/// - Release: persist.
+#[allow(clippy::too_many_arguments)]
+pub fn handle_lane_block_edit(
+    mut egui_ctx: bevy_egui::EguiContexts,
+    windows: Query<&Window>,
+    camera: Query<(&Camera, &GlobalTransform), With<Camera2d>>,
+    mouse: Res<ButtonInput<MouseButton>>,
+    keyboard: Res<ButtonInput<KeyCode>>,
+    time: Res<Time>,
+    mut model: ResMut<Model>,
+    conn: NonSend<rusqlite::Connection>,
+    mut drag: ResMut<LaneDrag>,
+    mut selection: ResMut<LaneSelection>,
+    mut rename: ResMut<LaneBlockRename>,
+    mut main_selected: ResMut<crate::blocks::SelectedBlock>,
+) {
+    if rename.editing.is_some() {
+        return;
+    }
+    if let Ok(ctx) = egui_ctx.ctx_mut() {
+        if ctx.is_pointer_over_area() {
+            return;
+        }
+    }
+    let Some(world) = cursor_world(&windows, &camera) else {
+        return;
+    };
+
+    if mouse.just_pressed(MouseButton::Left) {
+        drag.active = None;
+        if keyboard.pressed(KeyCode::ControlLeft) || keyboard.pressed(KeyCode::ControlRight) {
+            return; // fork gesture
+        }
+        if let Some(hit) = owned_block_at(&model, world) {
+            // Double-click → rename; otherwise begin a drag.
+            let now = time.elapsed_secs();
+            let double =
+                matches!(rename.last_click, Some((id, t)) if id == hit.id && now - t < 0.4);
+            if double {
+                rename.editing = Some(hit.id);
+                rename.buf = model
+                    .work_blocks
+                    .get(&hit.id)
+                    .map(|wb| wb.name.clone())
+                    .unwrap_or_default();
+                rename.last_click = None;
+                return;
+            }
+            rename.last_click = Some((hit.id, now));
+
+            selection.0 = Some(hit.id);
+            main_selected.0 = None; // lane and main selection are exclusive
+            let mode = if (world.x - hit.right_x).abs() <= EDGE_GRAB_PX {
+                LaneDragMode::Resize
+            } else {
+                LaneDragMode::Move
+            };
+            drag.active = Some(LaneDragActive {
+                block: hit.id,
+                plan: hit.plan,
+                mode,
+                grab_offset: world.x - hit.left_x,
+            });
+        }
+        return;
+    }
+
+    if mouse.pressed(MouseButton::Left) {
+        let Some(a) = &drag.active else { return };
+        let bands = layout_bands(&model);
+        let Some(band) = bands.iter().find(|b| b.plan_id == a.plan) else {
+            return;
+        };
+        match a.mode {
+            LaneDragMode::Move => {
+                let left_x = world.x - a.grab_offset;
+                let day = ((left_x / PIXELS_PER_DAY).round() as Day).max(band.fork_day);
+                let row = ((band.row0_y - world.y) / ROW_HEIGHT).round().max(0.0) as i32;
+                model.set_block_placement(a.block, day, row);
+            }
+            LaneDragMode::Resize => {
+                let start_x = model
+                    .work_blocks
+                    .get(&a.block)
+                    .map(|wb| wb.start_day as f32 * PIXELS_PER_DAY)
+                    .unwrap_or(0.0);
+                let dur = ((world.x - start_x) / PIXELS_PER_DAY).round() as Day;
+                model.set_block_duration(a.block, dur);
+            }
+        }
+        return;
+    }
+
+    if mouse.just_released(MouseButton::Left) && drag.active.take().is_some() {
+        if let Err(e) = db::save_model(&conn, &model) {
+            error!("save_model failed: {e}");
+        }
+    }
+}
+
+/// Keeps lane and main block selection mutually exclusive: when a main block
+/// becomes selected, clear the lane selection, so the Delete key targets exactly
+/// one. (The lane handler already clears the main selection on a lane click.)
+pub fn clear_lane_selection_on_main_select(
+    main_selected: Res<crate::blocks::SelectedBlock>,
+    mut lane: ResMut<LaneSelection>,
+) {
+    if main_selected.is_changed() && main_selected.0.is_some() {
+        lane.0 = None;
+    }
+}
+
+/// Delete/Backspace removes the selected owned lane block (and the underlying
+/// WorkBlock, since it's owned by exactly this branch).
+pub fn handle_lane_block_delete(
+    mut egui_ctx: bevy_egui::EguiContexts,
+    keyboard: Res<ButtonInput<KeyCode>>,
+    mut selection: ResMut<LaneSelection>,
+    rename: Res<LaneBlockRename>,
+    mut model: ResMut<Model>,
+    conn: NonSend<rusqlite::Connection>,
+) {
+    if rename.editing.is_some() {
+        return;
+    }
+    if let Ok(ctx) = egui_ctx.ctx_mut() {
+        if ctx.wants_keyboard_input() {
+            return;
+        }
+    }
+    if !(keyboard.just_pressed(KeyCode::Delete) || keyboard.just_pressed(KeyCode::Backspace)) {
+        return;
+    }
+    let Some(id) = selection.0.take() else {
+        return;
+    };
+    // Find the branch that owns it and remove it there (deletes the block since
+    // an owned block is rooted by exactly one plan).
+    let plan = model
+        .plans
+        .values()
+        .find(|p| p.branch_start_day.is_some() && p.root_blocks.contains(&id))
+        .map(|p| p.id);
+    if let Some(plan) = plan {
+        model.remove_block_from_plan(plan, id);
+        if let Err(e) = db::save_model(&conn, &model) {
+            error!("save_model failed: {e}");
+        }
+    }
+}
+
+/// In-place text field for renaming the selected owned lane block, anchored at
+/// the block.
+pub fn draw_lane_block_rename_overlay(
+    mut contexts: bevy_egui::EguiContexts,
+    mut rename: ResMut<LaneBlockRename>,
+    mut model: ResMut<Model>,
+    conn: NonSend<rusqlite::Connection>,
+    camera: Query<(&Camera, &GlobalTransform), With<Camera2d>>,
+    keys: Res<ButtonInput<KeyCode>>,
+) {
+    let Some(id) = rename.editing else {
+        return;
+    };
+    // Anchor at the block's lane position.
+    let pos = layout_bands(&model).iter().find_map(|band| {
+        band.blocks
+            .iter()
+            .find(|b| b.id == id)
+            .map(|b| Vec2::new(b.cx, b.cy))
+    });
+    let Some(pos) = pos else {
         rename.editing = None;
-    } else if cancel {
-        rename.editing = None;
+        return;
+    };
+    let Ok(ctx) = contexts.ctx_mut() else {
+        return;
+    };
+
+    match inline_rename_field(&ctx, "lane_block_rename", &mut rename.buf, pos, &camera, &keys) {
+        RenameOutcome::Editing => {}
+        RenameOutcome::Commit => {
+            let name = rename.buf.trim().to_string();
+            if !name.is_empty() {
+                if let Some(wb) = model.work_blocks.get_mut(&id) {
+                    wb.name = name;
+                }
+                if let Err(e) = db::save_model(&conn, &model) {
+                    error!("save_model failed: {e}");
+                }
+            }
+            rename.editing = None;
+        }
+        RenameOutcome::Cancel => rename.editing = None,
     }
 }
 
@@ -514,5 +863,24 @@ mod tests {
         let gap_row_y = band.row0_y - 3.0 * ROW_HEIGHT;
         assert!(gap_row_y > band.lane_bottom, "gap row is above the lane bottom");
         assert!(gap_row_y <= band.lane_top, "gap row is below the lane top");
+    }
+
+    /// The plan name sits in a header strip above row 0, clear of the
+    /// block-create zone (so double-clicking the name renames, not creates).
+    #[test]
+    fn plan_name_is_above_the_create_zone() {
+        let mut m = Model::default();
+        let _main = m.create_plan("main", None);
+        let branch = m.fork_main(0).unwrap();
+        let bands = layout_bands(&m);
+        let band = bands.iter().find(|b| b.plan_id == branch).unwrap();
+        // The create zone starts at the top of row 0 (row0_y + half block); the
+        // name must be above it.
+        let create_zone_top = band.row0_y + GHOST_HEIGHT * 0.5;
+        assert!(
+            band.name_y > create_zone_top,
+            "name sits in the reserved header, not the create zone"
+        );
+        assert!(band.name_y <= band.lane_top, "name is below the divider");
     }
 }

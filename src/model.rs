@@ -371,6 +371,46 @@ impl Model {
         id
     }
 
+    /// Sets a block's timeline placement (start day and row). No-op if missing.
+    pub fn set_block_placement(&mut self, id: WorkBlockId, start_day: Day, row: i32) {
+        if let Some(wb) = self.work_blocks.get_mut(&id) {
+            wb.start_day = start_day;
+            wb.row = row;
+        }
+    }
+
+    /// Sets a block's duration in working days, clamped to ≥ 1. No-op if missing.
+    pub fn set_block_duration(&mut self, id: WorkBlockId, duration_days: Day) {
+        if let Some(wb) = self.work_blocks.get_mut(&id) {
+            wb.duration_days = duration_days.max(1);
+        }
+    }
+
+    /// Removes `block_id` from `plan_id`'s membership. If no surviving plan still
+    /// references the block, it is fully deleted (with its dependencies and any
+    /// child `parent` pointers cleared); if it's still shared with another plan
+    /// (e.g. a ghost shared with main) the block itself is kept. This is the one
+    /// operation behind both "delete an owned branch block" and "remove a ghost".
+    pub fn remove_block_from_plan(&mut self, plan_id: PlanId, block_id: WorkBlockId) {
+        if let Some(plan) = self.plans.get_mut(&plan_id) {
+            plan.root_blocks.retain(|&id| id != block_id);
+        }
+        let still_rooted = self
+            .plans
+            .values()
+            .any(|p| p.root_blocks.contains(&block_id));
+        if !still_rooted {
+            self.work_blocks.remove(&block_id);
+            self.dependencies
+                .retain(|_, d| d.predecessor != block_id && d.successor != block_id);
+            for wb in self.work_blocks.values_mut() {
+                if wb.parent == Some(block_id) {
+                    wb.parent = None;
+                }
+            }
+        }
+    }
+
     /// Removes a plan and the work blocks it *solely* owned (not referenced by
     /// any surviving plan), along with their dependencies. Blocks shared with
     /// another plan are left intact. Any surviving block whose `parent` was a
@@ -547,6 +587,39 @@ mod tests {
         m.link_main_block_to_branches(blk);
         let count = m.plans[&branch].root_blocks.iter().filter(|&&id| id == blk).count();
         assert_eq!(count, 1, "block appears once, not duplicated");
+    }
+
+    #[test]
+    fn remove_owned_block_from_branch_deletes_it() {
+        let mut m = Model::default();
+        let _main = m.create_plan("main", None);
+        let branch = m.fork_main(0).unwrap();
+        let owned = m.add_block_to_plan(branch, "owned", 5, 3, 0);
+        m.remove_block_from_plan(branch, owned);
+        assert!(!m.plans[&branch].root_blocks.contains(&owned));
+        assert!(!m.work_blocks.contains_key(&owned), "owned block fully deleted");
+    }
+
+    #[test]
+    fn remove_ghost_from_branch_keeps_shared_block() {
+        let mut m = Model::default();
+        let main = m.create_plan("main", None);
+        let shared = placed(&mut m, main, "shared", 0, 3);
+        let branch = m.fork_main(0).unwrap(); // branch inherits `shared`
+        m.remove_block_from_plan(branch, shared);
+        assert!(!m.plans[&branch].root_blocks.contains(&shared), "ghost removed from branch");
+        assert!(m.work_blocks.contains_key(&shared), "shared block kept (still in main)");
+        assert!(m.plans[&main].root_blocks.contains(&shared));
+    }
+
+    #[test]
+    fn set_block_duration_clamps_to_at_least_one() {
+        let mut m = Model::default();
+        let id = m.create_work_block("b");
+        m.set_block_duration(id, 0);
+        assert_eq!(m.work_blocks[&id].duration_days, 1);
+        m.set_block_duration(id, 7);
+        assert_eq!(m.work_blocks[&id].duration_days, 7);
     }
 
     #[test]
