@@ -53,6 +53,9 @@ fn main() {
         .insert_resource(SelectedPlan::default())
         .insert_resource(bands::BandEntities::default())
         .insert_resource(bands::PlanRenameState::default())
+        .insert_resource(bands::LaneSelection::default())
+        .insert_resource(bands::LaneDrag::default())
+        .insert_resource(bands::LaneBlockRename::default())
         .add_systems(Startup, (setup_db, setup_camera))
         .add_systems(Startup, setup_demo_schedule.after(setup_db))
         .add_systems(
@@ -88,6 +91,15 @@ fn main() {
         .add_systems(
             Update,
             bands::handle_band_block_create.before(blocks::handle_block_selection),
+        )
+        .add_systems(
+            Update,
+            bands::handle_lane_block_edit.before(blocks::handle_block_selection),
+        )
+        .add_systems(Update, bands::handle_lane_block_delete)
+        .add_systems(
+            Update,
+            bands::clear_lane_selection_on_main_select.after(blocks::handle_block_selection),
         )
         .add_systems(Update, handle_fork_hover)
         .add_systems(
@@ -197,6 +209,7 @@ fn main() {
         .add_systems(EguiPrimaryContextPass, blocks::draw_size_picker_popup)
         .add_systems(EguiPrimaryContextPass, blocks::draw_size_settings_popup)
         .add_systems(EguiPrimaryContextPass, bands::draw_plan_rename_overlay)
+        .add_systems(EguiPrimaryContextPass, bands::draw_lane_block_rename_overlay)
         .run();
 }
 
