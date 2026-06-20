@@ -1,12 +1,10 @@
-use std::collections::HashMap;
-
 use chrono::NaiveDate;
 use rusqlite::{Connection, Result};
 
 use crate::model::{
     AvailabilitySegment, AvailabilityTimeline, Dependency, DependencyId, DependencyType, Model,
     Plan, PlanId, ResourceAllocation, ResourceBlock, ResourceBlockId, ResourceType, TShirtSize,
-    Variant, VariantId, WorkBlock, WorkBlockId,
+    WorkBlock, WorkBlockId,
 };
 
 pub fn create_tables(conn: &Connection) -> Result<()> {
@@ -35,8 +33,8 @@ pub fn create_tables(conn: &Connection) -> Result<()> {
         "ALTER TABLE work_blocks ADD COLUMN priority INTEGER NOT NULL DEFAULT 1",
         "ALTER TABLE work_blocks ADD COLUMN t_shirt_size TEXT",
         "ALTER TABLE work_blocks ADD COLUMN block_row INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE work_blocks ADD COLUMN parent_id INTEGER",
         "ALTER TABLE plans ADD COLUMN branch_start_day INTEGER",
-        "ALTER TABLE plans ADD COLUMN selected_variants TEXT NOT NULL DEFAULT ''",
     ] {
         match conn.execute_batch(sql) {
             Ok(()) => {}
@@ -52,6 +50,7 @@ pub fn create_tables(conn: &Connection) -> Result<()> {
     for sql in [
         "ALTER TABLE plans DROP COLUMN world_id",
         "ALTER TABLE plans DROP COLUMN parent_plan_id",
+        "ALTER TABLE plans DROP COLUMN selected_variants",
         "ALTER TABLE resource_blocks DROP COLUMN world_id",
         "ALTER TABLE work_blocks DROP COLUMN estimate_most_likely",
         "ALTER TABLE work_blocks DROP COLUMN estimate_optimistic",
@@ -76,7 +75,10 @@ pub fn create_tables(conn: &Connection) -> Result<()> {
          DROP TABLE IF EXISTS plan_variant_selections;
          DROP TABLE IF EXISTS plan_removed_inherited;
          DROP TABLE IF EXISTS estimate_snapshots;
-         DROP TABLE IF EXISTS confidence_factors;",
+         DROP TABLE IF EXISTS confidence_factors;
+         DROP TABLE IF EXISTS variants;
+         DROP TABLE IF EXISTS variant_children;
+         DROP TABLE IF EXISTS variant_block_positions;",
     )?;
     // Seed default t-shirt sizes on first use (table created above).
     let count: i64 = conn.query_row("SELECT COUNT(*) FROM t_shirt_sizes", [], |r| r.get(0))?;
@@ -96,29 +98,6 @@ pub fn create_tables(conn: &Connection) -> Result<()> {
         )?;
     }
     Ok(())
-}
-
-/// Encodes a plan's `selected_variants` map as `"block:variant,block:variant"`
-/// (u64:u64 pairs, comma-separated). An empty map encodes to "".
-fn encode_selected_variants(map: &HashMap<WorkBlockId, VariantId>) -> String {
-    map.iter()
-        .map(|(wb, var)| format!("{}:{}", wb.0, var.0))
-        .collect::<Vec<_>>()
-        .join(",")
-}
-
-/// Decodes the `"block:variant,..."` encoding produced by
-/// [`encode_selected_variants`]. Empty/malformed pairs are skipped.
-fn decode_selected_variants(s: &str) -> HashMap<WorkBlockId, VariantId> {
-    let mut map = HashMap::new();
-    for pair in s.split(',').filter(|p| !p.is_empty()) {
-        if let Some((wb, var)) = pair.split_once(':') {
-            if let (Ok(wb), Ok(var)) = (wb.parse::<u64>(), var.parse::<u64>()) {
-                map.insert(WorkBlockId(wb), VariantId(var));
-            }
-        }
-    }
-    map
 }
 
 /// Persists the complete Model to SQLite in a single transaction.
@@ -146,8 +125,6 @@ pub fn save_model(conn: &Connection, model: &Model) -> Result<()> {
     tx.execute_batch(
         "DELETE FROM resource_allocations;
          DELETE FROM plan_blocks;
-         DELETE FROM variant_children;
-         DELETE FROM variant_block_positions;
          DELETE FROM availability_segments;
          DELETE FROM calendar_non_working_dates;
          DELETE FROM t_shirt_sizes;
@@ -179,8 +156,8 @@ pub fn save_model(conn: &Connection, model: &Model) -> Result<()> {
             "INSERT INTO work_blocks
                  (id, name,
                   start_day, duration_days, color_r, color_g, color_b, description, priority,
-                  t_shirt_size, block_row)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                  t_shirt_size, block_row, parent_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
              ON CONFLICT(id) DO UPDATE SET
                  name = excluded.name,
                  start_day = excluded.start_day,
@@ -191,7 +168,8 @@ pub fn save_model(conn: &Connection, model: &Model) -> Result<()> {
                  description = excluded.description,
                  priority = excluded.priority,
                  t_shirt_size = excluded.t_shirt_size,
-                 block_row = excluded.block_row",
+                 block_row = excluded.block_row,
+                 parent_id = excluded.parent_id",
             (
                 wb.id.0 as i64,
                 &wb.name,
@@ -204,27 +182,8 @@ pub fn save_model(conn: &Connection, model: &Model) -> Result<()> {
                 wb.priority as i64,
                 &wb.t_shirt_size,
                 wb.row as i64,
+                wb.parent.map(|p| p.0 as i64),
             ),
-        )?;
-    }
-
-    // variants: use INSERT OR REPLACE rather than ON CONFLICT DO UPDATE because
-    // the UNIQUE(parent_work_block_id, sort_order) constraint would fire if two
-    // variants swap positions during an in-place UPDATE. INSERT OR REPLACE
-    // deletes the conflicting row first, then inserts, avoiding the collision.
-    // variant_children was cleared in phase 1, so any cascade-delete is safe.
-    let mut variant_sort_order: HashMap<u64, i64> = HashMap::new();
-    for wb in model.work_blocks.values() {
-        for (order, &var_id) in wb.variants.iter().enumerate() {
-            variant_sort_order.insert(var_id.0, order as i64);
-        }
-    }
-    for v in model.variants.values() {
-        let order = variant_sort_order.get(&v.id.0).copied().unwrap_or(0);
-        tx.execute(
-            "INSERT OR REPLACE INTO variants (id, name, parent_work_block_id, sort_order)
-             VALUES (?1, ?2, ?3, ?4)",
-            (v.id.0 as i64, &v.name, v.parent.0 as i64, order),
         )?;
     }
 
@@ -250,18 +209,12 @@ pub fn save_model(conn: &Connection, model: &Model) -> Result<()> {
 
     for plan in model.plans.values() {
         tx.execute(
-            "INSERT INTO plans (id, name, branch_start_day, selected_variants)
-             VALUES (?1, ?2, ?3, ?4)
+            "INSERT INTO plans (id, name, branch_start_day)
+             VALUES (?1, ?2, ?3)
              ON CONFLICT(id) DO UPDATE SET
                  name = excluded.name,
-                 branch_start_day = excluded.branch_start_day,
-                 selected_variants = excluded.selected_variants",
-            (
-                plan.id.0 as i64,
-                &plan.name,
-                plan.branch_start_day,
-                encode_selected_variants(&plan.selected_variants),
-            ),
+                 branch_start_day = excluded.branch_start_day",
+            (plan.id.0 as i64, &plan.name, plan.branch_start_day),
         )?;
     }
 
@@ -307,11 +260,6 @@ pub fn save_model(conn: &Connection, model: &Model) -> Result<()> {
     )?;
     delete_stale(
         &tx,
-        "variants",
-        &model.variants.keys().map(|k| k.0).collect::<Vec<_>>(),
-    )?;
-    delete_stale(
-        &tx,
         "resource_blocks",
         &model
             .resource_blocks
@@ -340,24 +288,6 @@ pub fn save_model(conn: &Connection, model: &Model) -> Result<()> {
                     seg.factor as f64,
                     order as i64,
                 ),
-            )?;
-        }
-    }
-
-    for v in model.variants.values() {
-        for (order, &child_id) in v.children.iter().enumerate() {
-            tx.execute(
-                "INSERT INTO variant_children (variant_id, child_work_block_id, sort_order)
-                 VALUES (?1, ?2, ?3)",
-                (v.id.0 as i64, child_id.0 as i64, order as i64),
-            )?;
-        }
-        for (&wb_id, &(sd, dd)) in &v.block_positions {
-            tx.execute(
-                "INSERT INTO variant_block_positions
-                     (variant_id, work_block_id, start_day, duration_days)
-                 VALUES (?1, ?2, ?3, ?4)",
-                (v.id.0 as i64, wb_id.0 as i64, sd as f64, dd as f64),
             )?;
         }
     }
@@ -503,7 +433,7 @@ pub fn load_model(conn: &Connection) -> Result<Model> {
         let mut stmt = conn.prepare(
             "SELECT id, name,
                     start_day, duration_days, color_r, color_g, color_b, description, priority,
-                    t_shirt_size, block_row
+                    t_shirt_size, block_row, parent_id
              FROM work_blocks",
         )?;
         let rows = stmt.query_map([], |row| {
@@ -519,6 +449,7 @@ pub fn load_model(conn: &Connection) -> Result<Model> {
                 row.get::<_, i64>(8)?,
                 row.get::<_, Option<String>>(9)?,
                 row.get::<_, i64>(10)?,
+                row.get::<_, Option<i64>>(11)?,
             ))
         })?;
         for row in rows {
@@ -534,6 +465,7 @@ pub fn load_model(conn: &Connection) -> Result<Model> {
                 priority,
                 t_shirt_size,
                 block_row,
+                parent_id,
             ) = row?;
             let color = match (cr, cg, cb) {
                 (Some(r), Some(g), Some(b)) => Some([r as f32, g as f32, b as f32]),
@@ -545,7 +477,7 @@ pub fn load_model(conn: &Connection) -> Result<Model> {
                 WorkBlock {
                     id: WorkBlockId(id as u64),
                     name,
-                    variants: vec![],
+                    parent: parent_id.map(|p| WorkBlockId(p as u64)),
                     start_day: start_day as i32,
                     duration_days: duration_days as i32,
                     row: block_row as i32,
@@ -555,80 +487,6 @@ pub fn load_model(conn: &Connection) -> Result<Model> {
                     t_shirt_size,
                 },
             );
-        }
-    }
-
-    // variants — ORDER BY preserves wb.variants ordering; children populated below
-    {
-        let mut stmt = conn.prepare(
-            "SELECT id, name, parent_work_block_id
-             FROM variants
-             ORDER BY parent_work_block_id, sort_order",
-        )?;
-        let rows = stmt.query_map([], |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, i64>(2)?,
-            ))
-        })?;
-        for row in rows {
-            let (id, name, parent_id) = row?;
-            bump!(id);
-            let var_id = VariantId(id as u64);
-            let parent = WorkBlockId(parent_id as u64);
-            model.variants.insert(
-                var_id,
-                Variant {
-                    id: var_id,
-                    name,
-                    parent,
-                    children: vec![],
-                    block_positions: std::collections::HashMap::new(),
-                },
-            );
-            if let Some(wb) = model.work_blocks.get_mut(&parent) {
-                wb.variants.push(var_id);
-            }
-        }
-    }
-
-    // variant_children → populate variant.children (order preserved)
-    {
-        let mut stmt = conn.prepare(
-            "SELECT variant_id, child_work_block_id
-             FROM variant_children
-             ORDER BY variant_id, sort_order",
-        )?;
-        let rows = stmt.query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)))?;
-        for row in rows {
-            let (var_id, child_id) = row?;
-            if let Some(v) = model.variants.get_mut(&VariantId(var_id as u64)) {
-                v.children.push(WorkBlockId(child_id as u64));
-            }
-        }
-    }
-
-    // variant_block_positions → restore snapshots into variant.block_positions
-    {
-        let mut stmt = conn.prepare(
-            "SELECT variant_id, work_block_id, start_day, duration_days
-             FROM variant_block_positions",
-        )?;
-        let rows = stmt.query_map([], |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, i64>(1)?,
-                row.get::<_, i64>(2)?,
-                row.get::<_, i64>(3)?,
-            ))
-        })?;
-        for row in rows {
-            let (var_id, wb_id, sd, dd) = row?;
-            if let Some(v) = model.variants.get_mut(&VariantId(var_id as u64)) {
-                v.block_positions
-                    .insert(WorkBlockId(wb_id as u64), (sd as i32, dd as i32));
-            }
         }
     }
 
@@ -666,18 +524,16 @@ pub fn load_model(conn: &Connection) -> Result<Model> {
 
     // plans
     {
-        let mut stmt =
-            conn.prepare("SELECT id, name, branch_start_day, selected_variants FROM plans")?;
+        let mut stmt = conn.prepare("SELECT id, name, branch_start_day FROM plans")?;
         let rows = stmt.query_map([], |row| {
             Ok((
                 row.get::<_, i64>(0)?,
                 row.get::<_, String>(1)?,
                 row.get::<_, Option<f64>>(2)?,
-                row.get::<_, String>(3)?,
             ))
         })?;
         for row in rows {
-            let (id, name, branch_start_day, selected_variants) = row?;
+            let (id, name, branch_start_day) = row?;
             bump!(id);
             model.plans.insert(
                 PlanId(id as u64),
@@ -685,7 +541,6 @@ pub fn load_model(conn: &Connection) -> Result<Model> {
                     id: PlanId(id as u64),
                     name,
                     root_blocks: vec![],
-                    selected_variants: decode_selected_variants(&selected_variants),
                     allocations: vec![],
                     branch_start_day: branch_start_day.map(|d| d as i32),
                 },
@@ -816,28 +671,11 @@ pub fn validate_model(model: &Model) -> Result<()> {
     let mut errors: Vec<String> = Vec::new();
 
     for (wb_id, wb) in &model.work_blocks {
-        for &var_id in &wb.variants {
-            if !model.variants.contains_key(&var_id) {
+        if let Some(parent) = wb.parent {
+            if !model.work_blocks.contains_key(&parent) {
                 errors.push(format!(
-                    "WorkBlock {} lists Variant {} which does not exist",
-                    wb_id.0, var_id.0
-                ));
-            }
-        }
-    }
-
-    for (var_id, v) in &model.variants {
-        if !model.work_blocks.contains_key(&v.parent) {
-            errors.push(format!(
-                "Variant {} has parent WorkBlock {} which does not exist",
-                var_id.0, v.parent.0
-            ));
-        }
-        for &child_id in &v.children {
-            if !model.work_blocks.contains_key(&child_id) {
-                errors.push(format!(
-                    "Variant {} child WorkBlock {} does not exist",
-                    var_id.0, child_id.0
+                    "WorkBlock {} has parent WorkBlock {} which does not exist",
+                    wb_id.0, parent.0
                 ));
             }
         }
@@ -865,25 +703,6 @@ pub fn validate_model(model: &Model) -> Result<()> {
                     "Plan {} root_block WorkBlock {} does not exist",
                     plan_id.0, wb_id.0
                 ));
-            }
-        }
-        for (&wb_id, &var_id) in &plan.selected_variants {
-            if !model.work_blocks.contains_key(&wb_id) {
-                errors.push(format!(
-                    "Plan {} selected_variants key WorkBlock {} does not exist",
-                    plan_id.0, wb_id.0
-                ));
-            }
-            match model.variants.get(&var_id) {
-                None => errors.push(format!(
-                    "Plan {} selected Variant {} does not exist",
-                    plan_id.0, var_id.0
-                )),
-                Some(v) if v.parent != wb_id => errors.push(format!(
-                    "Plan {} selects Variant {} for WorkBlock {} but Variant's parent is {}",
-                    plan_id.0, var_id.0, wb_id.0, v.parent.0
-                )),
-                Some(_) => {}
             }
         }
         for alloc in &plan.allocations {
@@ -955,8 +774,7 @@ fn dependency_type_str(dt: DependencyType) -> &'static str {
 mod tests {
     use super::*;
     use crate::model::{
-        AvailabilitySegment, Day, DependencyType, ResourceAllocation, ResourceType, Variant,
-        VariantId, WorkBlockId,
+        AvailabilitySegment, Day, DependencyType, ResourceAllocation, ResourceType, WorkBlockId,
     };
     use rusqlite::Connection;
 
@@ -994,7 +812,6 @@ mod tests {
 
         assert_eq!(m.work_blocks, loaded.work_blocks);
         assert!(loaded.plans.is_empty());
-        assert!(loaded.variants.is_empty());
         assert!(loaded.dependencies.is_empty());
         assert!(loaded.resource_blocks.is_empty());
     }
@@ -1031,12 +848,8 @@ mod tests {
         let wb_a = wb(&mut m, "Design", 3);
         let wb_b = wb(&mut m, "Implement", 10);
         let wb_child = wb(&mut m, "Sub-task", 4);
-
-        let v1 = m.create_variant("fast", wb_b);
-        let v2 = m.create_variant("thorough", wb_b);
-        m.work_blocks.get_mut(&wb_b).unwrap().variants.push(v1);
-        m.work_blocks.get_mut(&wb_b).unwrap().variants.push(v2);
-        m.variants.get_mut(&v1).unwrap().children.push(wb_child);
+        // wb_child is a child of wb_b — exercises the parent_id round-trip.
+        m.work_blocks.get_mut(&wb_child).unwrap().parent = Some(wb_b);
 
         let dep_id = m.create_dependency(wb_a, wb_b, DependencyType::FinishToStart);
         m.dependencies.get_mut(&dep_id).unwrap().lag = 1;
@@ -1044,11 +857,6 @@ mod tests {
         let plan_id = m.create_plan("alpha", None);
         m.plans.get_mut(&plan_id).unwrap().root_blocks.push(wb_a);
         m.plans.get_mut(&plan_id).unwrap().root_blocks.push(wb_b);
-        m.plans
-            .get_mut(&plan_id)
-            .unwrap()
-            .selected_variants
-            .insert(wb_b, v1);
         m.plans
             .get_mut(&plan_id)
             .unwrap()
@@ -1072,7 +880,6 @@ mod tests {
         let loaded = load_model(&conn).unwrap();
 
         assert_eq!(m.work_blocks, loaded.work_blocks);
-        assert_eq!(m.variants, loaded.variants);
         assert_eq!(m.dependencies, loaded.dependencies);
         assert_eq!(m.resource_blocks, loaded.resource_blocks);
 
@@ -1082,7 +889,6 @@ mod tests {
             let got = loaded.plans.get(pid).expect("plan missing after load");
             assert_eq!(orig.name, got.name);
             assert_eq!(orig.root_blocks, got.root_blocks);
-            assert_eq!(orig.selected_variants, got.selected_variants);
             let mut a = orig.allocations.clone();
             let mut b = got.allocations.clone();
             a.sort_by_key(|x| (x.resource_id.0, x.work_block_id.0));
@@ -1092,44 +898,18 @@ mod tests {
     }
 
     #[test]
-    fn selected_variants_round_trip() {
+    fn parent_id_round_trip() {
         let conn = open_in_memory();
         let mut m = Model::default();
-        let parent_a = m.create_work_block("A");
-        let parent_b = m.create_work_block("B");
-        let va = m.create_variant("va", parent_a);
-        let vb = m.create_variant("vb", parent_b);
-        m.work_blocks.get_mut(&parent_a).unwrap().variants.push(va);
-        m.work_blocks.get_mut(&parent_b).unwrap().variants.push(vb);
-        let plan_id = m.create_plan("p", None);
-        m.plans
-            .get_mut(&plan_id)
-            .unwrap()
-            .selected_variants
-            .insert(parent_a, va);
-        m.plans
-            .get_mut(&plan_id)
-            .unwrap()
-            .selected_variants
-            .insert(parent_b, vb);
+        let parent = m.create_work_block("parent");
+        let child = m.create_work_block("child");
+        m.work_blocks.get_mut(&child).unwrap().parent = Some(parent);
 
         save_model(&conn, &m).unwrap();
         let loaded = load_model(&conn).unwrap();
-        assert_eq!(
-            m.plans[&plan_id].selected_variants,
-            loaded.plans[&plan_id].selected_variants
-        );
-    }
 
-    #[test]
-    fn selected_variants_encoding() {
-        let mut map = HashMap::new();
-        assert_eq!(encode_selected_variants(&map), "");
-        assert!(decode_selected_variants("").is_empty());
-        map.insert(WorkBlockId(3), VariantId(7));
-        let enc = encode_selected_variants(&map);
-        assert_eq!(enc, "3:7");
-        assert_eq!(decode_selected_variants(&enc), map);
+        assert_eq!(loaded.work_blocks.get(&child).unwrap().parent, Some(parent));
+        assert_eq!(loaded.work_blocks.get(&parent).unwrap().parent, None);
     }
 
     #[test]
@@ -1207,16 +987,9 @@ mod tests {
         let rb = m.create_resource_block("Alice", ResourceType::Person);
         let wb_a = m.create_work_block("a");
         let wb_b = m.create_work_block("b");
-        let v = m.create_variant("v", wb_a);
-        m.work_blocks.get_mut(&wb_a).unwrap().variants.push(v);
         let _dep = m.create_dependency(wb_a, wb_b, DependencyType::FinishToStart);
         let plan_id = m.create_plan("p", None);
         m.plans.get_mut(&plan_id).unwrap().root_blocks.push(wb_a);
-        m.plans
-            .get_mut(&plan_id)
-            .unwrap()
-            .selected_variants
-            .insert(wb_a, v);
         m.plans
             .get_mut(&plan_id)
             .unwrap()
@@ -1230,46 +1003,14 @@ mod tests {
     }
 
     #[test]
-    fn validate_catches_orphan_variant_parent() {
+    fn validate_catches_orphan_parent() {
         let mut m = Model::default();
-        let wb_id = m.create_work_block("wb");
-        let v_id = m.create_variant("v", wb_id);
-        m.work_blocks.get_mut(&wb_id).unwrap().variants.push(v_id);
-        m.variants.insert(
-            VariantId(999),
-            Variant {
-                id: VariantId(999),
-                name: "orphan".into(),
-                parent: WorkBlockId(888),
-                children: vec![],
-                block_positions: std::collections::HashMap::new(),
-            },
-        );
+        let child = m.create_work_block("child");
+        m.work_blocks.get_mut(&child).unwrap().parent = Some(WorkBlockId(888));
         let err = validate_model(&m).unwrap_err().to_string();
         assert!(
             err.contains("888"),
             "expected missing parent ID 888 in: {err}"
-        );
-    }
-
-    #[test]
-    fn validate_catches_mismatched_variant_selection() {
-        let mut m = Model::default();
-        let wb_a = m.create_work_block("a");
-        let wb_b = m.create_work_block("b");
-        let v = m.create_variant("v", wb_a);
-        m.work_blocks.get_mut(&wb_a).unwrap().variants.push(v);
-        let plan_id = m.create_plan("p", None);
-        // Select variant v (parent = wb_a) for wb_b — wrong parent
-        m.plans
-            .get_mut(&plan_id)
-            .unwrap()
-            .selected_variants
-            .insert(wb_b, v);
-        let err = validate_model(&m).unwrap_err().to_string();
-        assert!(
-            err.contains("parent"),
-            "expected parent mismatch message in: {err}"
         );
     }
 
@@ -1372,32 +1113,6 @@ mod tests {
     }
 
     #[test]
-    fn variant_block_positions_round_trip() {
-        let conn = open_in_memory();
-        let mut m = Model::default();
-        let wb_parent = wb(&mut m, "parent", 3);
-        let wb_child = wb(&mut m, "child", 2);
-        let vid = m.create_variant("fast", wb_parent);
-        m.work_blocks
-            .get_mut(&wb_parent)
-            .unwrap()
-            .variants
-            .push(vid);
-        m.variants.get_mut(&vid).unwrap().children.push(wb_child);
-        m.variants
-            .get_mut(&vid)
-            .unwrap()
-            .block_positions
-            .insert(wb_child, (5, 3));
-
-        save_model(&conn, &m).unwrap();
-        let loaded = load_model(&conn).unwrap();
-
-        let loaded_v = loaded.variants.get(&vid).unwrap();
-        assert_eq!(loaded_v.block_positions.get(&wb_child), Some(&(5, 3)));
-    }
-
-    #[test]
     fn quarter_colors_round_trip() {
         let conn = open_in_memory();
         let mut m = Model::default();
@@ -1445,30 +1160,8 @@ CREATE TABLE IF NOT EXISTS work_blocks (
     duration_days        INTEGER NOT NULL DEFAULT 0,
     color_r              REAL,
     color_g              REAL,
-    color_b              REAL
-);
-
-CREATE TABLE IF NOT EXISTS variants (
-    id                   INTEGER PRIMARY KEY,
-    name                 TEXT    NOT NULL,
-    parent_work_block_id INTEGER NOT NULL REFERENCES work_blocks(id),
-    sort_order           INTEGER NOT NULL,
-    UNIQUE (parent_work_block_id, sort_order)
-);
-
-CREATE TABLE IF NOT EXISTS variant_children (
-    variant_id           INTEGER NOT NULL REFERENCES variants(id),
-    child_work_block_id  INTEGER NOT NULL REFERENCES work_blocks(id),
-    sort_order           INTEGER NOT NULL,
-    PRIMARY KEY (variant_id, sort_order)
-);
-
-CREATE TABLE IF NOT EXISTS variant_block_positions (
-    variant_id    INTEGER NOT NULL REFERENCES variants(id),
-    work_block_id INTEGER NOT NULL REFERENCES work_blocks(id),
-    start_day     INTEGER NOT NULL,
-    duration_days INTEGER NOT NULL,
-    PRIMARY KEY (variant_id, work_block_id)
+    color_b              REAL,
+    parent_id            INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS dependencies (
@@ -1481,8 +1174,7 @@ CREATE TABLE IF NOT EXISTS dependencies (
 
 CREATE TABLE IF NOT EXISTS plans (
     id                INTEGER PRIMARY KEY,
-    name              TEXT    NOT NULL,
-    selected_variants TEXT    NOT NULL DEFAULT ''
+    name              TEXT    NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS plan_blocks (

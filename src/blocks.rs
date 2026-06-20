@@ -10,7 +10,7 @@ use crate::{
     constants::{PIXELS_PER_DAY, ROW_HEIGHT},
     db, graph,
     model::{self, Day, DependencyType, PlanId, WorkBlockId},
-    schedule::{self, ViewScope},
+    schedule,
 };
 
 const BLOCK_HEIGHT: f32 = 28.0;
@@ -1597,7 +1597,6 @@ pub fn handle_name_edit(
     time: Res<Time>,
     model: Res<model::Model>,
     mut name_edit: ResMut<NameEditState>,
-    mut scope: ResMut<ViewScope>,
     block_query: Query<(&BlockSprite, &Transform, &Sprite)>,
 ) {
     if name_edit.editing.is_some() {
@@ -1625,9 +1624,7 @@ pub fn handle_name_edit(
 
     let now = time.elapsed_secs();
 
-    // Double-click on a block sprite.
-    // If the block has variants → drill into its children.
-    // If the block has no variants → enter inline name-edit mode.
+    // Double-click on a block sprite → enter inline name-edit mode.
     for (block_sprite, transform, sprite) in &block_query {
         let Some(size) = sprite.custom_size else {
             continue;
@@ -1644,14 +1641,9 @@ pub fn handle_name_edit(
                 if last_id == id && now - last_time < 0.4 {
                     name_edit.last_click = None;
                     if let Some(wb) = model.work_blocks.get(&id) {
-                        if !wb.variants.is_empty() {
-                            // Push onto the stack to drill into this block's children.
-                            scope.scope_stack.push(schedule::ScopeEntry::Block(id));
-                        } else {
-                            // Rename the block inline.
-                            name_edit.editing = Some(id);
-                            name_edit.text_buf = wb.name.clone();
-                        }
+                        // Rename the block inline.
+                        name_edit.editing = Some(id);
+                        name_edit.text_buf = wb.name.clone();
                     }
                     return;
                 }
@@ -1750,17 +1742,14 @@ pub fn draw_name_edit_overlay(
 /// Snapshot of everything removed by a single block deletion, enabling undo.
 struct DeletedBlockSnapshot {
     blocks: Vec<model::WorkBlock>,
-    variants: Vec<model::Variant>,
     dependencies: Vec<model::Dependency>,
     /// (plan_id, root_block_ids that were in this plan)
     plan_roots: Vec<(model::PlanId, Vec<WorkBlockId>)>,
-    /// (plan_id, selected_variants entries for deleted blocks)
-    plan_sel_vars: Vec<(model::PlanId, Vec<(WorkBlockId, model::VariantId)>)>,
     /// (plan_id, allocations for deleted blocks)
     plan_allocs: Vec<(model::PlanId, Vec<model::ResourceAllocation>)>,
-    /// (variant_id, child_ids) for surviving variants whose children lists
-    /// contained deleted blocks — needed to restore hierarchy on undo.
-    variant_child_refs: Vec<(model::VariantId, Vec<WorkBlockId>)>,
+    /// Surviving blocks whose `parent` pointed at the deleted block — cleared to
+    /// `None` by `delete_work_block` and restored to the deleted id on undo.
+    reparented_children: Vec<WorkBlockId>,
 }
 
 /// Single-slot undo buffer for block deletions. Holds the most recent deletion;
@@ -1771,70 +1760,30 @@ pub struct UndoStack {
 }
 
 fn build_deletion_snapshot(model: &model::Model, id: WorkBlockId) -> DeletedBlockSnapshot {
-    // Mirror the BFS in delete_work_block to find all blocks that will be removed.
-    let mut to_delete: Vec<WorkBlockId> = vec![id];
-    let mut visited: HashSet<WorkBlockId> = HashSet::from([id]);
-    let mut i = 0;
-    while i < to_delete.len() {
-        let cur = to_delete[i];
-        if let Some(wb) = model.work_blocks.get(&cur) {
-            for &var_id in &wb.variants {
-                if let Some(var) = model.variants.get(&var_id) {
-                    for &child_id in &var.children {
-                        if visited.insert(child_id) {
-                            to_delete.push(child_id);
-                        }
-                    }
-                }
-            }
-        }
-        i += 1;
-    }
-    let delete_set: HashSet<WorkBlockId> = to_delete.iter().copied().collect();
-
-    let blocks = to_delete
-        .iter()
-        .filter_map(|&bid| model.work_blocks.get(&bid).cloned())
-        .collect();
-    let variants = model
-        .variants
-        .values()
-        .filter(|v| delete_set.contains(&v.parent))
+    // Only the block itself is deleted (blocks are flat now).
+    let blocks = model
+        .work_blocks
+        .get(&id)
         .cloned()
-        .collect();
+        .into_iter()
+        .collect::<Vec<_>>();
     let dependencies = model
         .dependencies
         .values()
-        .filter(|d| delete_set.contains(&d.predecessor) || delete_set.contains(&d.successor))
+        .filter(|d| d.predecessor == id || d.successor == id)
         .cloned()
         .collect();
 
     let mut plan_roots = Vec::new();
-    let mut plan_sel_vars = Vec::new();
     let mut plan_allocs = Vec::new();
     for (&plan_id, plan) in &model.plans {
-        let roots: Vec<WorkBlockId> = plan
-            .root_blocks
-            .iter()
-            .filter(|&&b| delete_set.contains(&b))
-            .copied()
-            .collect();
-        if !roots.is_empty() {
-            plan_roots.push((plan_id, roots));
-        }
-        let sel: Vec<(WorkBlockId, model::VariantId)> = plan
-            .selected_variants
-            .iter()
-            .filter(|(b, _)| delete_set.contains(b))
-            .map(|(&b, &v)| (b, v))
-            .collect();
-        if !sel.is_empty() {
-            plan_sel_vars.push((plan_id, sel));
+        if plan.root_blocks.contains(&id) {
+            plan_roots.push((plan_id, vec![id]));
         }
         let allocs: Vec<model::ResourceAllocation> = plan
             .allocations
             .iter()
-            .filter(|a| delete_set.contains(&a.work_block_id))
+            .filter(|a| a.work_block_id == id)
             .cloned()
             .collect();
         if !allocs.is_empty() {
@@ -1842,45 +1791,28 @@ fn build_deletion_snapshot(model: &model::Model, id: WorkBlockId) -> DeletedBloc
         }
     }
 
-    // Capture references from surviving variants (not owned by deleted blocks)
-    // whose children lists include deleted blocks — delete_work_block strips
-    // these but restore needs to re-add them.
-    let variant_child_refs = model
-        .variants
-        .iter()
-        .filter(|(_, v)| !delete_set.contains(&v.parent))
-        .filter_map(|(&vid, v)| {
-            let refs: Vec<WorkBlockId> = v
-                .children
-                .iter()
-                .filter(|&&b| delete_set.contains(&b))
-                .copied()
-                .collect();
-            if refs.is_empty() {
-                None
-            } else {
-                Some((vid, refs))
-            }
-        })
+    // Surviving blocks parented to the deleted block — delete_work_block clears
+    // their parent, and undo must restore it.
+    let reparented_children = model
+        .work_blocks
+        .values()
+        .filter(|wb| wb.parent == Some(id))
+        .map(|wb| wb.id)
         .collect();
 
     DeletedBlockSnapshot {
         blocks,
-        variants,
         dependencies,
         plan_roots,
-        plan_sel_vars,
         plan_allocs,
-        variant_child_refs,
+        reparented_children,
     }
 }
 
 fn restore_deletion_snapshot(model: &mut model::Model, snap: DeletedBlockSnapshot) {
+    let restored_ids: Vec<WorkBlockId> = snap.blocks.iter().map(|wb| wb.id).collect();
     for wb in snap.blocks {
         model.work_blocks.insert(wb.id, wb);
-    }
-    for var in snap.variants {
-        model.variants.insert(var.id, var);
     }
     for dep in snap.dependencies {
         model.dependencies.insert(dep.id, dep);
@@ -1891,13 +1823,6 @@ fn restore_deletion_snapshot(model: &mut model::Model, snap: DeletedBlockSnapsho
                 if !plan.root_blocks.contains(&bid) {
                     plan.root_blocks.push(bid);
                 }
-            }
-        }
-    }
-    for (plan_id, sel_vars) in snap.plan_sel_vars {
-        if let Some(plan) = model.plans.get_mut(&plan_id) {
-            for (bid, vid) in sel_vars {
-                plan.selected_variants.insert(bid, vid);
             }
         }
     }
@@ -1913,12 +1838,11 @@ fn restore_deletion_snapshot(model: &mut model::Model, snap: DeletedBlockSnapsho
             }
         }
     }
-    for (vid, children) in snap.variant_child_refs {
-        if let Some(var) = model.variants.get_mut(&vid) {
-            for bid in children {
-                if !var.children.contains(&bid) {
-                    var.children.push(bid);
-                }
+    // Re-point children at the restored parent (the deleted block).
+    if let Some(&parent_id) = restored_ids.first() {
+        for child_id in snap.reparented_children {
+            if let Some(child) = model.work_blocks.get_mut(&child_id) {
+                child.parent = Some(parent_id);
             }
         }
     }
@@ -1993,60 +1917,30 @@ pub fn handle_undo(
     }
 }
 
-/// Remove a work block and all of its descendants (variants' children,
-/// recursively) from the model, cleaning up all cross-references.
+/// Remove a single work block from the model, cleaning up all cross-references.
 ///
 /// Deleted:
-/// - The work block itself and every descendant `WorkBlock`
-/// - All `Dependency` edges that touch any deleted block
-/// - Entries in `plan.root_blocks`, `plan.selected_variants`, and
-///   `plan.allocations` for every deleted block
-/// - All `Variant` records whose parent is any deleted block
-/// - References to deleted blocks in the `children` lists of surviving variants
+/// - The work block itself
+/// - All `Dependency` edges that touch it
+/// - Entries in `plan.root_blocks` and `plan.allocations` for it
+///
+/// Any surviving block whose `parent` pointed at the deleted block has its
+/// `parent` reset to `None` to avoid a dangling reference.
 pub fn delete_work_block(model: &mut model::Model, id: WorkBlockId) {
-    // BFS to collect the block and all of its variant descendants.
-    let mut to_delete: Vec<WorkBlockId> = vec![id];
-    let mut visited: HashSet<WorkBlockId> = HashSet::from([id]);
-    let mut i = 0;
-    while i < to_delete.len() {
-        let cur = to_delete[i];
-        if let Some(wb) = model.work_blocks.get(&cur) {
-            for &var_id in &wb.variants.clone() {
-                if let Some(var) = model.variants.get(&var_id) {
-                    for &child_id in &var.children.clone() {
-                        if visited.insert(child_id) {
-                            to_delete.push(child_id);
-                        }
-                    }
-                }
-            }
-        }
-        i += 1;
-    }
-    let delete_set: HashSet<WorkBlockId> = to_delete.iter().copied().collect();
-
-    for &del_id in &to_delete {
-        model.work_blocks.remove(&del_id);
-    }
-    model.dependencies.retain(|_, dep| {
-        !delete_set.contains(&dep.predecessor) && !delete_set.contains(&dep.successor)
-    });
-    for plan in model.plans.values_mut() {
-        plan.root_blocks.retain(|bid| !delete_set.contains(bid));
-        for &del_id in &to_delete {
-            plan.selected_variants.remove(&del_id);
-        }
-        plan.allocations
-            .retain(|a| !delete_set.contains(&a.work_block_id));
-    }
-    // Remove deleted IDs from surviving variants' children lists before
-    // removing the variants themselves, so the retain below is consistent.
-    for variant in model.variants.values_mut() {
-        variant.children.retain(|bid| !delete_set.contains(bid));
-    }
+    model.work_blocks.remove(&id);
     model
-        .variants
-        .retain(|_, v| !delete_set.contains(&v.parent));
+        .dependencies
+        .retain(|_, dep| dep.predecessor != id && dep.successor != id);
+    for plan in model.plans.values_mut() {
+        plan.root_blocks.retain(|&bid| bid != id);
+        plan.allocations.retain(|a| a.work_block_id != id);
+    }
+    // Clear dangling parent references on surviving children.
+    for wb in model.work_blocks.values_mut() {
+        if wb.parent == Some(id) {
+            wb.parent = None;
+        }
+    }
 }
 
 #[cfg(test)]
@@ -2063,19 +1957,21 @@ mod tests {
     }
 
     #[test]
-    fn delete_block_with_variants_removes_children() {
+    fn delete_block_clears_dangling_child_parent() {
         let mut m = Model::default();
         let parent = m.create_work_block("P");
-        let var = m.create_variant("V", parent);
         let child = m.create_work_block("C");
-        m.work_blocks.get_mut(&parent).unwrap().variants.push(var);
-        m.variants.get_mut(&var).unwrap().children.push(child);
+        m.work_blocks.get_mut(&child).unwrap().parent = Some(parent);
 
         delete_work_block(&mut m, parent);
 
         assert!(!m.work_blocks.contains_key(&parent), "parent removed");
-        assert!(!m.work_blocks.contains_key(&child), "child removed");
-        assert!(!m.variants.contains_key(&var), "variant removed");
+        assert!(m.work_blocks.contains_key(&child), "child survives");
+        assert_eq!(
+            m.work_blocks.get(&child).unwrap().parent,
+            None,
+            "child parent cleared"
+        );
     }
 
     #[test]
@@ -2105,24 +2001,19 @@ mod tests {
     }
 
     #[test]
-    fn delete_recursive_two_levels() {
+    fn delete_block_only_removes_itself() {
+        // Blocks are flat: deleting a parent leaves its children in place
+        // (with parent cleared), it does not cascade.
         let mut m = Model::default();
         let parent = m.create_work_block("P");
-        let var = m.create_variant("V", parent);
         let child = m.create_work_block("C");
-        let var2 = m.create_variant("V2", child);
-        let grandchild = m.create_work_block("GC");
-        m.work_blocks.get_mut(&parent).unwrap().variants.push(var);
-        m.variants.get_mut(&var).unwrap().children.push(child);
-        m.work_blocks.get_mut(&child).unwrap().variants.push(var2);
-        m.variants.get_mut(&var2).unwrap().children.push(grandchild);
+        m.work_blocks.get_mut(&child).unwrap().parent = Some(parent);
 
         delete_work_block(&mut m, parent);
 
         assert!(!m.work_blocks.contains_key(&parent));
-        assert!(!m.work_blocks.contains_key(&child));
-        assert!(!m.work_blocks.contains_key(&grandchild));
-        assert!(m.variants.is_empty());
+        assert!(m.work_blocks.contains_key(&child), "child not cascaded");
+        assert_eq!(m.work_blocks.get(&child).unwrap().parent, None);
     }
 }
 

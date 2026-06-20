@@ -11,7 +11,6 @@ macro_rules! id_newtype {
 }
 
 id_newtype!(WorkBlockId);
-id_newtype!(VariantId);
 id_newtype!(ResourceBlockId);
 id_newtype!(DependencyId);
 id_newtype!(PlanId);
@@ -20,15 +19,14 @@ id_newtype!(PlanId);
 /// Rendering boundaries must cast: `day as f32 * PIXELS_PER_DAY`.
 pub type Day = i32;
 
-/// A unit of work. Leaf blocks carry their own duration; blocks with variants
-/// represent a choice between alternative implementations, each potentially
-/// containing further child blocks.
+/// A unit of work that carries its own duration.
 #[derive(Debug, Clone, PartialEq)]
 pub struct WorkBlock {
     pub id: WorkBlockId,
     pub name: String,
-    /// Alternative implementations of this block (mutually exclusive).
-    pub variants: Vec<VariantId>,
+    /// Optional parent block. Children of a block are blocks whose `parent`
+    /// equals that block's id. `None` for top-level blocks.
+    pub parent: Option<WorkBlockId>,
     /// User-defined placement: start offset in days from the plan origin.
     /// 0.0 until the user manually positions the block.
     pub start_day: Day,
@@ -87,21 +85,6 @@ impl Default for CalendarConfig {
             ],
         }
     }
-}
-
-/// One alternative decomposition of a parent WorkBlock into an ordered sequence
-/// of child WorkBlocks.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Variant {
-    pub id: VariantId,
-    pub name: String,
-    pub parent: WorkBlockId,
-    /// Ordered child WorkBlocks that collectively implement this variant.
-    pub children: Vec<WorkBlockId>,
-    /// Saved (start_day, duration_days) for each child, snapshotted when this
-    /// variant is deactivated and restored when it is re-activated. Only
-    /// entries for blocks that were placed (duration_days > 0) are stored.
-    pub block_positions: HashMap<WorkBlockId, (Day, Day)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -164,15 +147,13 @@ pub struct ResourceAllocation {
     pub allocation_factor: f32,
 }
 
-/// A proposed future: a named scenario that selects blocks and variants.
+/// A proposed future: a named scenario that selects blocks.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Plan {
     pub id: PlanId,
     pub name: String,
     /// Top-level work blocks in this plan (roots of the hierarchy).
     pub root_blocks: Vec<WorkBlockId>,
-    /// For blocks that have variants, the selected variant in this plan.
-    pub selected_variants: HashMap<WorkBlockId, VariantId>,
     /// Resource allocations for this plan.
     pub allocations: Vec<ResourceAllocation>,
     /// When `Some(d)`, this plan is a future branch: block start_day is
@@ -187,7 +168,6 @@ pub struct Plan {
 pub struct Model {
     next_id: u64,
     pub work_blocks: HashMap<WorkBlockId, WorkBlock>,
-    pub variants: HashMap<VariantId, Variant>,
     pub resource_blocks: HashMap<ResourceBlockId, ResourceBlock>,
     pub dependencies: HashMap<DependencyId, Dependency>,
     pub plans: HashMap<PlanId, Plan>,
@@ -210,7 +190,7 @@ impl Model {
             WorkBlock {
                 id,
                 name: name.into(),
-                variants: vec![],
+                parent: None,
                 start_day: 0,
                 duration_days: 0,
                 row: 0,
@@ -218,21 +198,6 @@ impl Model {
                 description: String::new(),
                 priority: 1,
                 t_shirt_size: None,
-            },
-        );
-        id
-    }
-
-    pub fn create_variant(&mut self, name: impl Into<String>, parent: WorkBlockId) -> VariantId {
-        let id = VariantId(self.alloc_id());
-        self.variants.insert(
-            id,
-            Variant {
-                id,
-                name: name.into(),
-                parent,
-                children: vec![],
-                block_positions: HashMap::new(),
             },
         );
         id
@@ -288,7 +253,6 @@ impl Model {
                 id,
                 name: name.into(),
                 root_blocks: vec![],
-                selected_variants: HashMap::new(),
                 allocations: vec![],
                 branch_start_day,
             },
@@ -306,10 +270,6 @@ impl Model {
 
     pub fn get_work_block(&self, id: WorkBlockId) -> Option<&WorkBlock> {
         self.work_blocks.get(&id)
-    }
-
-    pub fn get_variant(&self, id: VariantId) -> Option<&Variant> {
-        self.variants.get(&id)
     }
 
     pub fn get_resource_block(&self, id: ResourceBlockId) -> Option<&ResourceBlock> {
@@ -333,7 +293,6 @@ mod tests {
     fn default_model_is_empty() {
         let m = Model::default();
         assert!(m.work_blocks.is_empty());
-        assert!(m.variants.is_empty());
         assert!(m.resource_blocks.is_empty());
         assert!(m.dependencies.is_empty());
         assert!(m.plans.is_empty());
@@ -346,7 +305,7 @@ mod tests {
         let block = m.get_work_block(id).unwrap();
         assert_eq!(block.name, "task A");
         assert_eq!(block.id, id);
-        assert!(block.variants.is_empty());
+        assert!(block.parent.is_none());
     }
 
     #[test]
@@ -354,38 +313,25 @@ mod tests {
         let mut m = Model::default();
         let a = m.create_work_block("a");
         let b = m.create_work_block("b");
-        let v = m.create_variant("v", a);
         assert_ne!(a, b);
-        assert_ne!(a.0, v.0);
     }
 
     #[test]
-    fn variant_linking() {
+    fn parent_linking() {
         let mut m = Model::default();
         let block_id = m.create_work_block("parent");
-        let var_id = m.create_variant("fast path", block_id);
         let child_id = m.create_work_block("child");
 
-        m.work_blocks
-            .get_mut(&block_id)
-            .unwrap()
-            .variants
-            .push(var_id);
-        m.variants.get_mut(&var_id).unwrap().children.push(child_id);
+        m.work_blocks.get_mut(&child_id).unwrap().parent = Some(block_id);
 
-        let block = m.get_work_block(block_id).unwrap();
-        assert_eq!(block.variants, vec![var_id]);
-
-        let variant = m.get_variant(var_id).unwrap();
-        assert_eq!(variant.parent, block_id);
-        assert_eq!(variant.children, vec![child_id]);
+        let child = m.get_work_block(child_id).unwrap();
+        assert_eq!(child.parent, Some(block_id));
     }
 
     #[test]
     fn missing_id_returns_none() {
         let m = Model::default();
         assert!(m.get_work_block(WorkBlockId(999)).is_none());
-        assert!(m.get_variant(VariantId(999)).is_none());
     }
 
     #[test]

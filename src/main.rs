@@ -42,14 +42,12 @@ fn main() {
         .insert_resource(blocks::UndoStack::default())
         .insert_resource(blocks::CreateModeState::default())
         .insert_resource(blocks::SizePickerState::default())
-        .insert_resource(schedule::ViewScope::default())
         .insert_resource(schedule::VisibleBlocks::default())
         .insert_resource(analysis::ScheduleAnalysis::default())
         .insert_resource(schedule::TodayMarker::default())
         .insert_resource(blocks::BlockSpriteMap::default())
         .insert_resource(blocks::ComparePlanState::default())
         .insert_resource(blocks::CompareBlockSpriteMap::default())
-        .insert_resource(labels::NestingDepthMap::default())
         .insert_resource(ForkHoverState::default())
         .insert_resource(SelectedPlan::default())
         .add_systems(Startup, (setup_db, setup_camera))
@@ -57,10 +55,6 @@ fn main() {
         .add_systems(
             PostStartup,
             update_analysis.before(blocks::reconcile_block_sprites),
-        )
-        .add_systems(
-            PostStartup,
-            labels::compute_nesting_depths.before(blocks::reconcile_block_sprites),
         )
         .add_systems(
             PostStartup,
@@ -171,11 +165,6 @@ fn main() {
                 .after(blocks::handle_block_selection)
                 .after(blocks::reconcile_block_sprites),
         )
-        .add_systems(
-            Update,
-            labels::compute_nesting_depths.before(labels::draw_nesting_indicators),
-        )
-        .add_systems(Update, labels::draw_nesting_indicators)
         .add_systems(
             Update,
             blocks::sync_block_labels.after(blocks::reconcile_block_sprites),
@@ -623,10 +612,9 @@ fn handle_fork_hover(
             if let Some(active_plan) = model.plans.get(&active_id).cloned() {
                 let n = model.plans.len() + 1;
                 let new_id = model.create_plan(format!("Plan {n}"), Some(fork_day.max(0)));
-                // Copy root blocks and selected variants from the active plan.
+                // Copy root blocks from the active plan.
                 if let Some(new_plan) = model.plans.get_mut(&new_id) {
                     new_plan.root_blocks = active_plan.root_blocks.clone();
-                    new_plan.selected_variants = active_plan.selected_variants.clone();
                 }
                 *schedule = schedule::Schedule::new(active_id);
                 if let Err(e) = db::save_model(&conn, &model) {
@@ -861,7 +849,6 @@ fn top_bar_ui(
     mut contexts: EguiContexts,
     mut target: ResMut<CameraTarget>,
     model: Res<model::Model>,
-    scope: Res<schedule::ViewScope>,
     windows: Query<&Window>,
     today: Res<schedule::TodayMarker>,
 ) {
@@ -881,7 +868,7 @@ fn top_bar_ui(
                     .fill(egui::Color32::TRANSPARENT)
                     .stroke(egui::Stroke::NONE);
                 if ui.add(btn).on_hover_text("Fit to view [F]").clicked() {
-                    if let Some(new_target) = camera::fit_to_blocks(&model, &scope, &windows) {
+                    if let Some(new_target) = camera::fit_to_blocks(&model, &windows) {
                         *target = new_target;
                     }
                 }
@@ -892,7 +879,7 @@ fn top_bar_ui(
                         target.pos.x = x;
                     }
                     if ui.small_button("Fit to view [F]").clicked() {
-                        if let Some(new_target) = camera::fit_to_blocks(&model, &scope, &windows) {
+                        if let Some(new_target) = camera::fit_to_blocks(&model, &windows) {
                             *target = new_target;
                         }
                     }
@@ -1024,7 +1011,7 @@ fn handle_branch_delete(
 /// Removes a forked plan and any work blocks it solely owned. A fork copies the
 /// parent's `root_blocks` (the same block ids), so blocks still rooted by
 /// another plan are left intact — only blocks orphaned by the removal are
-/// deleted, along with their variant descendants.
+/// deleted.
 fn delete_plan(model: &mut model::Model, plan_id: model::PlanId) {
     let Some(plan) = model.plans.remove(&plan_id) else {
         return;

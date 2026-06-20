@@ -13,10 +13,7 @@ pub struct Edge {
 
 /// Directed acyclic graph of active work blocks for one Plan.
 ///
-/// Active blocks are those reachable from `plan.root_blocks` following
-/// the variant selections in `plan.selected_variants`. Blocks that have
-/// variants but no selection are included as leaves (they contribute no
-/// children to the graph).
+/// Active blocks are exactly the plan's `root_blocks`.
 #[derive(Debug)]
 pub struct DependencyGraph {
     pub nodes: HashSet<WorkBlockId>,
@@ -46,8 +43,7 @@ impl std::fmt::Display for CycleError {
 
 /// Builds a `DependencyGraph` for the given Plan.
 ///
-/// Only blocks reachable from `plan.root_blocks` (following the selected
-/// variant at each block) are included. Dependencies that cross into
+/// Only the plan's `root_blocks` are included. Dependencies that cross into
 /// inactive blocks are silently excluded.
 pub fn build_graph(model: &Model, plan: &Plan) -> DependencyGraph {
     let nodes = collect_active_blocks(model, plan);
@@ -130,35 +126,9 @@ pub fn topological_sort(graph: &DependencyGraph) -> Result<Vec<WorkBlockId>, Cyc
     Ok(sorted)
 }
 
-/// BFS from plan root blocks, expanding children via selected variants.
-fn collect_active_blocks(model: &Model, plan: &Plan) -> HashSet<WorkBlockId> {
-    let mut active = HashSet::new();
-    let mut queue = VecDeque::new();
-
-    for &root in &plan.root_blocks {
-        if active.insert(root) {
-            queue.push_back(root);
-        }
-    }
-
-    while let Some(block_id) = queue.pop_front() {
-        if let Some(wb) = model.work_blocks.get(&block_id) {
-            if !wb.variants.is_empty() {
-                if let Some(&var_id) = plan.selected_variants.get(&block_id) {
-                    if let Some(variant) = model.variants.get(&var_id) {
-                        for &child in &variant.children {
-                            if active.insert(child) {
-                                queue.push_back(child);
-                            }
-                        }
-                    }
-                }
-                // Block with variants but no selection: included as leaf.
-            }
-        }
-    }
-
-    active
+/// Active blocks are exactly the plan's `root_blocks`.
+fn collect_active_blocks(_model: &Model, plan: &Plan) -> HashSet<WorkBlockId> {
+    plan.root_blocks.iter().copied().collect()
 }
 
 #[cfg(test)]
@@ -261,73 +231,9 @@ mod tests {
     }
 
     #[test]
-    fn variant_selection_expands_correct_children() {
-        let mut model = Model::default();
-        let plan_id = model.create_plan("p", None);
-
-        let parent = model.create_work_block("parent");
-        let child_a = model.create_work_block("child_a");
-        let child_b = model.create_work_block("child_b");
-        let var_a = model.create_variant("fast", parent);
-        let var_b = model.create_variant("slow", parent);
-        model
-            .variants
-            .get_mut(&var_a)
-            .unwrap()
-            .children
-            .push(child_a);
-        model
-            .variants
-            .get_mut(&var_b)
-            .unwrap()
-            .children
-            .push(child_b);
-        model.work_blocks.get_mut(&parent).unwrap().variants = vec![var_a, var_b];
-
-        let plan = {
-            let p = model.plans.get_mut(&plan_id).unwrap();
-            p.root_blocks = vec![parent];
-            p.selected_variants.insert(parent, var_a);
-            p.clone()
-        };
-
-        let graph = build_graph(&model, &plan);
-        assert!(graph.nodes.contains(&parent));
-        assert!(graph.nodes.contains(&child_a)); // selected variant's child included
-        assert!(!graph.nodes.contains(&child_b)); // unselected variant's child excluded
-    }
-
-    #[test]
-    fn variant_with_no_selection_is_leaf() {
-        // A block with variants but no selection in plan.selected_variants
-        // must appear in the graph as a leaf — no children expanded.
-        let mut model = Model::default();
-        let plan_id = model.create_plan("p", None);
-
-        let parent = model.create_work_block("parent");
-        let child = model.create_work_block("child");
-        let var_a = model.create_variant("v", parent);
-        model.variants.get_mut(&var_a).unwrap().children.push(child);
-        model.work_blocks.get_mut(&parent).unwrap().variants = vec![var_a];
-
-        // No selected_variants entry for parent.
-        let plan = {
-            let p = model.plans.get_mut(&plan_id).unwrap();
-            p.root_blocks = vec![parent];
-            p.clone()
-        };
-
-        let graph = build_graph(&model, &plan);
-        assert!(graph.nodes.contains(&parent));
-        assert!(!graph.nodes.contains(&child)); // children not expanded without selection
-        let order = topological_sort(&graph).unwrap();
-        assert_eq!(order, vec![parent]);
-    }
-
-    #[test]
     fn inactive_blocks_excluded() {
-        // Blocks not in plan.root_blocks and not reachable via variants
-        // must not appear in the graph, even if dependencies reference them.
+        // Blocks not in plan.root_blocks must not appear in the graph,
+        // even if dependencies reference them.
         let mut model = Model::default();
         let plan_id = model.create_plan("p", None);
 
