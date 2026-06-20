@@ -283,11 +283,140 @@ impl Model {
     pub fn get_plan(&self, id: PlanId) -> Option<&Plan> {
         self.plans.get(&id)
     }
+
+    // --- Plan / branch operations ---
+
+    /// The "main" plan: the one root plan (no `branch_start_day`), lowest id for
+    /// stability. Every branch forks off this. `None` if there are no plans.
+    pub fn main_plan_id(&self) -> Option<PlanId> {
+        self.plans
+            .values()
+            .filter(|p| p.branch_start_day.is_none())
+            .min_by_key(|p| p.id.0)
+            .map(|p| p.id)
+    }
+
+    /// Forks `main` into a new branch at `fork_day`. The branch inherits main's
+    /// blocks from the fork day forward by copying their ids (the blocks stay
+    /// shared with main); blocks before the fork are shared trunk and not
+    /// copied. Returns the new branch's id, or `None` if there is no main plan.
+    pub fn fork_main(&mut self, fork_day: Day) -> Option<PlanId> {
+        let main_id = self.main_plan_id()?;
+        let forward: Vec<WorkBlockId> = self.plans[&main_id]
+            .root_blocks
+            .iter()
+            .copied()
+            .filter(|id| {
+                self.work_blocks
+                    .get(id)
+                    .is_some_and(|wb| wb.start_day >= fork_day)
+            })
+            .collect();
+        let n = self.plans.len() + 1;
+        let new_id = self.create_plan(format!("Plan {n}"), Some(fork_day));
+        self.plans.get_mut(&new_id).unwrap().root_blocks = forward;
+        Some(new_id)
+    }
+
+    /// Links a main block into every branch that forks at or before the block's
+    /// start day, as a ghost (shared id).
+    ///
+    /// **Call only right after creating a *new* block in main.** The copy model
+    /// tracks membership (a branch's `root_blocks`) but not removals, so a block
+    /// absent from a branch is ambiguous: never-inherited vs removed-by-user.
+    /// At creation the id is brand new (neither), so appending is unambiguous.
+    /// Calling this on an already-existing block would re-add ghosts a branch
+    /// had removed — don't. Only main's own blocks propagate (a branch-owned
+    /// block is a no-op).
+    pub fn link_main_block_to_branches(&mut self, block_id: WorkBlockId) {
+        let Some(main_id) = self.main_plan_id() else {
+            return;
+        };
+        if !self.plans[&main_id].root_blocks.contains(&block_id) {
+            return;
+        }
+        let Some(start) = self.work_blocks.get(&block_id).map(|wb| wb.start_day) else {
+            return;
+        };
+        for plan in self.plans.values_mut() {
+            let Some(fork) = plan.branch_start_day else {
+                continue; // branches only
+            };
+            if start >= fork && !plan.root_blocks.contains(&block_id) {
+                plan.root_blocks.push(block_id);
+            }
+        }
+    }
+
+    /// Adds a new owned block to `plan_id` at the given placement and returns its
+    /// id. Only that plan gains the block — other plans (e.g. main) are
+    /// untouched. No-op returning the id even if the plan is missing.
+    pub fn add_block_to_plan(
+        &mut self,
+        plan_id: PlanId,
+        name: impl Into<String>,
+        start_day: Day,
+        duration_days: Day,
+        row: i32,
+    ) -> WorkBlockId {
+        let id = self.create_work_block(name);
+        if let Some(wb) = self.work_blocks.get_mut(&id) {
+            wb.start_day = start_day;
+            wb.duration_days = duration_days;
+            wb.row = row;
+        }
+        if let Some(plan) = self.plans.get_mut(&plan_id) {
+            plan.root_blocks.push(id);
+        }
+        id
+    }
+
+    /// Removes a plan and the work blocks it *solely* owned (not referenced by
+    /// any surviving plan), along with their dependencies. Blocks shared with
+    /// another plan are left intact. Any surviving block whose `parent` was a
+    /// removed block has its parent cleared. No-op if `plan_id` is missing.
+    pub fn delete_plan(&mut self, plan_id: PlanId) {
+        let Some(plan) = self.plans.remove(&plan_id) else {
+            return;
+        };
+        for block in plan.root_blocks {
+            let still_rooted = self.plans.values().any(|p| p.root_blocks.contains(&block));
+            if !still_rooted {
+                self.work_blocks.remove(&block);
+                self.dependencies
+                    .retain(|_, d| d.predecessor != block && d.successor != block);
+                for wb in self.work_blocks.values_mut() {
+                    if wb.parent == Some(block) {
+                        wb.parent = None;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Dev reset: removes every work block, dependency, and branch plan, leaving
+    /// a single empty main plan. Returns main's id (creating one if needed).
+    pub fn clear_all_work(&mut self) -> PlanId {
+        self.work_blocks.clear();
+        self.dependencies.clear();
+        let main_id = self.main_plan_id().unwrap_or_else(|| self.create_plan("Main", None));
+        self.plans.retain(|&id, _| id == main_id);
+        if let Some(main) = self.plans.get_mut(&main_id) {
+            main.root_blocks.clear();
+            main.allocations.clear();
+        }
+        main_id
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Places a block at `start`/`dur` and roots it in `plan`.
+    fn placed(m: &mut Model, plan: PlanId, name: &str, start: Day, dur: Day) -> WorkBlockId {
+        m.add_block_to_plan(plan, name, start, dur, 0)
+    }
 
     #[test]
     fn default_model_is_empty() {
@@ -296,6 +425,159 @@ mod tests {
         assert!(m.resource_blocks.is_empty());
         assert!(m.dependencies.is_empty());
         assert!(m.plans.is_empty());
+    }
+
+    // --- branch / plan requirements ---
+
+    #[test]
+    fn main_plan_id_is_the_root_plan() {
+        let mut m = Model::default();
+        let main = m.create_plan("main", None);
+        let _branch = m.create_plan("branch", Some(10));
+        assert_eq!(m.main_plan_id(), Some(main));
+    }
+
+    #[test]
+    fn fork_copies_only_blocks_at_or_after_fork_day() {
+        let mut m = Model::default();
+        let main = m.create_plan("main", None);
+        let before = placed(&mut m, main, "before", 5, 3);
+        let on = placed(&mut m, main, "on", 20, 3);
+        let after = placed(&mut m, main, "after", 40, 3);
+
+        let branch = m.fork_main(20).unwrap();
+        let roots = &m.plans[&branch].root_blocks;
+        assert!(!roots.contains(&before), "pre-fork block is not inherited");
+        assert!(roots.contains(&on), "block exactly at the fork day is inherited");
+        assert!(roots.contains(&after), "post-fork block is inherited");
+    }
+
+    #[test]
+    fn fork_is_a_branch_at_the_fork_day() {
+        let mut m = Model::default();
+        let _main = m.create_plan("main", None);
+        let branch = m.fork_main(15).unwrap();
+        assert_eq!(m.plans[&branch].branch_start_day, Some(15));
+        assert_ne!(m.main_plan_id(), Some(branch), "the fork is not main");
+    }
+
+    #[test]
+    fn fork_shares_blocks_by_id_with_main() {
+        // The branch copies ids, not blocks — a forked block is the same
+        // WorkBlock as main's, so there's exactly one block, referenced twice.
+        let mut m = Model::default();
+        let main = m.create_plan("main", None);
+        let b = placed(&mut m, main, "b", 0, 3);
+        let branch = m.fork_main(0).unwrap();
+        assert!(m.plans[&main].root_blocks.contains(&b));
+        assert!(m.plans[&branch].root_blocks.contains(&b));
+        assert_eq!(m.work_blocks.len(), 1, "no duplicate block was created");
+    }
+
+    #[test]
+    fn adding_a_block_to_a_branch_does_not_touch_main() {
+        let mut m = Model::default();
+        let main = m.create_plan("main", None);
+        let branch = m.fork_main(0).unwrap();
+        let owned = m.add_block_to_plan(branch, "owned", 5, 5, 1);
+        assert!(m.plans[&branch].root_blocks.contains(&owned));
+        assert!(
+            !m.plans[&main].root_blocks.contains(&owned),
+            "a branch-owned block must not appear in main"
+        );
+    }
+
+    #[test]
+    fn new_main_block_propagates_to_branches_at_or_after_fork() {
+        let mut m = Model::default();
+        let main = m.create_plan("main", None);
+        let branch = m.fork_main(10).unwrap();
+
+        // A new main block after the fork links into the branch as a ghost.
+        let after = placed(&mut m, main, "after", 15, 3);
+        m.link_main_block_to_branches(after);
+        assert!(m.plans[&branch].root_blocks.contains(&after));
+
+        // One exactly at the fork day also links (consistent with fork_main's >=).
+        let at = placed(&mut m, main, "at", 10, 3);
+        m.link_main_block_to_branches(at);
+        assert!(m.plans[&branch].root_blocks.contains(&at));
+
+        // One before the fork does not.
+        let before = placed(&mut m, main, "before", 4, 3);
+        m.link_main_block_to_branches(before);
+        assert!(!m.plans[&branch].root_blocks.contains(&before));
+    }
+
+    #[test]
+    fn propagation_only_links_branches_after_the_block() {
+        let mut m = Model::default();
+        let main = m.create_plan("main", None);
+        let early = m.fork_main(10).unwrap();
+        let late = m.fork_main(50).unwrap();
+        let mid = placed(&mut m, main, "mid", 20, 3);
+        m.link_main_block_to_branches(mid);
+        assert!(m.plans[&early].root_blocks.contains(&mid), "fork before the block gets it");
+        assert!(!m.plans[&late].root_blocks.contains(&mid), "fork after the block does not");
+    }
+
+    #[test]
+    fn propagation_ignores_branch_owned_blocks() {
+        // A block owned by a branch must not propagate to other branches or main.
+        let mut m = Model::default();
+        let main = m.create_plan("main", None);
+        let a = m.fork_main(0).unwrap();
+        let b = m.fork_main(0).unwrap();
+        let owned = m.add_block_to_plan(a, "owned", 5, 3, 0);
+        m.link_main_block_to_branches(owned);
+        assert!(!m.plans[&b].root_blocks.contains(&owned));
+        assert!(!m.plans[&main].root_blocks.contains(&owned));
+    }
+
+    #[test]
+    fn propagation_is_idempotent_for_an_already_linked_block() {
+        // Linking a block a branch already holds must not duplicate it. (This is
+        // the only safe re-call; see the method docs — link is otherwise
+        // creation-only because removals aren't tracked.)
+        let mut m = Model::default();
+        let main = m.create_plan("main", None);
+        let branch = m.fork_main(10).unwrap();
+        let blk = placed(&mut m, main, "blk", 20, 3);
+        m.link_main_block_to_branches(blk);
+        m.link_main_block_to_branches(blk);
+        let count = m.plans[&branch].root_blocks.iter().filter(|&&id| id == blk).count();
+        assert_eq!(count, 1, "block appears once, not duplicated");
+    }
+
+    #[test]
+    fn delete_plan_keeps_shared_blocks_removes_exclusive() {
+        let mut m = Model::default();
+        let main = m.create_plan("main", None);
+        let shared = placed(&mut m, main, "shared", 0, 3);
+        let branch = m.fork_main(0).unwrap(); // branch shares `shared`
+        let owned = m.add_block_to_plan(branch, "owned", 5, 3, 0);
+
+        m.delete_plan(branch);
+        assert!(!m.plans.contains_key(&branch), "branch removed");
+        assert!(m.work_blocks.contains_key(&shared), "block shared with main kept");
+        assert!(!m.work_blocks.contains_key(&owned), "block only the branch owned removed");
+        assert!(m.plans[&main].root_blocks.contains(&shared));
+    }
+
+    #[test]
+    fn clear_all_keeps_one_empty_main() {
+        let mut m = Model::default();
+        let main = m.create_plan("main", None);
+        placed(&mut m, main, "a", 0, 3);
+        let branch = m.fork_main(0).unwrap();
+        placed(&mut m, branch, "b", 5, 3);
+
+        let kept = m.clear_all_work();
+        assert_eq!(kept, main, "main is preserved as the active plan");
+        assert!(m.work_blocks.is_empty(), "all blocks wiped");
+        assert!(m.dependencies.is_empty(), "all links wiped");
+        assert_eq!(m.plans.len(), 1, "only main remains");
+        assert!(m.plans[&main].root_blocks.is_empty(), "main is emptied");
     }
 
     #[test]

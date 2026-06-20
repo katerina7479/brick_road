@@ -50,7 +50,7 @@ pub struct DescriptionDot {
 }
 
 /// HDR linear palette — one or more channels > 1.0 so the Bloom post-process fires.
-const PALETTE: &[LinearRgba] = &[
+pub const PALETTE: &[LinearRgba] = &[
     LinearRgba::new(0.25, 0.65, 2.80, 1.0), // indigo
     LinearRgba::new(0.20, 1.70, 0.80, 1.0), // emerald
     LinearRgba::new(2.20, 0.55, 0.15, 1.0), // orange
@@ -58,6 +58,16 @@ const PALETTE: &[LinearRgba] = &[
     LinearRgba::new(0.15, 1.50, 1.60, 1.0), // teal
     LinearRgba::new(2.40, 1.60, 0.10, 1.0), // gold
 ];
+
+/// The fill color a work block renders with: its explicit `color` if set,
+/// otherwise the palette default for its row. Shared so ghosts in branch
+/// swimlanes can outline in exactly the source block's color.
+pub fn block_color(wb: &model::WorkBlock) -> LinearRgba {
+    match wb.color {
+        Some([r, g, b]) => LinearRgba::new(r, g, b, 1.0),
+        None => PALETTE[wb.row.rem_euclid(PALETTE.len() as i32) as usize],
+    }
+}
 
 /// Tracks the currently selected work block (if any).
 #[derive(Resource, Default)]
@@ -180,11 +190,7 @@ pub fn reconcile_block_sprites(
             let x = wb.start_day as f32 * PIXELS_PER_DAY + width * 0.5;
             let y = -(row as f32) * ROW_HEIGHT;
 
-            let color = if let Some([r, g, b]) = wb.color {
-                Color::from(LinearRgba::new(r, g, b, 1.0))
-            } else {
-                Color::from(PALETTE[row.rem_euclid(PALETTE.len() as i32) as usize])
-            };
+            let color = Color::from(block_color(wb));
 
             let mut block_cmd = commands.spawn((
                 BlockSprite {
@@ -653,6 +659,15 @@ pub fn handle_block_selection(
         return;
     };
 
+    // Below the first branch lane is band territory: those clicks belong to the
+    // band handlers (create/select in a branch), never to main. Without this a
+    // lane double-click would also drop a block into main far below row 0.
+    if let Some(top) = crate::bands::bands_top_y(&model) {
+        if world_pos.y <= top {
+            return;
+        }
+    }
+
     // A click on (or near) a branch marker belongs to `handle_branch_selection`;
     // defer to it and don't also select/create a block. Any other click clears
     // the branch selection, keeping block and branch selection mutually
@@ -751,6 +766,9 @@ pub fn handle_block_selection(
             if let Some(plan) = model.plans.get_mut(&plan_id) {
                 plan.root_blocks.push(new_id);
             }
+            // A new block on main links through to existing branches as a ghost
+            // (those whose fork day is at/before its start). No-op off main.
+            model.link_main_block_to_branches(new_id);
             if let Err(e) = db::save_model(&conn, &model) {
                 error!("save_model failed: {e}");
             }
@@ -2152,6 +2170,8 @@ pub fn draw_create_mode_overlay(
             if let Some(plan) = model.plans.get_mut(&plan_id) {
                 plan.root_blocks.push(new_id);
             }
+            // A new block on main links through to existing branches as a ghost.
+            model.link_main_block_to_branches(new_id);
             if let Err(e) = db::save_model(&conn, &model) {
                 error!("save_model failed: {e}");
             }
