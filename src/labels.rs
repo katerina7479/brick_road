@@ -2,8 +2,7 @@ use bevy::prelude::*;
 use chrono::Datelike;
 
 use crate::{
-    calendar::{date_to_day, day_to_date, first_working_day_of_month},
-    constants::PIXELS_PER_DAY,
+    calendar::{date_to_day, day_to_date, day_to_x, first_working_day_of_month},
     model::Model,
     schedule::Schedule,
 };
@@ -99,7 +98,7 @@ pub fn spawn_day_labels(
 
     let span = schedule.total_duration_days + step;
     for day in (0..=span).step_by(step as usize) {
-        let x = day as f32 * PIXELS_PER_DAY;
+        let x = day_to_x(day, &model.calendar);
         let alpha = if day < today.day { 0.3 } else { 0.75 };
         let label = format_day_label(day, month_only, &model);
         commands.spawn((
@@ -137,8 +136,8 @@ pub fn spawn_period_labels(
     }
 
     let span_days = schedule.total_duration_days + 30;
-    let span_px = span_days as f32 * PIXELS_PER_DAY;
     let config = &model.calendar;
+    let span_px = day_to_x(span_days, config);
 
     let start_year = config.start_date.year();
     let start_month = config.start_date.month();
@@ -148,7 +147,7 @@ pub fn spawn_period_labels(
 
     loop {
         let x_start = match first_working_day_of_month(year, month, config) {
-            Some(d) => (date_to_day(d, config) as f32 * PIXELS_PER_DAY).max(0.0),
+            Some(d) => day_to_x(date_to_day(d, config), config).max(0.0),
             None => {
                 let (ny, nm) = next_ym(year, month);
                 year = ny;
@@ -174,7 +173,7 @@ pub fn spawn_period_labels(
             (year, q_end_month)
         };
         let x_end = match first_working_day_of_month(q_end_year, q_end_mon, config) {
-            Some(d) => (date_to_day(d, config) as f32 * PIXELS_PER_DAY).min(span_px),
+            Some(d) => day_to_x(date_to_day(d, config), config).min(span_px),
             None => span_px,
         };
 

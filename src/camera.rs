@@ -38,10 +38,14 @@ impl Default for CameraTarget {
 /// viewport (so you open looking at today and the work ahead) with the main
 /// plan's row 0 at the top, at 1:1 zoom. Shared by the Home key, the Re-center
 /// button, and the initial view on launch so they all agree.
-pub fn home_target(window: &Window, today_day: i32) -> CameraTarget {
+pub fn home_target(
+    window: &Window,
+    today_day: i32,
+    cal: &crate::model::CalendarConfig,
+) -> CameraTarget {
     let w = window.width();
     let h = window.height();
-    let today_x = today_day as f32 * PIXELS_PER_DAY;
+    let today_x = crate::calendar::day_to_x(today_day, cal);
     CameraTarget {
         zoom: 1.0,
         pos: Vec2::new(
@@ -55,11 +59,16 @@ pub fn home_target(window: &Window, today_day: i32) -> CameraTarget {
 /// generous horizontal margin so there's room to place blocks beyond it (used
 /// when drilling into a block — you see the parent's span plus slack on either
 /// side). Row 0 anchors near the top, like Home.
-pub fn frame_day_span(window: &Window, start_day: i32, end_day: i32) -> CameraTarget {
+pub fn frame_day_span(
+    window: &Window,
+    start_day: i32,
+    end_day: i32,
+    cal: &crate::model::CalendarConfig,
+) -> CameraTarget {
     let w = window.width();
     let h = window.height();
-    let x_min = start_day as f32 * PIXELS_PER_DAY;
-    let x_max = end_day as f32 * PIXELS_PER_DAY;
+    let x_min = crate::calendar::day_to_x(start_day, cal);
+    let x_max = crate::calendar::day_to_x(end_day, cal);
     let span = (x_max - x_min).max(PIXELS_PER_DAY);
     // 1.8 leaves ~45% of the width as slack around the parent's span.
     const MARGIN: f32 = 1.8;
@@ -163,7 +172,7 @@ pub fn camera_nav_keys(
     }
     if keyboard.just_pressed(KeyCode::Home) {
         let Ok(window) = windows.single() else { return };
-        *target = home_target(window, today.day);
+        *target = home_target(window, today.day, &model.calendar);
     }
     if keyboard.just_pressed(KeyCode::KeyF) {
         if let Some(new_target) = fit_to_blocks(&model, schedule.plan_id, &windows) {
@@ -196,11 +205,11 @@ pub fn fit_to_blocks(
 
     let x_min = visible
         .iter()
-        .map(|wb| wb.start_day as f32 * PIXELS_PER_DAY)
+        .map(|wb| crate::calendar::day_to_x(wb.start_day, &model.calendar))
         .fold(f32::INFINITY, f32::min);
     let x_max = visible
         .iter()
-        .map(|wb| (wb.start_day + wb.duration_days) as f32 * PIXELS_PER_DAY)
+        .map(|wb| crate::calendar::day_to_x(wb.start_day + wb.duration_days, &model.calendar))
         .fold(f32::NEG_INFINITY, f32::max);
     // Rows are explicit and can be sparse/negative, so frame the real lane range.
     let min_row = visible.iter().map(|wb| wb.row).min().unwrap_or(0) as f32;

@@ -66,6 +66,21 @@ pub fn block_extent(wb: &model::WorkBlock) -> (f32, f32) {
     (-(wb.row as f32) * ROW_HEIGHT, BLOCK_HEIGHT)
 }
 
+/// The horizontal placement of a block bar: `(left_x, width)`, holiday-aware.
+/// The bar runs from its start day to `start + duration` working days; any
+/// greyed holiday columns it crosses widen it so both ends stay on the grid.
+pub fn block_span_x(wb: &model::WorkBlock, cal: &model::CalendarConfig) -> (f32, f32) {
+    let (l, r) = block_edges_x(wb, cal);
+    (l, r - l)
+}
+
+/// The left and right world-x edges of a block bar, holiday-aware.
+pub fn block_edges_x(wb: &model::WorkBlock, cal: &model::CalendarConfig) -> (f32, f32) {
+    let left = crate::calendar::day_to_x(wb.start_day, cal);
+    let right = crate::calendar::day_to_x(wb.start_day + wb.duration_days, cal);
+    (left, right.max(left))
+}
+
 /// The fill color a work block renders with: its explicit `color` if set,
 /// otherwise the palette default for its row. Shared so ghosts in branch
 /// swimlanes can outline in exactly the source block's color.
@@ -191,8 +206,8 @@ pub fn reconcile_block_sprites(
             }
         } else {
             // New entity: spawn parent sprite + label and dot children.
-            let width = wb.duration_days as f32 * PIXELS_PER_DAY;
-            let x = wb.start_day as f32 * PIXELS_PER_DAY + width * 0.5;
+            let (left_x, width) = block_span_x(wb, &model.calendar);
+            let x = left_x + width * 0.5;
             let y = -(row as f32) * ROW_HEIGHT;
 
             let color = Color::from(block_color(wb));
@@ -335,7 +350,7 @@ pub fn sync_description_dots(
         let Some(wb) = model.work_blocks.get(&id) else {
             continue;
         };
-        let width = wb.duration_days as f32 * PIXELS_PER_DAY;
+        let (_, width) = block_span_x(wb, &model.calendar);
         let should_have_dot = !wb.description.is_empty() && width >= 12.0;
 
         match (should_have_dot, existing_dots.get(&id)) {
@@ -392,11 +407,11 @@ pub fn sync_block_sprites(
         let Some(wb) = model.work_blocks.get(&block_sprite.work_block_id) else {
             continue;
         };
-        let width = wb.duration_days as f32 * PIXELS_PER_DAY;
+        let (left_x, width) = block_span_x(wb, &model.calendar);
         // Expand to min_width before computing x so the sprite is always
         // left-anchored at start_day, not centered on the model midpoint.
         let visual_width = width.max(min_width);
-        let x = wb.start_day as f32 * PIXELS_PER_DAY + visual_width * 0.5;
+        let x = left_x + visual_width * 0.5;
         // Read the live model row (not the cached BlockSprite.row, which only
         // refreshes when the visible set changes) so vertical drags track the
         // cursor immediately — same as start_day does for x. A rolled-up parent
@@ -491,8 +506,13 @@ pub fn sync_compare_overlays(
             r
         };
 
-        let width = cmp_block.duration_days as f32 * PIXELS_PER_DAY;
-        let x = cmp_block.start_day as f32 * PIXELS_PER_DAY + width * 0.5;
+        let lx = crate::calendar::day_to_x(cmp_block.start_day, &model.calendar);
+        let rx = crate::calendar::day_to_x(
+            cmp_block.start_day + cmp_block.duration_days,
+            &model.calendar,
+        );
+        let width = (rx - lx).max(0.0);
+        let x = lx + width * 0.5;
         let y = -(row as f32) * ROW_HEIGHT;
 
         let active_dur = model.work_blocks.get(&id).map(|wb| wb.duration_days);
@@ -581,7 +601,7 @@ pub fn sync_block_labels(
         model
             .work_blocks
             .get(id)
-            .map(|wb| wb.duration_days as f32 * PIXELS_PER_DAY)
+            .map(|wb| block_span_x(wb, &model.calendar).1)
             .unwrap_or(0.0)
     };
 
@@ -836,7 +856,7 @@ pub fn handle_canvas_create(
     // Days are cells starting at the boundary, so floor puts the block in the
     // cell you clicked (round would jump to the next cell past a cell's midpoint).
     let row = (-world_pos.y / ROW_HEIGHT).round() as i32;
-    let raw_start = (world_pos.x / PIXELS_PER_DAY).max(0.0).floor() as Day;
+    let raw_start = crate::calendar::x_to_day(world_pos.x, &model.calendar).max(0);
 
     let new_id = if let Some(parent) = drill.current() {
         // Drilled in: the new block is a child of the current block. Children
@@ -962,11 +982,17 @@ pub fn handle_block_resize(
                 resize.dragging = None;
                 return;
             }
-            if let Some(wb) = model.work_blocks.get_mut(&id) {
-                let raw_dur = ((world_pos.x - wb.start_day as f32 * PIXELS_PER_DAY)
-                    / PIXELS_PER_DAY)
-                    .max(1.0);
-                wb.duration_days = raw_dur.round() as Day;
+            // End the block at the working day nearest the cursor (holiday
+            // columns it spans don't count toward duration).
+            let start = model.work_blocks.get(&id).map(|wb| wb.start_day);
+            if let Some(start) = start {
+                let end_day = crate::calendar::x_to_day(
+                    world_pos.x + PIXELS_PER_DAY * 0.5,
+                    &model.calendar,
+                );
+                if let Some(wb) = model.work_blocks.get_mut(&id) {
+                    wb.duration_days = (end_day - start).max(1);
+                }
             }
         }
         return;
@@ -1054,7 +1080,7 @@ pub fn handle_block_drag(
                 let (start_px, block_row) = model
                     .work_blocks
                     .get(&id)
-                    .map(|wb| (wb.start_day as f32 * PIXELS_PER_DAY, wb.row))
+                    .map(|wb| (crate::calendar::day_to_x(wb.start_day, &model.calendar), wb.row))
                     .unwrap_or((0.0, 0));
                 let cursor_row = (-world_pos.y / ROW_HEIGHT).round() as i32;
                 // Offsets preserve where within the block the user grabbed, in x
@@ -1082,9 +1108,11 @@ pub fn handle_block_drag(
                 .get(&active_schedule.plan_id)
                 .and_then(|p| p.branch_start_day)
                 .unwrap_or(0);
-            let new_start = ((world_pos.x - offset_px) / PIXELS_PER_DAY)
-                .max(0.0)
-                .round() as Day;
+            let new_start = crate::calendar::x_to_day(
+                world_pos.x - offset_px + PIXELS_PER_DAY * 0.5,
+                &model.calendar,
+            )
+            .max(0);
             // Dependencies don't constrain a drag — you can place a block into a
             // violation; the offending edge just turns red. (Only >= 0 / the
             // fork day are enforced.)
@@ -1157,8 +1185,9 @@ pub fn sync_past_overlays(
         if wb.start_day >= today.day || end_day <= today.day {
             continue;
         }
-        let past_width = (today.day - wb.start_day) as f32 * PIXELS_PER_DAY;
-        let x_left = wb.start_day as f32 * PIXELS_PER_DAY;
+        let x_left = crate::calendar::day_to_x(wb.start_day, &model.calendar);
+        let past_width =
+            crate::calendar::day_to_x(today.day, &model.calendar) - x_left;
         let y = -(wb.row as f32) * ROW_HEIGHT;
         desired.push(Overlay {
             key: PastPortionOverlay(id),
@@ -1295,11 +1324,12 @@ pub fn draw_dependency_edges(
         .iter()
         .filter_map(|&id| {
             let wb = model.work_blocks.get(&id)?;
+            let (xl, xr) = block_edges_x(wb, &model.calendar);
             Some((
                 wb.id,
                 BlockGeom {
-                    xl: wb.start_day as f32 * PIXELS_PER_DAY,
-                    xr: (wb.start_day + wb.duration_days) as f32 * PIXELS_PER_DAY,
+                    xl,
+                    xr,
                     y: -(wb.row as f32) * ROW_HEIGHT,
                 },
             ))
@@ -1406,11 +1436,9 @@ fn dep_endpoints(model: &model::Model, dep: &model::Dependency) -> Option<(Vec2,
     if pred.duration_days <= 0 || succ.duration_days <= 0 {
         return None;
     }
-    let p_xl = pred.start_day as f32 * PIXELS_PER_DAY;
-    let p_xr = (pred.start_day + pred.duration_days) as f32 * PIXELS_PER_DAY;
+    let (p_xl, p_xr) = block_edges_x(pred, &model.calendar);
     let p_y = -(pred.row as f32) * ROW_HEIGHT;
-    let s_xl = succ.start_day as f32 * PIXELS_PER_DAY;
-    let s_xr = (succ.start_day + succ.duration_days) as f32 * PIXELS_PER_DAY;
+    let (s_xl, s_xr) = block_edges_x(succ, &model.calendar);
     let s_y = -(succ.row as f32) * ROW_HEIGHT;
     let (src, dst) = match dep.dependency_type {
         DependencyType::FinishToStart => (Vec2::new(p_xr, p_y), Vec2::new(s_xl, s_y)),
@@ -1500,8 +1528,7 @@ pub fn draw_block_handles(
             continue;
         }
         let y = -(wb.row as f32) * ROW_HEIGHT;
-        let xl = wb.start_day as f32 * PIXELS_PER_DAY;
-        let xr = (wb.start_day + wb.duration_days) as f32 * PIXELS_PER_DAY;
+        let (xl, xr) = block_edges_x(wb, &model.calendar);
         let half_h = BLOCK_HEIGHT * 0.5;
 
         let is_source = drag.from == Some(wb.id);

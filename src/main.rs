@@ -53,6 +53,7 @@ fn main() {
         .insert_resource(ForkHoverState::default())
         .insert_resource(SelectedPlan::default())
         .insert_resource(RowRename::default())
+        .insert_resource(SettingsState::default())
         .insert_resource(bands::BandEntities::default())
         .insert_resource(bands::PlanRenameState::default())
         .insert_resource(bands::LaneSelection::default())
@@ -253,6 +254,10 @@ fn main() {
         .add_systems(EguiPrimaryContextPass, calendar_ruler_ui.after(top_bar_ui))
         .add_systems(
             EguiPrimaryContextPass,
+            settings_flyout_ui.after(top_bar_ui),
+        )
+        .add_systems(
+            EguiPrimaryContextPass,
             resource_gutter_ui.after(calendar_ruler_ui),
         )
         .add_systems(EguiPrimaryContextPass, blocks::draw_name_edit_overlay)
@@ -301,9 +306,14 @@ fn frame_on_drill(
     }
     let Ok(window) = windows.single() else { return };
     let new_target = match drill.current().and_then(|id| model.work_blocks.get(&id)) {
-        Some(wb) => camera::frame_day_span(window, wb.start_day, wb.start_day + wb.duration_days),
+        Some(wb) => camera::frame_day_span(
+            window,
+            wb.start_day,
+            wb.start_day + wb.duration_days,
+            &model.calendar,
+        ),
         None => camera::fit_to_blocks(&model, schedule.plan_id, &windows)
-            .unwrap_or_else(|| camera::home_target(window, today.day)),
+            .unwrap_or_else(|| camera::home_target(window, today.day, &model.calendar)),
     };
     let (pos, zoom) = (new_target.pos, new_target.zoom);
     *target = new_target;
@@ -341,7 +351,7 @@ fn draw_parent_bounds(
     let color = Color::from(LinearRgba::new(2.4, 1.6, 0.3, 0.5)); // amber, bloomed
 
     for day in [wb.start_day, wb.start_day + wb.duration_days] {
-        let x = day as f32 * PIXELS_PER_DAY;
+        let x = calendar::day_to_x(day, &model.calendar);
         gizmos.line_2d(Vec2::new(x, y_top), Vec2::new(x, y_bot), color);
     }
 }
@@ -354,6 +364,7 @@ fn set_initial_view(
     mut done: Local<bool>,
     mut target: ResMut<CameraTarget>,
     today: Res<schedule::TodayMarker>,
+    model: Res<model::Model>,
     windows: Query<&Window>,
     mut cam: Query<(&mut Transform, &mut Projection), With<Camera2d>>,
 ) {
@@ -361,7 +372,7 @@ fn set_initial_view(
         return;
     }
     let Ok(window) = windows.single() else { return };
-    let home = camera::home_target(window, today.day);
+    let home = camera::home_target(window, today.day, &model.calendar);
     let (pos, zoom) = (home.pos, home.zoom);
     *target = home;
     if let Ok((mut tf, mut proj)) = cam.single_mut() {
@@ -377,6 +388,7 @@ fn set_initial_view(
 fn draw_grid(
     mut gizmos: Gizmos,
     today: Res<schedule::TodayMarker>,
+    model: Res<model::Model>,
     cam_q: Query<(&Transform, &Projection), With<Camera2d>>,
     windows: Query<&Window>,
 ) {
@@ -406,11 +418,16 @@ fn draw_grid(
     let y_bottom = cam_y - half_h;
     let y_top = cam_y + half_h;
 
-    let day_min = (x_left / PIXELS_PER_DAY).floor() as i32;
-    let day_max = (x_right / PIXELS_PER_DAY).ceil() as i32;
+    // Iterate visual columns (which include inserted holiday columns), drawing a
+    // boundary line at each. Past/future colouring uses the working day the
+    // column maps back to.
+    let cal = &model.calendar;
+    let v_min = (x_left / PIXELS_PER_DAY).floor() as i32;
+    let v_max = (x_right / PIXELS_PER_DAY).ceil() as i32;
 
-    for day in day_min..=day_max {
-        let x = day as f32 * PIXELS_PER_DAY;
+    for v in v_min..=v_max {
+        let x = v as f32 * PIXELS_PER_DAY;
+        let day = calendar::x_to_day(x, cal);
         let color = if day < today.day {
             past_line_color
         } else {
@@ -438,7 +455,7 @@ fn draw_grid(
     );
 
     // Prominent today marker — draw 3 lines 2px apart so it reads as a thick bar at all zooms.
-    let x_today = today.day as f32 * PIXELS_PER_DAY;
+    let x_today = calendar::day_to_x(today.day, cal);
     for dx in [-2.0_f32, 0.0, 2.0] {
         gizmos.line_2d(
             Vec2::new(x_today + dx, y_bottom),
@@ -452,32 +469,22 @@ fn draw_grid(
 #[derive(Component)]
 struct WeekendBand;
 
-/// Returns `(x_world_position, is_holiday)` for each non-working day band within
-/// the given span.
-///
-/// Week-boundary bands appear every `working_days_per_week` days (`is_holiday = false`).
-/// Calendar holiday bands are placed at the next working-day boundary after each
-/// date in `non_working_dates` (`is_holiday = true`).
-fn weekend_band_positions(span_days: i32, model: &model::Model) -> Vec<(f32, bool)> {
+/// World x of each compressed-weekend seam within the span: a thin marker at
+/// every real calendar-week boundary (where consecutive working days fall in
+/// different ISO weeks), holiday-shifted. Anchored to actual weeks, not counted
+/// every `working_days_per_week` from day 0, so it stays correct whatever
+/// weekday the calendar starts on.
+fn weekend_band_positions(span_days: i32, model: &model::Model) -> Vec<f32> {
+    use chrono::Datelike;
+    let cal = &model.calendar;
     let mut positions = Vec::new();
-    let wdpw = model.calendar.working_days_per_week as i32;
-
-    let mut day = wdpw;
-    while day <= span_days + wdpw {
-        positions.push((day as f32 * PIXELS_PER_DAY, false));
-        day += wdpw;
-    }
-
-    for &holiday in &model.calendar.non_working_dates {
-        // date_to_day for a non-working day returns the last working-day count
-        // before it; +1 gives the next working day's index, which is the correct
-        // band position (immediately after the holiday gap).
-        let boundary = calendar::date_to_day(holiday, &model.calendar) + 1;
-        if boundary >= 0 && boundary <= span_days + 10 {
-            positions.push((boundary as f32 * PIXELS_PER_DAY, true));
+    for day in 0..=span_days + 1 {
+        let here = calendar::day_to_date(day, cal);
+        let next = calendar::day_to_date(day + 1, cal);
+        if here.iso_week() != next.iso_week() {
+            positions.push(calendar::day_to_x(day + 1, cal));
         }
     }
-
     positions
 }
 
@@ -495,23 +502,32 @@ fn sync_weekend_bands(
     }
 
     let span = schedule.total_duration_days.max(CALENDAR_HORIZON_DAYS) + 10;
-    let weekend_color = Color::srgba(0.22, 0.26, 0.42, 0.09);
-    let holiday_color = Color::srgba(0.72, 0.28, 0.28, 0.11);
 
-    for (x, is_holiday) in weekend_band_positions(span, &model) {
-        let color = if is_holiday {
-            holiday_color
-        } else {
-            weekend_color
-        };
+    // Thin seams where weekends are compressed out.
+    let weekend_color = Color::srgba(0.22, 0.26, 0.42, 0.09);
+    for x in weekend_band_positions(span, &model) {
         commands.spawn((
             WeekendBand,
             Sprite {
-                color,
+                color: weekend_color,
                 custom_size: Some(Vec2::new(8.0, 20_000.0)),
                 ..default()
             },
             Transform::from_xyz(x, 0.0, -0.5),
+        ));
+    }
+
+    // Holidays occupy a full greyed day-wide column that work skips.
+    let holiday_color = Color::srgba(0.48, 0.50, 0.56, 0.20);
+    for (left_x, _date) in calendar::holiday_columns(&model.calendar, span) {
+        commands.spawn((
+            WeekendBand,
+            Sprite {
+                color: holiday_color,
+                custom_size: Some(Vec2::new(PIXELS_PER_DAY, 20_000.0)),
+                ..default()
+            },
+            Transform::from_xyz(left_x + PIXELS_PER_DAY * 0.5, 0.0, -0.5),
         ));
     }
 }
@@ -540,7 +556,7 @@ const CALENDAR_HORIZON_DAYS: i32 = 780;
 /// Returns (x_center, width, rgba_color) for each month band in the plan span.
 fn period_band_spans(config: &model::CalendarConfig, span_days: i32) -> Vec<(f32, f32, [f32; 4])> {
     let mut result = Vec::new();
-    let span_px = span_days as f32 * PIXELS_PER_DAY;
+    let span_px = calendar::day_to_x(span_days, config);
 
     let start_year = config.start_date.year();
     let start_month = config.start_date.month();
@@ -550,7 +566,7 @@ fn period_band_spans(config: &model::CalendarConfig, span_days: i32) -> Vec<(f32
 
     loop {
         let x_start = match calendar::first_working_day_of_month(year, month, config) {
-            Some(d) => (calendar::date_to_day(d, config) as f32 * PIXELS_PER_DAY).max(0.0),
+            Some(d) => calendar::day_to_x(calendar::date_to_day(d, config), config).max(0.0),
             None => {
                 let (ny, nm) = next_year_month(year, month);
                 year = ny;
@@ -568,7 +584,7 @@ fn period_band_spans(config: &model::CalendarConfig, span_days: i32) -> Vec<(f32
 
         let (ny, nm) = next_year_month(year, month);
         let x_end = match calendar::first_working_day_of_month(ny, nm, config) {
-            Some(d) => (calendar::date_to_day(d, config) as f32 * PIXELS_PER_DAY).min(span_px),
+            Some(d) => calendar::day_to_x(calendar::date_to_day(d, config), config).min(span_px),
             None => span_px,
         };
 
@@ -604,7 +620,7 @@ fn next_year_month(year: i32, month: u32) -> (i32, u32) {
 
 fn x_start_of_month(year: i32, month: u32, config: &model::CalendarConfig) -> f32 {
     match calendar::first_working_day_of_month(year, month, config) {
-        Some(d) => (calendar::date_to_day(d, config) as f32 * PIXELS_PER_DAY).max(0.0),
+        Some(d) => calendar::day_to_x(calendar::date_to_day(d, config), config).max(0.0),
         None => f32::MAX,
     }
 }
@@ -786,7 +802,7 @@ fn handle_fork_hover(
         .and_then(|cursor| cam.viewport_to_world_2d(cam_gt, cursor).ok())
         .map(|wp| wp.x);
 
-    fork.hovered_day = world_x.map(|x| (x / PIXELS_PER_DAY).floor() as model::Day);
+    fork.hovered_day = world_x.map(|x| calendar::x_to_day(x, &model.calendar));
 
     // Ctrl+Left-click: fork main into a new branch at the hovered day.
     let ctrl = keyboard.pressed(KeyCode::ControlLeft) || keyboard.pressed(KeyCode::ControlRight);
@@ -844,7 +860,7 @@ fn draw_branch_markers(
         let Some(branch_day) = plan.branch_start_day else {
             continue;
         };
-        let x = branch_day as f32 * PIXELS_PER_DAY;
+        let x = calendar::day_to_x(branch_day, &model.calendar);
         let lc = blocks::BRANCH_PALETTE[idx % blocks::BRANCH_PALETTE.len()];
         // The selected branch is drawn brighter and fully opaque so it's clear
         // which one the Delete key will remove.
@@ -889,7 +905,7 @@ fn draw_branch_markers(
 
     // Fork-hover indicator: ghost line at hovered day.
     if let Some(hovered_day) = fork.hovered_day {
-        let x = hovered_day as f32 * PIXELS_PER_DAY;
+        let x = calendar::day_to_x(hovered_day, &model.calendar);
         let ghost = Color::srgba(0.55, 0.75, 1.0, 0.25);
         gizmos.line_2d(
             Vec2::new(x, cam_t.translation.y + half_h),
@@ -952,8 +968,8 @@ fn calendar_ruler_ui(
     let show_days = day_w >= 13.0;
     let show_weeks = week_w >= 44.0;
 
-    let day_min = (x_left / PIXELS_PER_DAY).floor() as i32;
-    let day_max = (x_right / PIXELS_PER_DAY).ceil() as i32;
+    let day_min = calendar::x_to_day(x_left, config);
+    let day_max = calendar::x_to_day(x_right, config) + 1;
 
     egui::TopBottomPanel::top("calendar_ruler")
         .exact_height(64.0)
@@ -993,7 +1009,7 @@ fn calendar_ruler_ui(
                     color,
                 );
             };
-            let day_x = |d: i32| date_to_day_x(d);
+            let day_x = |d: i32| calendar::day_to_x(d, config);
 
             let d_lo = calendar::day_to_date(day_min, config);
             let d_hi = calendar::day_to_date(day_max, config);
@@ -1041,7 +1057,7 @@ fn calendar_ruler_ui(
                         [egui::Pos2::new(bx, day_y - 6.0), egui::Pos2::new(bx, rect.bottom())],
                         tick,
                     );
-                    let cx = world_to_screen_x((d as f32 + 0.5) * PIXELS_PER_DAY);
+                    let cx = world_to_screen_x(day_x(d) + PIXELS_PER_DAY * 0.5);
                     let date = calendar::day_to_date(d, config);
                     let color = if d < today.day { past_color } else { day_color };
                     painter.text(
@@ -1052,10 +1068,26 @@ fn calendar_ruler_ui(
                         color,
                     );
                 }
+                // Holiday columns carry their own greyed date number, so the
+                // date doesn't disappear from the header where work skips it.
+                let holiday_num = egui::Color32::from_rgb(120, 122, 134);
+                for (left_x, date) in calendar::holiday_columns(config, day_max) {
+                    let cx = world_to_screen_x(left_x + PIXELS_PER_DAY * 0.5);
+                    if cx < rect.left() || cx > rect.right() {
+                        continue;
+                    }
+                    painter.text(
+                        egui::Pos2::new(cx, day_y),
+                        egui::Align2::CENTER_CENTER,
+                        format!("{}", date.day()),
+                        egui::FontId::proportional(10.5),
+                        holiday_num,
+                    );
+                }
             }
 
             // Today marker tick — warm accent, matching the canvas today line.
-            let today_x = world_to_screen_x(today.day as f32 * PIXELS_PER_DAY);
+            let today_x = world_to_screen_x(day_x(today.day));
             if today_x >= rect.left() && today_x <= rect.right() {
                 painter.line_segment(
                     [
@@ -1311,17 +1343,12 @@ fn default_row_label(row: i32) -> String {
     format!("Resource {}", row + 1)
 }
 
-/// World-space x of the left edge of working day `d`.
-fn date_to_day_x(d: i32) -> f32 {
-    d as f32 * PIXELS_PER_DAY
-}
-
 /// World-space x of the start of calendar year `y` (its Jan 1, mapped to a
 /// working day). Used for the year tier of the calendar ruler.
 fn year_start_x(y: i32, config: &model::CalendarConfig) -> f32 {
     let date = chrono::NaiveDate::from_ymd_opt(y, 1, 1)
         .unwrap_or_else(|| config.start_date);
-    calendar::date_to_day(date, config) as f32 * PIXELS_PER_DAY
+    calendar::day_to_x(calendar::date_to_day(date, config), config)
 }
 
 /// World-space x of the start of quarter `q` (0..=4, where 4 = next year's Q1)
@@ -1330,7 +1357,7 @@ fn quarter_start_x(y: i32, q: i32, config: &model::CalendarConfig) -> f32 {
     let (yy, month) = if q >= 4 { (y + 1, 1) } else { (y, (q * 3 + 1) as u32) };
     let date = chrono::NaiveDate::from_ymd_opt(yy, month, 1)
         .unwrap_or_else(|| config.start_date);
-    calendar::date_to_day(date, config) as f32 * PIXELS_PER_DAY
+    calendar::day_to_x(calendar::date_to_day(date, config), config)
 }
 
 /// Renders Re-center and Fit-to-view buttons in a small floating area
@@ -1340,12 +1367,218 @@ fn quarter_start_x(y: i32, q: i32, config: &model::CalendarConfig) -> f32 {
 /// buttons. Using TopBottomPanel reserves space so block labels and side panel
 /// content cannot render behind the controls.
 #[allow(clippy::too_many_arguments)]
+/// Applies the warm-amber theme to the current `ui`'s button widget states, so
+/// every `tool_button` in the row gets a consistent fill, rounded corner, and
+/// hover/active feedback instead of egui's flat grey default.
+fn style_tool_buttons(ui: &mut egui::Ui) {
+    let r = egui::CornerRadius::same(6);
+    let w = &mut ui.visuals_mut().widgets;
+    w.inactive.weak_bg_fill = egui::Color32::from_rgb(40, 30, 16);
+    w.inactive.bg_stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(74, 56, 30));
+    w.inactive.fg_stroke.color = egui::Color32::from_rgb(224, 206, 170);
+    w.inactive.corner_radius = r;
+    w.hovered.weak_bg_fill = egui::Color32::from_rgb(58, 44, 24);
+    w.hovered.bg_stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(122, 94, 52));
+    w.hovered.fg_stroke.color = egui::Color32::from_rgb(246, 230, 198);
+    w.hovered.corner_radius = r;
+    w.active.weak_bg_fill = egui::Color32::from_rgb(78, 58, 30);
+    w.active.corner_radius = r;
+}
+
+/// A themed top-bar action button. `active` highlights it (e.g. the settings
+/// gear while the panel is open). Expects `style_tool_buttons` already applied.
+fn tool_button(ui: &mut egui::Ui, label: &str, active: bool) -> egui::Response {
+    let mut text = egui::RichText::new(label).size(12.5);
+    if active {
+        text = text.color(egui::Color32::from_rgb(250, 165, 40));
+    }
+    let mut btn = egui::Button::new(text);
+    if active {
+        btn = btn
+            .fill(egui::Color32::from_rgb(64, 46, 18))
+            .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(250, 165, 40)));
+    }
+    ui.add(btn)
+}
+
+/// Right-side settings fly-out. Toggled by the top-bar gear. Holds general
+/// settings; the first section is the calendar (working days per week, the
+/// holiday list, and the start date). Edits write straight to `model.calendar`
+/// and autosave.
+fn settings_flyout_ui(
+    mut contexts: EguiContexts,
+    mut settings: ResMut<SettingsState>,
+    mut model: ResMut<model::Model>,
+    conn: NonSend<rusqlite::Connection>,
+) {
+    if !settings.open {
+        return;
+    }
+    let Ok(ctx) = contexts.ctx_mut() else { return };
+
+    let mut changed = false;
+    let mut close = false;
+
+    egui::SidePanel::right("settings_flyout")
+        .resizable(false)
+        .exact_width(272.0)
+        .frame(
+            egui::Frame::new()
+                .fill(egui::Color32::from_rgb(26, 20, 12))
+                .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(60, 46, 26)))
+                .inner_margin(egui::Margin::same(14)),
+        )
+        .show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new("Settings")
+                        .size(16.0)
+                        .strong()
+                        .color(egui::Color32::from_rgb(238, 212, 152)),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button(egui::RichText::new("✕").size(14.0)).clicked() {
+                        close = true;
+                    }
+                });
+            });
+            ui.add_space(10.0);
+
+            ui.label(
+                egui::RichText::new("CALENDAR")
+                    .size(11.0)
+                    .color(egui::Color32::from_rgb(150, 130, 96)),
+            );
+            ui.separator();
+            ui.add_space(4.0);
+
+            // Working days per week.
+            ui.horizontal(|ui| {
+                ui.label("Working days / week");
+                let mut wdpw = model.calendar.working_days_per_week as i32;
+                if ui
+                    .add(egui::DragValue::new(&mut wdpw).range(1..=7).speed(0.05))
+                    .changed()
+                {
+                    model.calendar.working_days_per_week = wdpw.clamp(1, 7) as u8;
+                    changed = true;
+                }
+            });
+
+            // Start date.
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                ui.label("Start date");
+                ui.label(
+                    egui::RichText::new(model.calendar.start_date.format("%Y-%m-%d").to_string())
+                        .color(egui::Color32::from_rgb(206, 190, 164)),
+                );
+            });
+            ui.horizontal(|ui| {
+                let resp = ui.add(
+                    egui::TextEdit::singleline(&mut settings.start_input)
+                        .hint_text("YYYY-MM-DD")
+                        .desired_width(110.0),
+                );
+                let submit = ui.button("Set").clicked()
+                    || (resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)));
+                if submit {
+                    if let Ok(d) = chrono::NaiveDate::parse_from_str(
+                        settings.start_input.trim(),
+                        "%Y-%m-%d",
+                    ) {
+                        model.calendar.start_date = d;
+                        settings.start_input.clear();
+                        changed = true;
+                    }
+                }
+            });
+
+            // Holidays / non-working dates.
+            ui.add_space(14.0);
+            ui.label(
+                egui::RichText::new("HOLIDAYS")
+                    .size(11.0)
+                    .color(egui::Color32::from_rgb(150, 130, 96)),
+            );
+            ui.separator();
+            ui.add_space(4.0);
+
+            let mut dates = model.calendar.non_working_dates.clone();
+            dates.sort();
+            if dates.is_empty() {
+                ui.label(
+                    egui::RichText::new("None set")
+                        .italics()
+                        .color(egui::Color32::from_rgb(120, 110, 96)),
+                );
+            }
+            let mut remove: Option<chrono::NaiveDate> = None;
+            for d in &dates {
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new(d.format("%Y-%m-%d  %a").to_string())
+                            .color(egui::Color32::from_rgb(206, 190, 164)),
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui
+                            .small_button(egui::RichText::new("✕").color(
+                                egui::Color32::from_rgb(210, 130, 124),
+                            ))
+                            .clicked()
+                        {
+                            remove = Some(*d);
+                        }
+                    });
+                });
+            }
+            if let Some(d) = remove {
+                model.calendar.non_working_dates.retain(|x| *x != d);
+                changed = true;
+            }
+
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                let resp = ui.add(
+                    egui::TextEdit::singleline(&mut settings.holiday_input)
+                        .hint_text("YYYY-MM-DD")
+                        .desired_width(110.0),
+                );
+                let submit = ui.button("Add").clicked()
+                    || (resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)));
+                if submit {
+                    if let Ok(d) = chrono::NaiveDate::parse_from_str(
+                        settings.holiday_input.trim(),
+                        "%Y-%m-%d",
+                    ) {
+                        if !model.calendar.non_working_dates.contains(&d) {
+                            model.calendar.non_working_dates.push(d);
+                            changed = true;
+                        }
+                        settings.holiday_input.clear();
+                    }
+                }
+            });
+        });
+
+    if close {
+        settings.open = false;
+    }
+    if changed {
+        if let Err(e) = db::save_model(&conn, &model) {
+            error!("save_model failed: {e}");
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn top_bar_ui(
     mut contexts: EguiContexts,
     mut target: ResMut<CameraTarget>,
     mut model: ResMut<model::Model>,
     mut schedule: ResMut<schedule::Schedule>,
     mut drill: ResMut<schedule::DrillScope>,
+    mut settings: ResMut<SettingsState>,
     windows: Query<&Window>,
     today: Res<schedule::TodayMarker>,
     conn: NonSend<rusqlite::Connection>,
@@ -1423,26 +1656,47 @@ fn top_bar_ui(
                 }
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.small_button("→ Today").clicked() {
-                        let x = today.day as f32 * PIXELS_PER_DAY;
-                        target.pos.x = x;
+                    style_tool_buttons(ui);
+                    // Far right: the settings gear (highlighted when open).
+                    if tool_button(ui, "⚙", settings.open)
+                        .on_hover_text("Settings")
+                        .clicked()
+                    {
+                        settings.open = !settings.open;
                     }
-                    if ui.small_button("Fit to view [F]").clicked() {
+                    ui.add_space(8.0);
+                    if tool_button(ui, "→ Today", false).clicked() {
+                        target.pos.x = calendar::day_to_x(today.day, &model.calendar);
+                    }
+                    if tool_button(ui, "⤢ Fit", false)
+                        .on_hover_text("Fit to view [F]")
+                        .clicked()
+                    {
                         if let Some(new_target) = camera::fit_to_blocks(&model, schedule.plan_id, &windows) {
                             *target = new_target;
                         }
                     }
-                    if ui.small_button("Re-center [Home]").clicked() {
+                    if tool_button(ui, "⌂ Home", false)
+                        .on_hover_text("Re-center [Home]")
+                        .clicked()
+                    {
                         if let Ok(window) = windows.single() {
-                            *target = camera::home_target(window, today.day);
+                            *target = camera::home_target(window, today.day, &model.calendar);
                         }
                     }
+                    ui.add_space(8.0);
                     // Dev: wipe all blocks, branches, and links; keep one empty
                     // main plan to start fresh from.
                     if ui
-                        .small_button(
-                            egui::RichText::new("⌫ Clear all")
-                                .color(egui::Color32::from_rgb(230, 120, 120)),
+                        .add(
+                            egui::Button::new(
+                                egui::RichText::new("⌫ Clear")
+                                    .size(12.5)
+                                    .color(egui::Color32::from_rgb(228, 132, 122)),
+                            )
+                            .fill(egui::Color32::from_rgb(44, 24, 20))
+                            .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(96, 50, 44)))
+                            .corner_radius(6.0),
                         )
                         .on_hover_text("Dev: delete all blocks, branches, and links")
                         .clicked()
@@ -1487,6 +1741,15 @@ pub struct RowRename {
     pub buf: String,
 }
 
+/// State for the right-side settings fly-out: whether it's open, plus the text
+/// buffers for the "add holiday" and "start date" inputs.
+#[derive(Resource, Default)]
+pub struct SettingsState {
+    pub open: bool,
+    pub holiday_input: String,
+    pub start_input: String,
+}
+
 /// Returns the non-active forked plan whose branch marker is within `hit_world`
 /// units of `world_x`, nearest first. Used both to select a branch on click and
 /// to keep block-creation clicks from landing on a marker.
@@ -1504,7 +1767,7 @@ pub fn branch_plan_at_x(
         let Some(day) = plan.branch_start_day else {
             continue;
         };
-        let dist = (world_x - day as f32 * PIXELS_PER_DAY).abs();
+        let dist = (world_x - calendar::day_to_x(day, &model.calendar)).abs();
         if dist <= hit_world && best.is_none_or(|(bd, _)| dist < bd) {
             best = Some((dist, plan.id));
         }
@@ -1609,50 +1872,25 @@ mod tests {
     use chrono::NaiveDate;
 
     #[test]
-    fn week_bands_at_every_wdpw_boundary() {
-        let model = model::Model::default();
-        let positions = weekend_band_positions(10, &model);
-        let xs: Vec<f32> = positions
-            .iter()
-            .filter(|(_, h)| !h)
-            .map(|(x, _)| *x)
-            .collect();
-        // Default wdpw=5; bands at day 5, 10, 15 (span + wdpw).
-        assert!(xs.contains(&(5.0 * PIXELS_PER_DAY)));
-        assert!(xs.contains(&(10.0 * PIXELS_PER_DAY)));
-        assert!(xs.contains(&(15.0 * PIXELS_PER_DAY)));
-    }
-
-    #[test]
-    fn no_holiday_bands_without_non_working_dates() {
-        let model = model::Model::default();
-        let positions = weekend_band_positions(10, &model);
-        assert_eq!(positions.iter().filter(|(_, h)| *h).count(), 0);
-    }
-
-    #[test]
-    fn holiday_band_placed_at_next_working_day_boundary() {
+    fn week_bands_at_calendar_week_boundaries() {
         let mut model = model::Model::default();
         model.calendar.start_date = NaiveDate::from_ymd_opt(2025, 1, 6).unwrap(); // Monday
-        model.calendar.non_working_dates = vec![NaiveDate::from_ymd_opt(2025, 1, 7).unwrap()]; // Tuesday
-        let positions = weekend_band_positions(20, &model);
-        let holiday_xs: Vec<f32> = positions
-            .iter()
-            .filter(|(_, h)| *h)
-            .map(|(x, _)| *x)
-            .collect();
-        // date_to_day(Tue Jan 7 holiday, Mon Jan 6 start) = 0 → boundary = 1 → x = 100.0
-        assert!(holiday_xs.contains(&(1.0 * PIXELS_PER_DAY)));
+        let xs = weekend_band_positions(12, &model);
+        // Monday start: seams land after each Friday — days 5, 10, 15.
+        assert!(xs.contains(&(5.0 * PIXELS_PER_DAY)));
+        assert!(xs.contains(&(10.0 * PIXELS_PER_DAY)));
     }
 
     #[test]
-    fn holiday_out_of_span_excluded() {
+    fn week_bands_anchor_to_weeks_not_start_day() {
+        // Starting mid-week, the first seam falls after that week's Friday — not
+        // a naive five working days from day 0.
         let mut model = model::Model::default();
-        model.calendar.start_date = NaiveDate::from_ymd_opt(2025, 1, 6).unwrap();
-        // Holiday 200 working days out — far beyond span=5.
-        model.calendar.non_working_dates = vec![calendar::day_to_date(200, &model.calendar)];
-        let positions = weekend_band_positions(5, &model);
-        assert_eq!(positions.iter().filter(|(_, h)| *h).count(), 0);
+        model.calendar.start_date = NaiveDate::from_ymd_opt(2025, 1, 8).unwrap(); // Wednesday
+        let xs = weekend_band_positions(12, &model);
+        // Wed(0) Thu(1) Fri(2) → weekend → seam at day 3, not day 5.
+        assert!(xs.contains(&(3.0 * PIXELS_PER_DAY)));
+        assert!(!xs.contains(&(5.0 * PIXELS_PER_DAY)));
     }
 
     #[test]
