@@ -35,8 +35,8 @@ pub fn create_tables(conn: &Connection) -> Result<()> {
         "ALTER TABLE work_blocks ADD COLUMN block_row INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE work_blocks ADD COLUMN parent_id INTEGER",
         "ALTER TABLE work_blocks ADD COLUMN rollup INTEGER NOT NULL DEFAULT 0",
-        "ALTER TABLE work_blocks ADD COLUMN row_span INTEGER NOT NULL DEFAULT 1",
         "ALTER TABLE plans ADD COLUMN branch_start_day INTEGER",
+        "ALTER TABLE plans ADD COLUMN row_names TEXT NOT NULL DEFAULT ''",
         "ALTER TABLE dependencies ADD COLUMN plan_id INTEGER",
     ] {
         match conn.execute_batch(sql) {
@@ -59,6 +59,7 @@ pub fn create_tables(conn: &Connection) -> Result<()> {
         "ALTER TABLE work_blocks DROP COLUMN estimate_optimistic",
         "ALTER TABLE work_blocks DROP COLUMN estimate_pessimistic",
         "ALTER TABLE work_blocks DROP COLUMN estimate_confidence",
+        "ALTER TABLE work_blocks DROP COLUMN row_span",
     ] {
         match conn.execute_batch(sql) {
             Ok(()) => {}
@@ -159,8 +160,8 @@ pub fn save_model(conn: &Connection, model: &Model) -> Result<()> {
             "INSERT INTO work_blocks
                  (id, name,
                   start_day, duration_days, color_r, color_g, color_b, description, priority,
-                  t_shirt_size, block_row, parent_id, rollup, row_span)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+                  t_shirt_size, block_row, parent_id, rollup)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
              ON CONFLICT(id) DO UPDATE SET
                  name = excluded.name,
                  start_day = excluded.start_day,
@@ -173,8 +174,7 @@ pub fn save_model(conn: &Connection, model: &Model) -> Result<()> {
                  t_shirt_size = excluded.t_shirt_size,
                  block_row = excluded.block_row,
                  parent_id = excluded.parent_id,
-                 rollup = excluded.rollup,
-                 row_span = excluded.row_span",
+                 rollup = excluded.rollup",
             (
                 wb.id.0 as i64,
                 &wb.name,
@@ -189,7 +189,6 @@ pub fn save_model(conn: &Connection, model: &Model) -> Result<()> {
                 wb.row as i64,
                 wb.parent.map(|p| p.0 as i64),
                 wb.rollup as i64,
-                wb.row_span as i64,
             ),
         )?;
     }
@@ -218,12 +217,18 @@ pub fn save_model(conn: &Connection, model: &Model) -> Result<()> {
 
     for plan in model.plans.values() {
         tx.execute(
-            "INSERT INTO plans (id, name, branch_start_day)
-             VALUES (?1, ?2, ?3)
+            "INSERT INTO plans (id, name, branch_start_day, row_names)
+             VALUES (?1, ?2, ?3, ?4)
              ON CONFLICT(id) DO UPDATE SET
                  name = excluded.name,
-                 branch_start_day = excluded.branch_start_day",
-            (plan.id.0 as i64, &plan.name, plan.branch_start_day),
+                 branch_start_day = excluded.branch_start_day,
+                 row_names = excluded.row_names",
+            (
+                plan.id.0 as i64,
+                &plan.name,
+                plan.branch_start_day,
+                encode_row_names(&plan.row_names),
+            ),
         )?;
     }
 
@@ -342,6 +347,50 @@ pub fn save_model(conn: &Connection, model: &Model) -> Result<()> {
     tx.commit()
 }
 
+/// Serializes a plan's per-scope row names into one TEXT cell.
+///
+/// One line per drill scope; within a line, tab-separated tokens: the first is
+/// the scope key (`R` = top level, else the container block id) and the rest are
+/// the ordered row names. Names are single-line in the UI; any stray tab/newline
+/// is flattened to a space so the format stays unambiguous.
+fn encode_row_names(rows: &std::collections::HashMap<Option<WorkBlockId>, Vec<String>>) -> String {
+    let sanitize = |s: &str| s.replace(['\t', '\n'], " ");
+    let mut lines: Vec<String> = rows
+        .iter()
+        .map(|(scope, names)| {
+            let key = match scope {
+                None => "R".to_string(),
+                Some(id) => id.0.to_string(),
+            };
+            let mut parts = vec![key];
+            parts.extend(names.iter().map(|n| sanitize(n)));
+            parts.join("\t")
+        })
+        .collect();
+    // Stable order keeps saves deterministic (HashMap iteration is not).
+    lines.sort();
+    lines.join("\n")
+}
+
+/// Inverse of [`encode_row_names`]. Unknown/malformed lines are skipped.
+fn decode_row_names(s: &str) -> std::collections::HashMap<Option<WorkBlockId>, Vec<String>> {
+    let mut map = std::collections::HashMap::new();
+    for line in s.split('\n').filter(|l| !l.is_empty()) {
+        let mut tokens = line.split('\t');
+        let Some(key) = tokens.next() else { continue };
+        let scope = if key == "R" {
+            None
+        } else {
+            match key.parse::<u64>() {
+                Ok(id) => Some(WorkBlockId(id)),
+                Err(_) => continue,
+            }
+        };
+        map.insert(scope, tokens.map(|t| t.to_string()).collect());
+    }
+    map
+}
+
 /// Deletes rows from `table` whose `id` column is not in `current_ids`.
 /// If `current_ids` is empty the entire table is cleared (every row is stale).
 /// Table names come from hardcoded call-sites so there is no injection risk.
@@ -442,7 +491,7 @@ pub fn load_model(conn: &Connection) -> Result<Model> {
         let mut stmt = conn.prepare(
             "SELECT id, name,
                     start_day, duration_days, color_r, color_g, color_b, description, priority,
-                    t_shirt_size, block_row, parent_id, rollup, row_span
+                    t_shirt_size, block_row, parent_id, rollup
              FROM work_blocks",
         )?;
         let rows = stmt.query_map([], |row| {
@@ -460,7 +509,6 @@ pub fn load_model(conn: &Connection) -> Result<Model> {
                 row.get::<_, i64>(10)?,
                 row.get::<_, Option<i64>>(11)?,
                 row.get::<_, i64>(12)?,
-                row.get::<_, i64>(13)?,
             ))
         })?;
         for row in rows {
@@ -478,7 +526,6 @@ pub fn load_model(conn: &Connection) -> Result<Model> {
                 block_row,
                 parent_id,
                 rollup,
-                row_span,
             ) = row?;
             let color = match (cr, cg, cb) {
                 (Some(r), Some(g), Some(b)) => Some([r as f32, g as f32, b as f32]),
@@ -499,7 +546,6 @@ pub fn load_model(conn: &Connection) -> Result<Model> {
                     priority: priority.clamp(0, 3) as u8,
                     t_shirt_size,
                     rollup: rollup != 0,
-                    row_span: (row_span as i32).max(1),
                 },
             );
         }
@@ -542,16 +588,18 @@ pub fn load_model(conn: &Connection) -> Result<Model> {
 
     // plans
     {
-        let mut stmt = conn.prepare("SELECT id, name, branch_start_day FROM plans")?;
+        let mut stmt =
+            conn.prepare("SELECT id, name, branch_start_day, row_names FROM plans")?;
         let rows = stmt.query_map([], |row| {
             Ok((
                 row.get::<_, i64>(0)?,
                 row.get::<_, String>(1)?,
                 row.get::<_, Option<f64>>(2)?,
+                row.get::<_, String>(3)?,
             ))
         })?;
         for row in rows {
-            let (id, name, branch_start_day) = row?;
+            let (id, name, branch_start_day, row_names) = row?;
             bump!(id);
             model.plans.insert(
                 PlanId(id as u64),
@@ -561,6 +609,7 @@ pub fn load_model(conn: &Connection) -> Result<Model> {
                     root_blocks: vec![],
                     allocations: vec![],
                     branch_start_day: branch_start_day.map(|d| d as i32),
+                    row_names: decode_row_names(&row_names),
                 },
             );
         }
@@ -827,6 +876,40 @@ mod tests {
         save_model(&conn, &m).unwrap();
         let loaded = load_model(&conn).unwrap();
         assert_eq!(m, loaded);
+    }
+
+    #[test]
+    fn row_names_round_trip_through_db() {
+        let conn = open_in_memory();
+        let mut m = Model::default();
+        let plan = m.create_plan("p", None);
+        let block = m.create_work_block("parent");
+        {
+            let p = m.plans.get_mut(&plan).unwrap();
+            // Top-level rows, with a gap (row 2 named, row 1 left blank) and a
+            // name containing a comma to prove the encoding is delimiter-safe.
+            p.set_row_name(None, 0, "Backend, infra".to_string());
+            p.set_row_name(None, 2, "Design".to_string());
+            // Drill-level rows under `block` — an independent per-plan axis.
+            p.set_row_name(Some(block), 0, "Alice".to_string());
+            p.set_row_name(Some(block), 1, "Bob".to_string());
+        }
+        save_model(&conn, &m).unwrap();
+        let loaded = load_model(&conn).unwrap();
+        assert_eq!(m.plans[&plan].row_names, loaded.plans[&plan].row_names);
+        assert_eq!(loaded.plans[&plan].row_name(None, 0), Some("Backend, infra"));
+        assert_eq!(loaded.plans[&plan].row_name(None, 1), None); // gap
+        assert_eq!(loaded.plans[&plan].row_name(Some(block), 1), Some("Bob"));
+    }
+
+    #[test]
+    fn encode_row_names_is_deterministic() {
+        let mut rows = std::collections::HashMap::new();
+        rows.insert(None, vec!["a".to_string(), "b".to_string()]);
+        rows.insert(Some(WorkBlockId(7)), vec!["x".to_string()]);
+        // HashMap iteration order varies; the encoding must not.
+        assert_eq!(encode_row_names(&rows), encode_row_names(&rows.clone()));
+        assert_eq!(decode_row_names(&encode_row_names(&rows)), rows);
     }
 
     #[test]
@@ -1192,8 +1275,7 @@ CREATE TABLE IF NOT EXISTS work_blocks (
     color_g              REAL,
     color_b              REAL,
     parent_id            INTEGER,
-    rollup               INTEGER NOT NULL DEFAULT 0,
-    row_span             INTEGER NOT NULL DEFAULT 1
+    rollup               INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS dependencies (

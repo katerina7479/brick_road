@@ -59,14 +59,11 @@ pub const PALETTE: &[LinearRgba] = &[
     LinearRgba::new(2.40, 1.60, 0.10, 1.0), // gold
 ];
 
-/// The vertical placement of a block bar: `(center_y, height)`. A normal block
-/// is one row tall; a rolled-up parent spanning `row_span` rows covers all of
-/// them (from its top row down to the last), centered over the range.
+/// The vertical placement of a block bar: `(center_y, height)`. Every block —
+/// leaf or rolled-up parent — occupies exactly one row on its own level's
+/// resource axis.
 pub fn block_extent(wb: &model::WorkBlock) -> (f32, f32) {
-    let span = wb.row_span.max(1) as f32;
-    let center_y = -(wb.row as f32 + (span - 1.0) * 0.5) * ROW_HEIGHT;
-    let height = (span - 1.0) * ROW_HEIGHT + BLOCK_HEIGHT;
-    (center_y, height)
+    (-(wb.row as f32) * ROW_HEIGHT, BLOCK_HEIGHT)
 }
 
 /// The fill color a work block renders with: its explicit `color` if set,
@@ -559,6 +556,7 @@ fn fit_label(full_name: &str, block_world_w: f32, scale: f32) -> Option<String> 
 pub fn sync_block_labels(
     cam_q: Query<&Projection, With<Camera2d>>,
     model: Res<model::Model>,
+    name_edit: Res<NameEditState>,
     mut label_q: Query<
         (&BlockLabel, &mut Text2d, &mut Visibility, &mut Transform),
         Without<BlockLabelShadow>,
@@ -588,6 +586,12 @@ pub fn sync_block_labels(
     };
 
     for (label, mut text2d, mut vis, mut transform) in &mut label_q {
+        // The block being renamed shows the seamless in-place editor instead;
+        // hide its baked label so the live text and the editor don't overlap.
+        if name_edit.editing == Some(label.work_block_id) {
+            *vis = Visibility::Hidden;
+            continue;
+        }
         transform.scale = Vec3::splat(scale);
         transform.translation = Vec3::new(0.0, 0.0, 0.15);
         match fit_label(&label.full_name, block_width(&label.work_block_id), scale) {
@@ -600,6 +604,10 @@ pub fn sync_block_labels(
     }
 
     for (shadow, mut text2d, mut vis, mut transform) in &mut shadow_q {
+        if name_edit.editing == Some(shadow.work_block_id) {
+            *vis = Visibility::Hidden;
+            continue;
+        }
         transform.scale = Vec3::splat(scale);
         // Shift by 1 screen pixel — in local space that's `scale` world units.
         transform.translation = Vec3::new(scale, -scale, 0.08);
@@ -1918,29 +1926,31 @@ pub fn draw_name_edit_overlay(
     let mut commit = false;
 
     if !escaped && !entered {
-        const W: f32 = 150.0;
+        // Seamless in-place edit: no panel/box. The field is transparent and the
+        // text matches the block's baked label (dark, 13px), so it reads as
+        // editing the name where it sits. The field is a fixed width anchored on
+        // the block, so text extends rightward as you type rather than sliding.
+        const W: f32 = 160.0;
         egui::Area::new(egui::Id::new("name_edit_overlay"))
-            .fixed_pos(egui::pos2(center.x - W * 0.5, center.y - 12.0))
+            .fixed_pos(egui::pos2(center.x - W * 0.5, center.y - 9.0))
             .show(ctx, |ui| {
-                egui::Frame::new()
-                    .fill(egui::Color32::from_rgb(18, 20, 28))
-                    .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(120, 160, 235)))
-                    .corner_radius(4.0)
-                    .inner_margin(egui::Margin::symmetric(6, 3))
-                    .show(ui, |ui| {
-                        let response = ui.add(
-                            egui::TextEdit::singleline(&mut name_edit.text_buf)
-                                .desired_width(W)
-                                .frame(false)
-                                .font(egui::FontId::proportional(13.0))
-                                .text_color(egui::Color32::from_rgb(232, 234, 244)),
-                        );
-                        response.request_focus();
-                        // Commit if focus is lost (Tab, click outside, etc.).
-                        if response.lost_focus() {
-                            commit = true;
-                        }
-                    });
+                ui.visuals_mut().extreme_bg_color = egui::Color32::TRANSPARENT;
+                ui.visuals_mut().widgets.active.bg_stroke = egui::Stroke::NONE;
+                ui.visuals_mut().widgets.hovered.bg_stroke = egui::Stroke::NONE;
+                let response = ui.add(
+                    egui::TextEdit::singleline(&mut name_edit.text_buf)
+                        .desired_width(W)
+                        .horizontal_align(egui::Align::Center)
+                        .frame(false)
+                        .margin(egui::Margin::ZERO)
+                        .font(egui::FontId::proportional(13.0))
+                        .text_color(egui::Color32::from_rgb(26, 26, 33)),
+                );
+                response.request_focus();
+                // Commit if focus is lost (Tab, click outside, etc.).
+                if response.lost_focus() {
+                    commit = true;
+                }
             });
     } else if entered {
         commit = true;

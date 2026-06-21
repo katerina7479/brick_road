@@ -53,10 +53,6 @@ pub struct WorkBlock {
     /// bar). When `false`, the block keeps its own timeline and children sit
     /// inside it without resizing it. Per-block toggle; ignored for leaf blocks.
     pub rollup: bool,
-    /// How many rows this block occupies vertically. `1` for an ordinary block;
-    /// a rolled-up parent whose children span several rows takes their full row
-    /// span so it visually covers all of them. Computed in roll-up; otherwise 1.
-    pub row_span: i32,
 }
 
 /// A named t-shirt size that maps a label (e.g. "M") to a day count.
@@ -173,6 +169,36 @@ pub struct Plan {
     /// clamped to ≥ d (the working-day offset of "today" at branch creation).
     /// `None` for the baseline plan, which may contain historical blocks.
     pub branch_start_day: Option<Day>,
+    /// User-given names for resource rows, keyed by drill scope: `None` is the
+    /// plan's top level; `Some(block)` is the rows seen when drilled into that
+    /// block. Each scope owns an independent, per-plan ordered list (index =
+    /// row number). A row with no entry falls back to a default label.
+    pub row_names: HashMap<Option<WorkBlockId>, Vec<String>>,
+}
+
+impl Plan {
+    /// The resource-row name for `row` within `scope` (the drilled-into block,
+    /// or `None` at top level), or `None` if the user hasn't named it.
+    pub fn row_name(&self, scope: Option<WorkBlockId>, row: i32) -> Option<&str> {
+        self.row_names
+            .get(&scope)
+            .and_then(|names| usize::try_from(row).ok().and_then(|i| names.get(i)))
+            .map(|s| s.as_str())
+            .filter(|s| !s.is_empty())
+    }
+
+    /// Sets the name for `row` within `scope`, growing the list with empty
+    /// placeholders as needed so `row` is addressable.
+    pub fn set_row_name(&mut self, scope: Option<WorkBlockId>, row: i32, name: String) {
+        let Ok(idx) = usize::try_from(row) else {
+            return;
+        };
+        let names = self.row_names.entry(scope).or_default();
+        if names.len() <= idx {
+            names.resize(idx + 1, String::new());
+        }
+        names[idx] = name;
+    }
 }
 
 /// Central data store. All entities are keyed by their ID type.
@@ -212,7 +238,6 @@ impl Model {
                 priority: 1,
                 t_shirt_size: None,
                 rollup: false,
-                row_span: 1,
             },
         );
         id
@@ -288,6 +313,7 @@ impl Model {
                 root_blocks: vec![],
                 allocations: vec![],
                 branch_start_day,
+                row_names: HashMap::new(),
             },
         );
         id
@@ -360,29 +386,13 @@ impl Model {
                         .map(|wb| wb.start_day + wb.duration_days)
                         .max()
                         .unwrap_or(0);
-                    // Vertical span: a rolled-up parent covers the full row range
-                    // of its children (taking a child's own row_span into account
-                    // for deeper nesting).
-                    let min_row = kids
-                        .iter()
-                        .filter_map(|k| self.work_blocks.get(k))
-                        .map(|wb| wb.row)
-                        .min()
-                        .unwrap_or(0);
-                    let max_row = kids
-                        .iter()
-                        .filter_map(|k| self.work_blocks.get(k))
-                        .map(|wb| wb.row + wb.row_span - 1)
-                        .max()
-                        .unwrap_or(0);
+                    // A rolled-up parent's time extent is its children's; its row,
+                    // however, belongs to its own level's resource axis (children
+                    // live on a different, independent axis) and is left untouched.
                     if let Some(wb) = self.work_blocks.get_mut(&id) {
                         wb.start_day = start;
                         wb.duration_days = (end - start).max(1);
-                        wb.row = min_row;
-                        wb.row_span = (max_row - min_row + 1).max(1);
                     }
-                } else if let Some(wb) = self.work_blocks.get_mut(&id) {
-                    wb.row_span = 1;
                 }
             }
             current = self.work_blocks.get(&id).and_then(|wb| wb.parent);
@@ -417,6 +427,26 @@ impl Model {
             .filter(|p| p.branch_start_day.is_none())
             .min_by_key(|p| p.id.0)
             .map(|p| p.id)
+    }
+
+    /// The resource-row name shown for `row` within `scope` in `plan_id`, with
+    /// inheritance: a branch repeats main's names by default (the shared "rocks
+    /// in the stream") and only diverges where it sets its own. Returns `None`
+    /// if neither the plan nor main has named the row.
+    pub fn resolved_row_name(
+        &self,
+        plan_id: PlanId,
+        scope: Option<WorkBlockId>,
+        row: i32,
+    ) -> Option<&str> {
+        if let Some(name) = self.plans.get(&plan_id).and_then(|p| p.row_name(scope, row)) {
+            return Some(name);
+        }
+        let main = self.main_plan_id()?;
+        if main == plan_id {
+            return None;
+        }
+        self.plans.get(&main).and_then(|p| p.row_name(scope, row))
     }
 
     /// Forks `main` into a new branch at `fork_day`. The branch inherits main's
@@ -865,16 +895,18 @@ mod tests {
     }
 
     #[test]
-    fn rollup_spans_children_rows() {
-        // Children on rows 0 and 2 → the rolled-up parent covers rows 0..2
-        // (row 0, row_span 3) so it visually spans all of them.
+    fn rollup_keeps_parent_row_independent_of_children() {
+        // Children live on a different resource axis than the parent, so rolling
+        // up spans the parent in *time* but never moves it off its own row.
         let mut m = Model::default();
         let p = m.create_work_block("p");
         m.work_blocks.get_mut(&p).unwrap().rollup = true;
-        m.add_child_block(p, "top", 0, 3, 0);
-        m.add_child_block(p, "bottom", 4, 3, 2);
-        assert_eq!(m.work_blocks[&p].row, 0);
-        assert_eq!(m.work_blocks[&p].row_span, 3);
+        m.work_blocks.get_mut(&p).unwrap().row = 1;
+        m.add_child_block(p, "top", 0, 3, 0); // [0, 3)
+        m.add_child_block(p, "bottom", 4, 3, 2); // [4, 7)
+        assert_eq!(m.work_blocks[&p].row, 1); // unchanged
+        assert_eq!(m.work_blocks[&p].start_day, 0);
+        assert_eq!(m.work_blocks[&p].duration_days, 7);
     }
 
     #[test]

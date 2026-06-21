@@ -335,9 +335,15 @@ pub fn sync_band_visuals(
     mut commands: Commands,
     model: Res<Model>,
     drill: Res<crate::schedule::DrillScope>,
+    plan_rename: Res<PlanRenameState>,
+    lane_rename: Res<LaneBlockRename>,
     mut ents: ResMut<BandEntities>,
 ) {
-    if !model.is_changed() && !drill.is_changed() {
+    if !model.is_changed()
+        && !drill.is_changed()
+        && !plan_rename.is_changed()
+        && !lane_rename.is_changed()
+    {
         return;
     }
     for e in ents.0.drain(..) {
@@ -364,21 +370,24 @@ pub fn sync_band_visuals(
             .id();
         ents.0.push(fill);
 
-        // Editable lane name, left-anchored at the fork point.
-        let name = commands
-            .spawn((
-                BandEntity,
-                Text2d::new(band.name.clone()),
-                TextFont {
-                    font_size: 14.0,
-                    ..default()
-                },
-                TextColor(Color::srgba(0.85, 0.88, 0.96, 0.9)),
-                Anchor::CENTER_LEFT,
-                Transform::from_xyz(band.name_x, band.name_y, -1.0),
-            ))
-            .id();
-        ents.0.push(name);
+        // Editable lane name, left-anchored at the fork point. Hidden while it's
+        // being renamed — the seamless in-place editor stands in for it.
+        if plan_rename.editing != Some(band.plan_id) {
+            let name = commands
+                .spawn((
+                    BandEntity,
+                    Text2d::new(band.name.clone()),
+                    TextFont {
+                        font_size: 14.0,
+                        ..default()
+                    },
+                    TextColor(Color::srgba(0.85, 0.88, 0.96, 0.9)),
+                    Anchor::CENTER_LEFT,
+                    Transform::from_xyz(band.name_x, band.name_y, -1.0),
+                ))
+                .id();
+            ents.0.push(name);
+        }
 
         for b in &band.blocks {
             // Owned blocks render as solid bars (the branch's real work).
@@ -396,35 +405,38 @@ pub fn sync_band_visuals(
                     .id();
                 ents.0.push(bar);
             }
-            // Name (dark text + light halo) for ghosts and owned alike.
-            let halo = commands
-                .spawn((
-                    BandEntity,
-                    Text2d::new(b.name.clone()),
-                    TextFont {
-                        font_size: 12.0,
-                        ..default()
-                    },
-                    TextColor(Color::srgba(1.0, 1.0, 1.0, 0.5)),
-                    Anchor::CENTER,
-                    Transform::from_xyz(b.cx, b.cy, -0.7),
-                ))
-                .id();
-            ents.0.push(halo);
-            let label = commands
-                .spawn((
-                    BandEntity,
-                    Text2d::new(b.name.clone()),
-                    TextFont {
-                        font_size: 12.0,
-                        ..default()
-                    },
-                    TextColor(Color::srgba(0.12, 0.12, 0.15, 1.0)),
-                    Anchor::CENTER,
-                    Transform::from_xyz(b.cx, b.cy, -0.65),
-                ))
-                .id();
-            ents.0.push(label);
+            // Name (dark text + light halo) for ghosts and owned alike. Hidden
+            // while this block is being renamed — the in-place editor stands in.
+            if lane_rename.editing != Some(b.id) {
+                let halo = commands
+                    .spawn((
+                        BandEntity,
+                        Text2d::new(b.name.clone()),
+                        TextFont {
+                            font_size: 12.0,
+                            ..default()
+                        },
+                        TextColor(Color::srgba(1.0, 1.0, 1.0, 0.5)),
+                        Anchor::CENTER,
+                        Transform::from_xyz(b.cx, b.cy, -0.7),
+                    ))
+                    .id();
+                ents.0.push(halo);
+                let label = commands
+                    .spawn((
+                        BandEntity,
+                        Text2d::new(b.name.clone()),
+                        TextFont {
+                            font_size: 12.0,
+                            ..default()
+                        },
+                        TextColor(Color::srgba(0.12, 0.12, 0.15, 1.0)),
+                        Anchor::CENTER,
+                        Transform::from_xyz(b.cx, b.cy, -0.65),
+                    ))
+                    .id();
+                ents.0.push(label);
+            }
         }
     }
 }
@@ -583,9 +595,20 @@ enum RenameOutcome {
     Cancel,
 }
 
-/// Draws a single-line text field anchored in-place at `world_pos`, mapped to
-/// the screen via the camera. Enter commits, Escape cancels, clicking away
-/// commits. Shared by the plan-name and lane-block rename overlays.
+/// Visual style for an inline rename field, matched to the text it replaces.
+struct RenameStyle {
+    font_size: f32,
+    color: bevy_egui::egui::Color32,
+    /// `true` centers the text on `world_pos` (block labels); `false`
+    /// left-anchors it there (lane names).
+    centered: bool,
+}
+
+/// Draws a seamless single-line text field in place of the label at `world_pos`
+/// (mapped to the screen via the camera): transparent, frameless, with text
+/// styled to match what it replaces, so renaming reads as editing the text
+/// where it sits — no box. Enter commits, Escape cancels, clicking away commits.
+/// Shared by the plan-name and lane-block rename overlays.
 fn inline_rename_field(
     ctx: &bevy_egui::egui::Context,
     id: &str,
@@ -593,7 +616,9 @@ fn inline_rename_field(
     world_pos: Vec2,
     camera: &Query<(&Camera, &GlobalTransform), With<Camera2d>>,
     keys: &ButtonInput<KeyCode>,
+    style: RenameStyle,
 ) -> RenameOutcome {
+    use bevy_egui::egui;
     if keys.just_pressed(KeyCode::Escape) {
         return RenameOutcome::Cancel;
     }
@@ -603,17 +628,34 @@ fn inline_rename_field(
         .single()
         .ok()
         .and_then(|(cam, gt)| cam.world_to_viewport(gt, world_pos.extend(0.0)).ok())
-        .map(|v| bevy_egui::egui::pos2(v.x, v.y - 10.0))
-        .unwrap_or(bevy_egui::egui::pos2(60.0, 80.0));
+        .map(|v| egui::pos2(v.x, v.y))
+        .unwrap_or(egui::pos2(60.0, 80.0));
+
+    const W: f32 = 180.0;
+    let left = if style.centered {
+        screen.x - W * 0.5
+    } else {
+        screen.x - 1.0
+    };
+    let top = screen.y - style.font_size * 0.5 - 2.0;
 
     let mut commit = entered;
-    bevy_egui::egui::Area::new(bevy_egui::egui::Id::new(id))
-        .fixed_pos(screen)
+    egui::Area::new(egui::Id::new(id))
+        .fixed_pos(egui::pos2(left, top))
         .show(ctx, |ui| {
-            let resp = ui.add(
-                bevy_egui::egui::TextEdit::singleline(buf)
-                    .min_size(bevy_egui::egui::Vec2::new(140.0, 20.0)),
-            );
+            ui.visuals_mut().extreme_bg_color = egui::Color32::TRANSPARENT;
+            ui.visuals_mut().widgets.active.bg_stroke = egui::Stroke::NONE;
+            ui.visuals_mut().widgets.hovered.bg_stroke = egui::Stroke::NONE;
+            let mut field = egui::TextEdit::singleline(buf)
+                .desired_width(W)
+                .frame(false)
+                .margin(egui::Margin::ZERO)
+                .font(egui::FontId::proportional(style.font_size))
+                .text_color(style.color);
+            if style.centered {
+                field = field.horizontal_align(egui::Align::Center);
+            }
+            let resp = ui.add(field);
             resp.request_focus();
             if resp.lost_focus() {
                 commit = true;
@@ -651,7 +693,12 @@ pub fn draw_plan_rename_overlay(
         return;
     };
 
-    match inline_rename_field(&ctx, "plan_rename", &mut rename.buf, pos, &camera, &keys) {
+    let style = RenameStyle {
+        font_size: 14.0,
+        color: bevy_egui::egui::Color32::from_rgb(217, 224, 245),
+        centered: false,
+    };
+    match inline_rename_field(&ctx, "plan_rename", &mut rename.buf, pos, &camera, &keys, style) {
         RenameOutcome::Editing => {}
         RenameOutcome::Commit => {
             let name = rename.buf.trim().to_string();
@@ -1148,7 +1195,12 @@ pub fn draw_lane_block_rename_overlay(
         return;
     };
 
-    match inline_rename_field(&ctx, "lane_block_rename", &mut rename.buf, pos, &camera, &keys) {
+    let style = RenameStyle {
+        font_size: 12.0,
+        color: bevy_egui::egui::Color32::from_rgb(31, 31, 38),
+        centered: true,
+    };
+    match inline_rename_field(&ctx, "lane_block_rename", &mut rename.buf, pos, &camera, &keys, style) {
         RenameOutcome::Editing => {}
         RenameOutcome::Commit => {
             let name = rename.buf.trim().to_string();
