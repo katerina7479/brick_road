@@ -129,8 +129,6 @@ pub const BRANCH_PALETTE: &[LinearRgba] = &[
 pub struct NameEditState {
     pub editing: Option<WorkBlockId>,
     pub text_buf: String,
-    /// (block_id, elapsed_secs) of the most recent left-click on a block sprite.
-    last_click: Option<(WorkBlockId, f32)>,
 }
 
 /// Marker: this sprite visualises one ScheduledBlock.

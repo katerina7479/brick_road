@@ -627,13 +627,11 @@ pub fn draw_plan_rename_overlay(
 // ── owned lane-block editing ────────────────────────────────────────────────
 
 /// A lane block under the cursor, with the geometry needed to drag, resize, and
-/// re-derive its row during a move. `owned` distinguishes the branch's own
-/// blocks (editable) from inherited ghosts (selectable + removable only).
+/// detect dependency edges. `owned` distinguishes the branch's own blocks
+/// (editable) from inherited ghosts (selectable + removable only).
 struct LaneHit {
     id: WorkBlockId,
     plan: PlanId,
-    fork_day: Day,
-    row0_y: f32,
     left_x: f32,
     right_x: f32,
     owned: bool,
@@ -653,8 +651,6 @@ fn lane_block_at(model: &Model, world: Vec2) -> Option<LaneHit> {
                 return Some(LaneHit {
                     id: b.id,
                     plan: band.plan_id,
-                    fork_day: band.fork_day,
-                    row0_y: band.row0_y,
                     left_x: b.cx - hw,
                     right_x: b.cx + hw,
                     owned: b.owned,
