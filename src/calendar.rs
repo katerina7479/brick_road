@@ -83,6 +83,22 @@ pub fn date_to_day(date: NaiveDate, config: &CalendarConfig) -> i32 {
     count * sign
 }
 
+/// The timeline day for the "today" marker on `date`.
+///
+/// On a working day this is the start of that day's own cell. On a non-working
+/// day (weekend/holiday) it advances one past the last completed working day, so
+/// the marker sits *after* the finished work week (e.g. a Saturday lands just
+/// after Friday, not on it).
+pub fn today_marker_day(date: NaiveDate, config: &CalendarConfig) -> Day {
+    let non_working: HashSet<NaiveDate> = config.non_working_dates.iter().copied().collect();
+    let base = date_to_day(date, config);
+    if is_working_day(date, config.working_days_per_week, &non_working) {
+        base
+    } else {
+        base + 1
+    }
+}
+
 /// Returns the first calendar day in (year, month) that is a working day under `config`.
 /// Returns `None` if the month contains no working days.
 pub fn first_working_day_of_month(
@@ -227,5 +243,20 @@ mod tests {
         let cfg = mon_fri_config();
         // 5 working days starting Monday = 7 calendar days (Mon through next Mon)
         assert_eq!(effort_to_calendar_days(5, cfg.start_date, &cfg), 7);
+    }
+
+    #[test]
+    fn today_marker_advances_past_finished_week_on_weekend() {
+        // start_date is a Monday; Fri is working day 4.
+        let cfg = mon_fri_config();
+        let fri = NaiveDate::from_ymd_opt(2025, 1, 17).unwrap(); // Mon Jan 13 + 4
+        let sat = NaiveDate::from_ymd_opt(2025, 1, 18).unwrap();
+        let sun = NaiveDate::from_ymd_opt(2025, 1, 19).unwrap();
+        // A working day marks its own cell.
+        assert_eq!(today_marker_day(fri, &cfg), date_to_day(fri, &cfg));
+        // A weekend sits one past the last completed working day (after Friday).
+        let after_fri = date_to_day(fri, &cfg) + 1;
+        assert_eq!(today_marker_day(sat, &cfg), after_fri);
+        assert_eq!(today_marker_day(sun, &cfg), after_fri);
     }
 }

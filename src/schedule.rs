@@ -184,7 +184,7 @@ pub fn update_today_marker(model: Res<Model>, mut today: ResMut<TodayMarker>) {
     let y = yoe as i64 + era * 400 + if m <= 2 { 1 } else { 0 };
     let today_date = NaiveDate::from_ymd_opt(y as i32, m as u32, d as u32)
         .unwrap_or_else(|| NaiveDate::from_ymd_opt(2025, 1, 1).unwrap());
-    today.day = crate::calendar::date_to_day(today_date, &model.calendar);
+    today.day = crate::calendar::today_marker_day(today_date, &model.calendar);
 }
 
 /// Propagate dependency constraints to all blocks reachable (transitively)
