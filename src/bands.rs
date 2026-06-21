@@ -201,10 +201,11 @@ pub fn layout_bands(model: &Model) -> Vec<BandLayout> {
                 continue;
             }
             max_row = max_row.max(wb.row);
-            let w = (wb.duration_days as f32 * PIXELS_PER_DAY).max(1.0);
+            let (left, span_w) = crate::blocks::block_span_x(wb, &model.calendar);
+            let w = span_w.max(1.0);
             blocks.push(BandBlock {
                 id: *id,
-                cx: wb.start_day as f32 * PIXELS_PER_DAY + w * 0.5,
+                cx: left + w * 0.5,
                 cy: row0_y - wb.row as f32 * ROW_HEIGHT,
                 w,
                 name: wb.name.clone(),
@@ -223,7 +224,7 @@ pub fn layout_bands(model: &Model) -> Vec<BandLayout> {
             plan_id: branch.id,
             fork_day: fork,
             name: branch.name.clone(),
-            name_x: fork as f32 * PIXELS_PER_DAY + 4.0,
+            name_x: crate::calendar::day_to_x(fork, &model.calendar) + 4.0,
             name_y: lane_top - 13.0,
             row0_y,
             lane_top,
@@ -250,7 +251,7 @@ pub fn bands_top_y(model: &Model) -> Option<f32> {
 pub fn plan_marker_in_lane_at(model: &Model, world: Vec2, hit_world: f32) -> Option<PlanId> {
     for band in layout_bands(model) {
         if world.y <= band.lane_top && world.y > band.lane_bottom {
-            let fx = band.fork_day as f32 * PIXELS_PER_DAY;
+            let fx = crate::calendar::day_to_x(band.fork_day, &model.calendar);
             if (world.x - fx).abs() <= hit_world {
                 return Some(band.plan_id);
             }
@@ -305,7 +306,7 @@ pub fn draw_band_overlays(
         // fork point), spanning just this lane's height (drawn a few times for
         // thickness), so it's clear which one Delete will remove.
         if selected_plan.0 == Some(band.plan_id) {
-            let fx = band.fork_day as f32 * PIXELS_PER_DAY;
+            let fx = crate::calendar::day_to_x(band.fork_day, &model.calendar);
             for i in 0..3 {
                 let x = fx - i as f32 * 1.5 * ortho.scale;
                 gizmos.line_2d(
@@ -510,8 +511,8 @@ pub fn handle_band_block_create(
     *last_click = 0.0;
 
     let plan_id = band.plan_id;
-    let day = (world.x / PIXELS_PER_DAY).round() as Day;
-    let day = day.max(band.fork_day);
+    let day = crate::calendar::x_to_day(world.x + PIXELS_PER_DAY * 0.5, &model.calendar)
+        .max(band.fork_day);
     let row = ((band.row0_y - world.y) / ROW_HEIGHT).round().max(0.0) as i32;
 
     model.add_block_to_plan(plan_id, "New Block", day, DEFAULT_DURATION, row);
@@ -933,18 +934,20 @@ pub fn handle_lane_block_edit(
                 // Dependencies don't constrain the drag — you can place a block
                 // into a violation; the edge just turns red. (Only the fork day
                 // is enforced.)
-                let day = ((left_x / PIXELS_PER_DAY).round() as Day).max(band.fork_day);
+                let day = crate::calendar::x_to_day(left_x + PIXELS_PER_DAY * 0.5, &model.calendar)
+                    .max(band.fork_day);
                 let row = ((band.row0_y - world.y) / ROW_HEIGHT).round().max(0.0) as i32;
                 model.set_block_placement(a.block, day, row);
             }
             LaneDragMode::Resize => {
-                let start_x = model
-                    .work_blocks
-                    .get(&a.block)
-                    .map(|wb| wb.start_day as f32 * PIXELS_PER_DAY)
-                    .unwrap_or(0.0);
-                let dur = ((world.x - start_x) / PIXELS_PER_DAY).round() as Day;
-                model.set_block_duration(a.block, dur);
+                let start = model.work_blocks.get(&a.block).map(|wb| wb.start_day);
+                if let Some(start) = start {
+                    let end_day = crate::calendar::x_to_day(
+                        world.x + PIXELS_PER_DAY * 0.5,
+                        &model.calendar,
+                    );
+                    model.set_block_duration(a.block, (end_day - start).max(1));
+                }
             }
         }
         return;

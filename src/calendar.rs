@@ -2,7 +2,103 @@ use std::collections::HashSet;
 
 use chrono::{Datelike, Duration, NaiveDate};
 
+use crate::constants::PIXELS_PER_DAY;
 use crate::model::{CalendarConfig, Day};
+
+// ── Holiday-aware horizontal layout ─────────────────────────────────────────
+//
+// The timeline axis is working days: weekends take no horizontal space. A
+// holiday, however, is shown as its own greyed day-wide column that work skips.
+// So the on-screen x of a working day is its working-day index *plus* the number
+// of holiday columns inserted before it. The model/scheduler stay in pure
+// working days; only this layer (and its inverse `x_to_day`) know about columns.
+
+/// A holiday inserts a column only if it lands on what would otherwise be a
+/// working weekday (a holiday already on a weekend is compressed away like any
+/// weekend). Its column sits just before the working day that follows it —
+/// `date_to_day(holiday) + 1`. Returns those boundaries, ascending.
+fn holiday_boundaries(config: &CalendarConfig) -> Vec<Day> {
+    let mut b: Vec<Day> = config
+        .non_working_dates
+        .iter()
+        .filter(|&&h| h.weekday().number_from_monday() <= config.working_days_per_week as u32)
+        .map(|&h| date_to_day(h, config) + 1)
+        .collect();
+    b.sort_unstable();
+    b
+}
+
+/// Number of holiday columns inserted before working day `day`.
+pub fn holiday_offset(day: Day, config: &CalendarConfig) -> i32 {
+    if config.non_working_dates.is_empty() {
+        return 0;
+    }
+    holiday_boundaries(config)
+        .iter()
+        .filter(|&&b| b <= day)
+        .count() as i32
+}
+
+/// World-space x of the left edge of working day `day`, accounting for the
+/// greyed holiday columns inserted before it.
+pub fn day_to_x(day: Day, config: &CalendarConfig) -> f32 {
+    (day + holiday_offset(day, config)) as f32 * PIXELS_PER_DAY
+}
+
+/// Inverse of [`day_to_x`]: the working day whose column contains world x `x`
+/// (floored). An x that lands inside a holiday column resolves to the working
+/// day just before that column.
+pub fn x_to_day(x: f32, config: &CalendarConfig) -> Day {
+    let v = (x / PIXELS_PER_DAY).floor() as Day; // visual column index
+    if config.non_working_dates.is_empty() {
+        return v;
+    }
+    // Largest working day whose column starts at or before `v`. `day +
+    // holiday_offset(day)` is monotonic, so walk down from `v` until it fits.
+    let mut day = v;
+    while day + holiday_offset(day, config) > v {
+        day -= 1;
+    }
+    day
+}
+
+/// `(left_x, date)` for each holiday column whose working-day boundary falls in
+/// `0..=span_days`. Consecutive holidays that share a boundary get adjacent
+/// columns (earliest date leftmost).
+pub fn holiday_columns(config: &CalendarConfig, span_days: Day) -> Vec<(f32, NaiveDate)> {
+    let mut holidays: Vec<NaiveDate> = config
+        .non_working_dates
+        .iter()
+        .copied()
+        .filter(|h| h.weekday().number_from_monday() <= config.working_days_per_week as u32)
+        .collect();
+    holidays.sort_unstable();
+
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < holidays.len() {
+        let boundary = date_to_day(holidays[i], config) + 1;
+        // Gather the run of holidays sharing this boundary (adjacent days).
+        let mut group = vec![holidays[i]];
+        let mut j = i + 1;
+        while j < holidays.len() && date_to_day(holidays[j], config) + 1 == boundary {
+            group.push(holidays[j]);
+            j += 1;
+        }
+        if boundary >= 0 && boundary <= span_days + 1 {
+            // The group occupies the columns immediately left of working day
+            // `boundary`; earliest holiday leftmost.
+            let right = day_to_x(boundary, config);
+            let n = group.len();
+            for (k, date) in group.into_iter().enumerate() {
+                let left_x = right - (n - k) as f32 * PIXELS_PER_DAY;
+                out.push((left_x, date));
+            }
+        }
+        i = j;
+    }
+    out
+}
 
 /// Returns true if `date` is a working day under `config`.
 ///
@@ -243,6 +339,53 @@ mod tests {
         let cfg = mon_fri_config();
         // 5 working days starting Monday = 7 calendar days (Mon through next Mon)
         assert_eq!(effort_to_calendar_days(5, cfg.start_date, &cfg), 7);
+    }
+
+    #[test]
+    fn day_to_x_is_identity_without_holidays() {
+        let cfg = mon_fri_config();
+        for d in [0, 1, 5, 20] {
+            assert_eq!(day_to_x(d, &cfg), d as f32 * PIXELS_PER_DAY);
+            assert_eq!(x_to_day(day_to_x(d, &cfg), &cfg), d);
+        }
+    }
+
+    #[test]
+    fn holiday_inserts_a_column_after_its_boundary() {
+        // Mon Jan 6 start; make Wed Jan 8 (working day 2) a holiday.
+        let holiday = NaiveDate::from_ymd_opt(2025, 1, 8).unwrap();
+        let cfg = CalendarConfig {
+            start_date: NaiveDate::from_ymd_opt(2025, 1, 6).unwrap(),
+            working_days_per_week: 5,
+            non_working_dates: vec![holiday],
+            ..Default::default()
+        };
+        // date_to_day(Jan 8) = 1 (Tue Jan 7 is working day 1), boundary = 2.
+        // Days before the boundary are unshifted; day 2 onward shift one column.
+        assert_eq!(day_to_x(1, &cfg), 1.0 * PIXELS_PER_DAY);
+        assert_eq!(day_to_x(2, &cfg), 3.0 * PIXELS_PER_DAY);
+        // The holiday column sits between them, at visual index 2.
+        let cols = holiday_columns(&cfg, 20);
+        assert_eq!(cols.len(), 1);
+        assert_eq!(cols[0].0, 2.0 * PIXELS_PER_DAY);
+        assert_eq!(cols[0].1, holiday);
+        // Inverse: an x in the holiday column resolves to the prior working day.
+        assert_eq!(x_to_day(2.5 * PIXELS_PER_DAY, &cfg), 1);
+        assert_eq!(x_to_day(3.0 * PIXELS_PER_DAY, &cfg), 2);
+    }
+
+    #[test]
+    fn weekend_holiday_inserts_no_column() {
+        // A holiday already on a Saturday is compressed like any weekend.
+        let sat = NaiveDate::from_ymd_opt(2025, 1, 11).unwrap();
+        let cfg = CalendarConfig {
+            start_date: NaiveDate::from_ymd_opt(2025, 1, 6).unwrap(),
+            working_days_per_week: 5,
+            non_working_dates: vec![sat],
+            ..Default::default()
+        };
+        assert!(holiday_columns(&cfg, 20).is_empty());
+        assert_eq!(day_to_x(5, &cfg), 5.0 * PIXELS_PER_DAY);
     }
 
     #[test]
