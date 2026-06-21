@@ -429,6 +429,26 @@ impl Model {
             .map(|p| p.id)
     }
 
+    /// The resource-row name shown for `row` within `scope` in `plan_id`, with
+    /// inheritance: a branch repeats main's names by default (the shared "rocks
+    /// in the stream") and only diverges where it sets its own. Returns `None`
+    /// if neither the plan nor main has named the row.
+    pub fn resolved_row_name(
+        &self,
+        plan_id: PlanId,
+        scope: Option<WorkBlockId>,
+        row: i32,
+    ) -> Option<&str> {
+        if let Some(name) = self.plans.get(&plan_id).and_then(|p| p.row_name(scope, row)) {
+            return Some(name);
+        }
+        let main = self.main_plan_id()?;
+        if main == plan_id {
+            return None;
+        }
+        self.plans.get(&main).and_then(|p| p.row_name(scope, row))
+    }
+
     /// Forks `main` into a new branch at `fork_day`. The branch inherits main's
     /// blocks from the fork day forward by copying their ids (the blocks stay
     /// shared with main); blocks before the fork are shared trunk and not

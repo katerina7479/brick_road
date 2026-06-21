@@ -52,6 +52,7 @@ fn main() {
         .insert_resource(blocks::CompareBlockSpriteMap::default())
         .insert_resource(ForkHoverState::default())
         .insert_resource(SelectedPlan::default())
+        .insert_resource(RowRename::default())
         .insert_resource(bands::BandEntities::default())
         .insert_resource(bands::PlanRenameState::default())
         .insert_resource(bands::LaneSelection::default())
@@ -250,6 +251,10 @@ fn main() {
         )
         .add_systems(EguiPrimaryContextPass, top_bar_ui)
         .add_systems(EguiPrimaryContextPass, calendar_ruler_ui.after(top_bar_ui))
+        .add_systems(
+            EguiPrimaryContextPass,
+            resource_gutter_ui.after(calendar_ruler_ui),
+        )
         .add_systems(EguiPrimaryContextPass, blocks::draw_name_edit_overlay)
         .add_systems(EguiPrimaryContextPass, blocks::draw_create_mode_overlay)
         .add_systems(EguiPrimaryContextPass, blocks::draw_block_tooltip)
@@ -1063,6 +1068,249 @@ fn calendar_ruler_ui(
         });
 }
 
+/// Width of the resource-name gutter, in logical pixels.
+const GUTTER_WIDTH: f32 = 116.0;
+
+/// Left gutter naming the resource rows of the current view. It carries only a
+/// faint background — just enough to be a click target (so clicks don't fall
+/// through and create blocks) without reading as a heavy panel. Each row a
+/// block sits on gets a label that tracks the row vertically as the camera pans
+/// (like the calendar ruler tracks days). Double-click a name to edit it in
+/// place; typing an existing row's name merges this row's work onto it.
+///
+/// Names resolve through the active plan at the current drill scope, with
+/// branches inheriting main's names by default (`Model::resolved_row_name`).
+#[allow(clippy::too_many_arguments)]
+fn resource_gutter_ui(
+    mut contexts: EguiContexts,
+    mut model: ResMut<model::Model>,
+    schedule: Res<schedule::Schedule>,
+    drill: Res<schedule::DrillScope>,
+    visible: Res<schedule::VisibleBlocks>,
+    mut rename: ResMut<RowRename>,
+    conn: NonSend<rusqlite::Connection>,
+    keys: Res<ButtonInput<KeyCode>>,
+    cam_q: Query<(&Transform, &Projection), With<Camera2d>>,
+    windows: Query<&Window>,
+) {
+    let Ok((cam_t, proj)) = cam_q.single() else {
+        return;
+    };
+    let Projection::Orthographic(ortho) = proj else {
+        return;
+    };
+    let Ok(window) = windows.single() else { return };
+    let plan_id = schedule.plan_id;
+    if !model.plans.contains_key(&plan_id) {
+        return;
+    }
+    let scope = drill.path.last().copied();
+
+    // Rows that carry a visible block, sorted — the gutter only labels these,
+    // so it stays empty until there's real work on a row.
+    let mut rows: Vec<i32> = visible
+        .ids
+        .iter()
+        .filter_map(|id| model.work_blocks.get(id))
+        .map(|wb| wb.row)
+        .collect::<std::collections::HashSet<_>>()
+        .into_iter()
+        .collect();
+    rows.sort_unstable();
+    if rows.is_empty() && rename.editing.is_none() {
+        return;
+    }
+
+    // Resolve each row's display name (with branch→main inheritance) up front so
+    // the egui closure borrows no model state while we may mutate on commit.
+    let labels: Vec<(i32, Option<String>)> = rows
+        .iter()
+        .map(|&r| {
+            (
+                r,
+                model
+                    .resolved_row_name(plan_id, scope, r)
+                    .map(|s| s.to_string()),
+            )
+        })
+        .collect();
+
+    let scale = ortho.scale;
+    let cam_y = cam_t.translation.y;
+    let win_h = window.height();
+    let rh = constants::ROW_HEIGHT;
+    let row_screen_y = |r: i32| win_h * 0.5 + (r as f32 * rh + cam_y) / scale;
+    let editing = rename.editing;
+
+    let Ok(ctx) = contexts.ctx_mut() else { return };
+
+    // Action gathered inside the closure, applied afterward (so model/rename can
+    // be mutated without conflicting with the immutable reads above).
+    enum Act {
+        Start(i32, String),
+        Commit,
+        Cancel,
+    }
+    let mut act: Option<Act> = if keys.just_pressed(KeyCode::Escape) {
+        Some(Act::Cancel)
+    } else if keys.just_pressed(KeyCode::Enter) || keys.just_pressed(KeyCode::NumpadEnter) {
+        Some(Act::Commit)
+    } else {
+        None
+    };
+
+    egui::SidePanel::left("resource_gutter")
+        .exact_width(GUTTER_WIDTH)
+        .resizable(false)
+        .frame(
+            egui::Frame::new()
+                .fill(egui::Color32::from_rgba_unmultiplied(24, 18, 12, 96))
+                .inner_margin(egui::Margin::same(0)),
+        )
+        .show(ctx, |ui| {
+            let rect = ui.max_rect();
+            let half = (rh / scale * 0.5).clamp(9.0, 22.0);
+
+            for (r, name) in &labels {
+                let cy = row_screen_y(*r);
+                if cy < rect.top() - half || cy > rect.bottom() + half {
+                    continue;
+                }
+                let editing_this = editing == Some((plan_id, scope, *r));
+                if editing_this {
+                    let field = egui::Rect::from_min_max(
+                        egui::pos2(rect.left() + 6.0, cy - 9.0),
+                        egui::pos2(rect.right() - 4.0, cy + 9.0),
+                    );
+                    ui.visuals_mut().extreme_bg_color = egui::Color32::TRANSPARENT;
+                    ui.visuals_mut().widgets.active.bg_stroke = egui::Stroke::NONE;
+                    ui.visuals_mut().widgets.hovered.bg_stroke = egui::Stroke::NONE;
+                    let resp = ui.put(
+                        field,
+                        egui::TextEdit::singleline(&mut rename.buf)
+                            .frame(false)
+                            .margin(egui::Margin::ZERO)
+                            .font(egui::FontId::proportional(13.0))
+                            .text_color(egui::Color32::from_rgb(224, 208, 180)),
+                    );
+                    resp.request_focus();
+                    if resp.lost_focus() && act.is_none() {
+                        act = Some(Act::Commit);
+                    }
+                } else {
+                    let hot = egui::Rect::from_min_max(
+                        egui::pos2(rect.left(), cy - half),
+                        egui::pos2(rect.right(), cy + half),
+                    );
+                    let resp = ui.interact(
+                        hot,
+                        ui.id().with(("gutter_row", *r)),
+                        egui::Sense::click(),
+                    );
+                    let (text, color) = match name {
+                        Some(n) => (n.clone(), egui::Color32::from_rgb(206, 190, 164)),
+                        None => (
+                            default_row_label(*r),
+                            egui::Color32::from_rgb(138, 128, 114),
+                        ),
+                    };
+                    let hovered = resp.hovered();
+                    ui.painter().text(
+                        egui::pos2(rect.left() + 10.0, cy),
+                        egui::Align2::LEFT_CENTER,
+                        text,
+                        egui::FontId::proportional(13.0),
+                        if hovered {
+                            egui::Color32::from_rgb(236, 224, 204)
+                        } else {
+                            color
+                        },
+                    );
+                    if resp.double_clicked() {
+                        act = Some(Act::Start(*r, name.clone().unwrap_or_default()));
+                    }
+                }
+            }
+        });
+
+    match act {
+        Some(Act::Start(r, current)) => {
+            rename.editing = Some((plan_id, scope, r));
+            rename.buf = current;
+        }
+        Some(Act::Cancel) => {
+            rename.editing = None;
+            rename.buf.clear();
+        }
+        Some(Act::Commit) => {
+            if let Some((pid, sc, r)) = rename.editing {
+                let raw = rename.buf.trim().to_string();
+                commit_row_name(&mut model, &conn, pid, sc, r, &raw);
+            }
+            rename.editing = None;
+            rename.buf.clear();
+        }
+        None => {}
+    }
+}
+
+/// Applies a resource-row rename. Empty clears the name. If `raw` matches
+/// another row's name in the same scope (case-insensitively), the two are the
+/// same resource: this row's blocks move onto that row and no separate name is
+/// kept. Otherwise the name is stored as this plan's override for the row.
+fn commit_row_name(
+    model: &mut model::Model,
+    conn: &rusqlite::Connection,
+    plan_id: model::PlanId,
+    scope: Option<model::WorkBlockId>,
+    row: i32,
+    raw: &str,
+) {
+    let name = raw.trim().to_string();
+
+    // A matching name on another row (resolved through inheritance) means the
+    // user is pointing this row at an existing resource.
+    let merge_target = if name.is_empty() {
+        None
+    } else {
+        (0..64).find(|&other| {
+            other != row
+                && model
+                    .resolved_row_name(plan_id, scope, other)
+                    .is_some_and(|n| n.eq_ignore_ascii_case(&name))
+        })
+    };
+
+    if let Some(target) = merge_target {
+        let move_ids: Vec<model::WorkBlockId> =
+            schedule::visible_blocks(model, plan_id, scope)
+                .iter()
+                .filter(|wb| wb.row == row)
+                .map(|wb| wb.id)
+                .collect();
+        for id in move_ids {
+            if let Some(wb) = model.work_blocks.get_mut(&id) {
+                wb.row = target;
+            }
+        }
+        if let Some(plan) = model.plans.get_mut(&plan_id) {
+            plan.set_row_name(scope, row, String::new());
+        }
+    } else if let Some(plan) = model.plans.get_mut(&plan_id) {
+        plan.set_row_name(scope, row, name);
+    }
+
+    if let Err(e) = db::save_model(conn, model) {
+        error!("save_model failed: {e}");
+    }
+}
+
+/// The default label for resource row `row` (0-based) when the user hasn't
+/// named it.
+fn default_row_label(row: i32) -> String {
+    format!("Resource {}", row + 1)
+}
+
 /// World-space x of the left edge of working day `d`.
 fn date_to_day_x(d: i32) -> f32 {
     d as f32 * PIXELS_PER_DAY
@@ -1230,6 +1478,14 @@ fn top_bar_ui(
 /// Selecting a branch by clicking its marker arms the Delete key to remove it.
 #[derive(Resource, Default)]
 pub struct SelectedPlan(pub Option<model::PlanId>);
+
+/// Inline resource-row rename state: which (plan, drill scope, row) is being
+/// edited in the gutter, plus the text buffer.
+#[derive(Resource, Default)]
+pub struct RowRename {
+    pub editing: Option<(model::PlanId, Option<model::WorkBlockId>, i32)>,
+    pub buf: String,
+}
 
 /// Returns the non-active forked plan whose branch marker is within `hit_world`
 /// units of `world_x`, nearest first. Used both to select a branch on click and
