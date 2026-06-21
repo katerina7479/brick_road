@@ -243,12 +243,29 @@ pub fn bands_top_y(model: &Model) -> Option<f32> {
     layout_bands(model).first().map(|b| b.lane_top)
 }
 
+/// The plan whose lane contains `world.y` and whose fork-marker is within
+/// `hit_world` of `world.x`. Disambiguates branches that fork on the same day by
+/// the click's height, so clicking the marker line inside a lane selects *that*
+/// lane's plan. `None` if the click isn't on a marker within a lane.
+pub fn plan_marker_in_lane_at(model: &Model, world: Vec2, hit_world: f32) -> Option<PlanId> {
+    for band in layout_bands(model) {
+        if world.y <= band.lane_top && world.y > band.lane_bottom {
+            let fx = band.fork_day as f32 * PIXELS_PER_DAY;
+            if (world.x - fx).abs() <= hit_world {
+                return Some(band.plan_id);
+            }
+        }
+    }
+    None
+}
+
 /// Per-frame gizmos: each lane's full-width top divider and every *ghost's*
 /// colored outline (owned blocks are drawn solid as entities instead).
 pub fn draw_band_overlays(
     mut gizmos: Gizmos,
     model: Res<Model>,
     selection: Res<LaneSelection>,
+    selected_plan: Res<crate::SelectedPlan>,
     cam_q: Query<(&Transform, &Projection), With<Camera2d>>,
     windows: Query<&Window>,
 ) {
@@ -277,12 +294,27 @@ pub fn draw_band_overlays(
         gizmos.line_2d(bl, tl, color);
     };
 
+    let sel_accent = Color::from(LinearRgba::new(2.0, 1.5, 0.4, 0.9)); // gold, bloomed
     for band in layout_bands(&model) {
         gizmos.line_2d(
             Vec2::new(cam_x - half_w, band.lane_top),
             Vec2::new(cam_x + half_w, band.lane_top),
             divider,
         );
+        // Selected plan: a short vertical gold accent at the plan's start (its
+        // fork point), spanning just this lane's height (drawn a few times for
+        // thickness), so it's clear which one Delete will remove.
+        if selected_plan.0 == Some(band.plan_id) {
+            let fx = band.fork_day as f32 * PIXELS_PER_DAY;
+            for i in 0..3 {
+                let x = fx - i as f32 * 1.5 * ortho.scale;
+                gizmos.line_2d(
+                    Vec2::new(x, band.lane_top),
+                    Vec2::new(x, band.lane_bottom),
+                    sel_accent,
+                );
+            }
+        }
         for b in &band.blocks {
             // Ghosts: colored outline (transparent interior). Owned: solid bar
             // drawn as an entity, so only outline it when selected.
@@ -476,7 +508,11 @@ pub fn handle_band_block_create(
     }
 }
 
-/// Double-clicking a lane's name opens an inline rename.
+/// Clicking a lane's name selects that plan (so the Delete key can remove it);
+/// double-clicking opens an inline rename. Selecting by name disambiguates
+/// branches that fork on the same day — their marker lines overlap, but each
+/// band sits at a distinct height.
+#[allow(clippy::too_many_arguments)]
 pub fn handle_band_rename_click(
     mut egui_ctx: bevy_egui::EguiContexts,
     windows: Query<&Window>,
@@ -486,6 +522,9 @@ pub fn handle_band_rename_click(
     time: Res<Time>,
     model: Res<Model>,
     mut rename: ResMut<PlanRenameState>,
+    mut selected_plan: ResMut<crate::SelectedPlan>,
+    mut selected_block: ResMut<crate::blocks::SelectedBlock>,
+    mut lane_selection: ResMut<LaneSelection>,
     mut last_click: Local<Option<(PlanId, f32)>>,
 ) {
     if !mouse.just_pressed(MouseButton::Left) {
@@ -525,6 +564,12 @@ pub fn handle_band_rename_click(
                 *last_click = None;
             } else {
                 *last_click = Some((band.plan_id, now));
+                // Select this plan (clearing block/lane selection) so Delete
+                // removes it — picks the band at this height, not whichever
+                // marker happens to be nearest in x.
+                selected_plan.0 = Some(band.plan_id);
+                selected_block.0 = None;
+                lane_selection.0 = None;
             }
             return;
         }

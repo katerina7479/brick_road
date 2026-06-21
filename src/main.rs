@@ -99,7 +99,11 @@ fn main() {
         .add_systems(Update, bands::sync_band_visuals)
         .add_systems(
             Update,
-            bands::handle_band_rename_click.run_if(at_plan_level),
+            // After branch-marker selection so a name click (which disambiguates
+            // overlapping same-day forks by height) wins over the nearest marker.
+            bands::handle_band_rename_click
+                .run_if(at_plan_level)
+                .after(handle_branch_selection),
         )
         .add_systems(
             Update,
@@ -911,7 +915,6 @@ fn draw_branch_markers(
 /// scrolls underneath while the calendar header stays put.
 fn calendar_ruler_ui(
     mut contexts: EguiContexts,
-    schedule: Res<schedule::Schedule>,
     model: Res<model::Model>,
     today: Res<schedule::TodayMarker>,
     cam_q: Query<(&Transform, &Projection), With<Camera2d>>,
@@ -936,8 +939,19 @@ fn calendar_ruler_ui(
     let x_left = cam_x - half_w;
     let x_right = cam_x + half_w;
 
+    let config = &model.calendar;
+    let wdpw = (config.working_days_per_week as i32).max(1);
+    // Working-day → date helpers and the on-screen size of one day.
+    let day_w = PIXELS_PER_DAY / scale; // screen px per day
+    let week_w = wdpw as f32 * day_w;
+    let show_days = day_w >= 13.0;
+    let show_weeks = week_w >= 44.0;
+
+    let day_min = (x_left / PIXELS_PER_DAY).floor() as i32;
+    let day_max = (x_right / PIXELS_PER_DAY).ceil() as i32;
+
     egui::TopBottomPanel::top("calendar_ruler")
-        .exact_height(38.0)
+        .exact_height(64.0)
         .frame(
             egui::Frame::new()
                 .fill(egui::Color32::from_rgb(22, 17, 12))
@@ -947,52 +961,92 @@ fn calendar_ruler_ui(
             let rect = ui.max_rect();
             let painter = ui.painter_at(rect);
 
-            let quarter_y = rect.top() + 9.0;
-            let tick_top = rect.top() + 19.0;
-            let tick_bottom = rect.bottom() - 2.0;
-            let day_label_y = rect.top() + 28.0;
+            let year_y = rect.top() + 9.0;
+            let quarter_y = rect.top() + 24.0;
+            let week_y = rect.top() + 39.0;
+            let day_y = rect.top() + 54.0;
 
-            // Quarter labels — clamped to the visible portion of their span so the
-            // label stays readable while the quarter scrolls (sticky-header feel).
-            for span in labels::quarter_label_spans(&schedule, &model) {
-                let vis_start = span.world_x_start.max(x_left);
-                let vis_end = span.world_x_end.min(x_right);
-                if vis_end <= vis_start {
-                    continue;
+            let year_color = egui::Color32::from_rgb(214, 178, 120);
+            let quarter_color = egui::Color32::from_rgb(196, 162, 110);
+            let week_color = egui::Color32::from_rgb(150, 150, 170);
+            let day_color = egui::Color32::from_rgb(200, 204, 222);
+            let past_color = egui::Color32::from_rgb(110, 110, 130);
+
+            // A centered label over a world-space span, clamped to the visible
+            // window so it stays readable as the period scrolls (sticky header).
+            let period = |x_start_w: f32, x_end_w: f32, text: &str, y: f32, size: f32, color| {
+                let sx = world_to_screen_x(x_start_w).max(rect.left() + 3.0);
+                let ex = world_to_screen_x(x_end_w).min(rect.right() - 3.0);
+                if ex - sx < size * 1.2 {
+                    return;
                 }
-                let cx = world_to_screen_x((vis_start + vis_end) * 0.5);
                 painter.text(
-                    egui::Pos2::new(cx, quarter_y),
+                    egui::Pos2::new((sx + ex) * 0.5, y),
                     egui::Align2::CENTER_CENTER,
-                    span.label,
-                    egui::FontId::proportional(11.0),
-                    egui::Color32::from_rgb(196, 162, 110),
-                );
-            }
-
-            // Day ticks + date labels.
-            let tick_stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(70, 74, 92));
-            for tick in labels::day_tick_labels(scale, x_left, x_right, &model, today.day) {
-                let sx = world_to_screen_x(tick.world_x);
-                painter.line_segment(
-                    [
-                        egui::Pos2::new(sx, tick_top),
-                        egui::Pos2::new(sx, tick_bottom),
-                    ],
-                    tick_stroke,
-                );
-                let color = if tick.is_past {
-                    egui::Color32::from_rgb(120, 120, 140)
-                } else {
-                    egui::Color32::from_rgb(212, 214, 228)
-                };
-                painter.text(
-                    egui::Pos2::new(sx, day_label_y),
-                    egui::Align2::CENTER_CENTER,
-                    tick.label,
-                    egui::FontId::proportional(12.0),
+                    text,
+                    egui::FontId::proportional(size),
                     color,
                 );
+            };
+            let day_x = |d: i32| date_to_day_x(d);
+
+            let d_lo = calendar::day_to_date(day_min, config);
+            let d_hi = calendar::day_to_date(day_max, config);
+
+            // Tier 1: Year — centered over the year's span.
+            for y in d_lo.year()..=d_hi.year() {
+                let ys = year_start_x(y, config);
+                let ye = year_start_x(y + 1, config);
+                period(ys, ye, &format!("{y}"), year_y, 13.0, year_color);
+            }
+
+            // Tier 2: Quarter — Q1..Q4 over each quarter's span.
+            for y in d_lo.year()..=d_hi.year() {
+                for q in 0..4 {
+                    let qs = quarter_start_x(y, q, config);
+                    let qe = quarter_start_x(y, q + 1, config);
+                    period(qs, qe, &format!("Q{} '{:02}", q + 1, y % 100), quarter_y, 11.0, quarter_color);
+                }
+            }
+
+            // Tier 3: Week — label each working-week with its start date.
+            if show_weeks {
+                let w_lo = day_min.div_euclid(wdpw);
+                let w_hi = day_max.div_euclid(wdpw);
+                for wi in w_lo..=w_hi {
+                    let ws = wi * wdpw;
+                    let date = calendar::day_to_date(ws, config);
+                    let label = format!("{} {}", date.format("%b"), date.day());
+                    period(day_x(ws), day_x(ws + wdpw), &label, week_y, 10.5, week_color);
+                    // Week boundary tick.
+                    let sx = world_to_screen_x(day_x(ws));
+                    painter.line_segment(
+                        [egui::Pos2::new(sx, week_y - 5.0), egui::Pos2::new(sx, rect.bottom())],
+                        egui::Stroke::new(1.0, egui::Color32::from_rgb(70, 74, 92)),
+                    );
+                }
+            }
+
+            // Tier 4: Day numbers (1, 2, 3 …) centered in each day cell.
+            if show_days {
+                let tick = egui::Stroke::new(1.0, egui::Color32::from_rgb(52, 56, 72));
+                for d in day_min..=day_max {
+                    let bx = world_to_screen_x(day_x(d));
+                    painter.line_segment(
+                        [egui::Pos2::new(bx, day_y - 6.0), egui::Pos2::new(bx, rect.bottom())],
+                        tick,
+                    );
+                    let cx = world_to_screen_x((d as f32 + 0.5) * PIXELS_PER_DAY);
+                    let date = calendar::day_to_date(d, config);
+                    let color = if d < today.day { past_color } else { day_color };
+                    painter.text(
+                        egui::Pos2::new(cx, day_y),
+                        egui::Align2::CENTER_CENTER,
+                        format!("{}", date.day()),
+                        egui::FontId::proportional(10.5),
+                        color,
+                    );
+                }
             }
 
             // Today marker tick — warm accent, matching the canvas today line.
@@ -1007,6 +1061,28 @@ fn calendar_ruler_ui(
                 );
             }
         });
+}
+
+/// World-space x of the left edge of working day `d`.
+fn date_to_day_x(d: i32) -> f32 {
+    d as f32 * PIXELS_PER_DAY
+}
+
+/// World-space x of the start of calendar year `y` (its Jan 1, mapped to a
+/// working day). Used for the year tier of the calendar ruler.
+fn year_start_x(y: i32, config: &model::CalendarConfig) -> f32 {
+    let date = chrono::NaiveDate::from_ymd_opt(y, 1, 1)
+        .unwrap_or_else(|| config.start_date);
+    calendar::date_to_day(date, config) as f32 * PIXELS_PER_DAY
+}
+
+/// World-space x of the start of quarter `q` (0..=4, where 4 = next year's Q1)
+/// in calendar year `y`.
+fn quarter_start_x(y: i32, q: i32, config: &model::CalendarConfig) -> f32 {
+    let (yy, month) = if q >= 4 { (y + 1, 1) } else { (y, (q * 3 + 1) as u32) };
+    let date = chrono::NaiveDate::from_ymd_opt(yy, month, 1)
+        .unwrap_or_else(|| config.start_date);
+    calendar::date_to_day(date, config) as f32 * PIXELS_PER_DAY
 }
 
 /// Renders Re-center and Fit-to-view buttons in a small floating area
@@ -1034,7 +1110,9 @@ fn top_bar_ui(
     egui::TopBottomPanel::top("top_bar")
         .frame(
             egui::Frame::new()
-                .fill(egui::Color32::from_rgba_unmultiplied(18, 12, 4, 230))
+                // Opaque — a translucent fill let the timeline show through the
+                // empty area to the right of the breadcrumb.
+                .fill(egui::Color32::from_rgb(18, 12, 4))
                 .inner_margin(egui::Margin::symmetric(8, 4)),
         )
         .show(ctx, |ui| {
@@ -1226,7 +1304,13 @@ fn handle_branch_selection(
         .unwrap_or(1.0);
 
     // ~6 screen pixels of grab tolerance on either side of the marker line.
-    if let Some(id) = branch_plan_at_x(&model, schedule.plan_id, world.x, 6.0 * scale) {
+    // Prefer the lane the click is in (disambiguates same-day forks by height);
+    // fall back to the nearest marker by x for clicks on the line above the
+    // lanes (in the main timeline area).
+    let hit = 6.0 * scale;
+    let plan = bands::plan_marker_in_lane_at(&model, world, hit)
+        .or_else(|| branch_plan_at_x(&model, schedule.plan_id, world.x, hit));
+    if let Some(id) = plan {
         selected_plan.0 = Some(id);
         selected_block.0 = None;
         selected_dep.0 = None;
