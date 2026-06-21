@@ -978,6 +978,9 @@ pub fn handle_block_drag(
             let new_start = ((world_pos.x - offset_px) / PIXELS_PER_DAY)
                 .max(0.0)
                 .round() as Day;
+            // Dependencies don't constrain a drag — you can place a block into a
+            // violation; the offending edge just turns red. (Only >= 0 / the
+            // fork day are enforced.)
             let new_start = new_start.max(branch_min);
             // Vertical drag snaps the block to whichever lane the cursor is over
             // (negative rows sit above the baseline).
@@ -1217,16 +1220,20 @@ pub fn draw_dependency_edges(
                 continue;
             };
 
+            // Arrow points FROM the dependent (successor) TO what it depends on
+            // (predecessor), so the arrowhead sits on the predecessor's anchor.
             let (src, dst) = match dep.dependency_type {
-                DependencyType::FinishToStart => (Vec2::new(pg.xr, pg.y), Vec2::new(sg.xl, sg.y)),
-                DependencyType::StartToStart => (Vec2::new(pg.xl, pg.y), Vec2::new(sg.xl, sg.y)),
-                DependencyType::FinishToFinish => (Vec2::new(pg.xr, pg.y), Vec2::new(sg.xr, sg.y)),
-                DependencyType::StartToFinish => (Vec2::new(pg.xl, pg.y), Vec2::new(sg.xr, sg.y)),
+                DependencyType::FinishToStart => (Vec2::new(sg.xl, sg.y), Vec2::new(pg.xr, pg.y)),
+                DependencyType::StartToStart => (Vec2::new(sg.xl, sg.y), Vec2::new(pg.xl, pg.y)),
+                DependencyType::FinishToFinish => (Vec2::new(sg.xr, sg.y), Vec2::new(pg.xr, pg.y)),
+                DependencyType::StartToFinish => (Vec2::new(sg.xr, sg.y), Vec2::new(pg.xl, pg.y)),
             };
 
             let is_selected = selected_dep.0 == Some(*dep_id);
             let color = if is_selected {
                 Color::srgba(1.7, 1.2, 0.25, edge_alpha.max(0.9)) // bright selection highlight
+            } else if !schedule::dependency_satisfied(&model, dep) {
+                Color::srgba(2.2, 0.25, 0.25, edge_alpha.max(0.85)) // violated → red
             } else {
                 Color::srgba(0.35, 0.85, 0.85, 0.65 * edge_alpha)
             };
@@ -1561,21 +1568,24 @@ pub fn handle_dep_drag(
     }
 
     // Left-click release: finish a handle-initiated dep drag. The dependency type
-    // is implied by the source edge (which handle) and the target edge (drop half);
-    // the drag source is always the predecessor.
+    // is implied by which edge you grabbed and which half you dropped on. You
+    // drag FROM the dependent (successor) TO the block it depends on
+    // (predecessor): from-edge = the successor's anchor, drop-edge = the
+    // predecessor's anchor. (`dep_type_from_edges` is (predecessor_finish,
+    // successor_finish), so pass the drop/finish flags in that order.)
     if mouse.just_released(MouseButton::Left) {
-        if let Some(from_id) = drag.from.take() {
-            if let Some((to_id, to_finish)) = block_at(world_pos) {
-                if to_id != from_id {
-                    let dep_type = dep_type_from_edges(drag.from_right, to_finish);
+        if let Some(succ_id) = drag.from.take() {
+            if let Some((pred_id, pred_finish)) = block_at(world_pos) {
+                if pred_id != succ_id {
+                    let dep_type = dep_type_from_edges(pred_finish, drag.from_right);
                     // Create only (idempotent); deletion is click-the-edge + Delete.
                     let exists = model.dependencies.values().any(|d| {
-                        d.predecessor == from_id
-                            && d.successor == to_id
+                        d.predecessor == pred_id
+                            && d.successor == succ_id
                             && d.dependency_type == dep_type
                     });
                     if !exists {
-                        model.create_dependency(from_id, to_id, dep_type);
+                        model.create_dependency(pred_id, succ_id, dep_type);
                         if let Err(e) = crate::db::save_model(&conn, &model) {
                             error!("save_model failed: {e}");
                         }
@@ -1592,17 +1602,17 @@ pub fn handle_dep_drag(
     }
 
     if mouse.just_released(MouseButton::Right) {
-        if let Some(from_id) = drag.from.take() {
-            if let Some((to_id, to_finish)) = block_at(world_pos) {
-                if to_id != from_id {
-                    let dep_type = dep_type_from_edges(drag.from_right, to_finish);
+        if let Some(succ_id) = drag.from.take() {
+            if let Some((pred_id, pred_finish)) = block_at(world_pos) {
+                if pred_id != succ_id {
+                    let dep_type = dep_type_from_edges(pred_finish, drag.from_right);
                     let exists = model.dependencies.values().any(|d| {
-                        d.predecessor == from_id
-                            && d.successor == to_id
+                        d.predecessor == pred_id
+                            && d.successor == succ_id
                             && d.dependency_type == dep_type
                     });
                     if !exists {
-                        model.create_dependency(from_id, to_id, dep_type);
+                        model.create_dependency(pred_id, succ_id, dep_type);
                         if let Err(e) = crate::db::save_model(&conn, &model) {
                             error!("save_model failed: {e}");
                         }

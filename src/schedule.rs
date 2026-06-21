@@ -181,35 +181,86 @@ pub fn update_today_marker(model: Res<Model>, mut today: ResMut<TodayMarker>) {
 ///   SS:  S.start = P.start + lag
 ///   FF:  S.start = P.start + P.dur + lag − S.dur
 ///   SF:  S.start = P.start + lag − S.dur
+/// The earliest start day `block` may legally have given its predecessors'
+/// current positions — the maximum lower bound across its incoming dependencies
+/// (B depends on A: B.start ≥ bound(A)). `0` if it has no predecessors.
+///
+/// `plan` filters which deps apply: `None` considers every dependency (used by
+/// the cascade — a block's position is shared, so moving it pushes dependents
+/// across plans); `Some(p)` considers only plan `p`'s own deps (used by the drag
+/// clamp, so a branch's hypothetical deps never constrain a main edit).
+fn lower_bound(model: &Model, block: WorkBlockId, plan: Option<PlanId>) -> Day {
+    let succ_dur = model
+        .work_blocks
+        .get(&block)
+        .map(|wb| wb.duration_days)
+        .unwrap_or(0);
+    model
+        .dependencies
+        .values()
+        .filter(|d| d.successor == block && plan.is_none_or(|p| d.plan_id == p))
+        .filter_map(|d| {
+            model.work_blocks.get(&d.predecessor).map(|p| match d.dependency_type {
+                DependencyType::FinishToStart => p.start_day + p.duration_days + d.lag,
+                DependencyType::StartToStart => p.start_day + d.lag,
+                DependencyType::FinishToFinish => p.start_day + p.duration_days + d.lag - succ_dur,
+                DependencyType::StartToFinish => p.start_day + d.lag - succ_dur,
+            })
+        })
+        .fold(0, |a, b| a.max(b))
+        .max(0)
+}
+
+/// Lower bound across ALL of `block`'s predecessors (any plan). Used by cascade.
+pub fn predecessor_lower_bound(model: &Model, block: WorkBlockId) -> Day {
+    lower_bound(model, block, None)
+}
+
+/// Lower bound from only `plan`'s own dependencies. Used by the drag clamp so a
+/// branch's deps don't constrain a drag in another plan (e.g. main).
+pub fn predecessor_lower_bound_in(model: &Model, plan: PlanId, block: WorkBlockId) -> Day {
+    lower_bound(model, block, Some(plan))
+}
+
+/// Whether `dep` is currently satisfied: the successor starts no earlier than
+/// the bound this one dependency imposes. A branch dep can end up violated and
+/// unfixable when its successor is a main block (a "rock" the cascade won't
+/// move) — the UI highlights those. Missing endpoints count as satisfied.
+pub fn dependency_satisfied(model: &Model, dep: &crate::model::Dependency) -> bool {
+    let (Some(pred), Some(succ)) = (
+        model.work_blocks.get(&dep.predecessor),
+        model.work_blocks.get(&dep.successor),
+    ) else {
+        return true;
+    };
+    let bound = match dep.dependency_type {
+        DependencyType::FinishToStart => pred.start_day + pred.duration_days + dep.lag,
+        DependencyType::StartToStart => pred.start_day + dep.lag,
+        DependencyType::FinishToFinish => {
+            pred.start_day + pred.duration_days + dep.lag - succ.duration_days
+        }
+        DependencyType::StartToFinish => pred.start_day + dep.lag - succ.duration_days,
+    };
+    succ.start_day >= bound
+}
+
 pub fn cascade_dependencies(model: &mut Model, root: WorkBlockId) {
     use std::collections::{HashMap, HashSet, VecDeque};
 
-    let mut outgoing: HashMap<WorkBlockId, Vec<(WorkBlockId, DependencyType, Day)>> =
-        HashMap::new();
-    let mut incoming: HashMap<WorkBlockId, Vec<(WorkBlockId, DependencyType, Day)>> =
-        HashMap::new();
+    let mut outgoing: HashMap<WorkBlockId, Vec<WorkBlockId>> = HashMap::new();
     // Cascade follows ALL dependencies, across plans. A block's position is
     // shared by id, so moving it should push everything that depends on it —
     // including a branch's dependent when you move a block main shares as a
     // ghost. (Plan-scoping lives in build_graph, for a plan's own schedule.)
     for dep in model.dependencies.values() {
-        outgoing.entry(dep.predecessor).or_default().push((
-            dep.successor,
-            dep.dependency_type,
-            dep.lag,
-        ));
-        incoming.entry(dep.successor).or_default().push((
-            dep.predecessor,
-            dep.dependency_type,
-            dep.lag,
-        ));
+        outgoing.entry(dep.predecessor).or_default().push(dep.successor);
     }
 
     // BFS to collect all transitively reachable successors of root.
     let mut reachable: HashSet<WorkBlockId> = HashSet::new();
     let mut bfs: VecDeque<WorkBlockId> = VecDeque::new();
     if let Some(succs) = outgoing.get(&root) {
-        for &(s, _, _) in succs {
+        for &s in succs {
             if reachable.insert(s) {
                 bfs.push_back(s);
             }
@@ -217,7 +268,7 @@ pub fn cascade_dependencies(model: &mut Model, root: WorkBlockId) {
     }
     while let Some(id) = bfs.pop_front() {
         if let Some(succs) = outgoing.get(&id) {
-            for &(s, _, _) in succs {
+            for &s in succs {
                 if reachable.insert(s) {
                     bfs.push_back(s);
                 }
@@ -233,7 +284,7 @@ pub fn cascade_dependencies(model: &mut Model, root: WorkBlockId) {
     let mut in_deg: HashMap<WorkBlockId, usize> = reachable.iter().map(|&id| (id, 0)).collect();
     for &id in &reachable {
         if let Some(succs) = outgoing.get(&id) {
-            for &(s, _, _) in succs {
+            for &s in succs {
                 if reachable.contains(&s) {
                     *in_deg.get_mut(&s).unwrap() += 1;
                 }
@@ -249,7 +300,7 @@ pub fn cascade_dependencies(model: &mut Model, root: WorkBlockId) {
     while let Some(id) = queue.pop_front() {
         order.push(id);
         if let Some(succs) = outgoing.get(&id) {
-            for &(s, _, _) in succs {
+            for &s in succs {
                 if let Some(d) = in_deg.get_mut(&s) {
                     *d -= 1;
                     if *d == 0 {
@@ -260,38 +311,27 @@ pub fn cascade_dependencies(model: &mut Model, root: WorkBlockId) {
         }
     }
 
-    // Apply constraints in topological order.  Clone pred list to avoid
-    // holding an immutable borrow while we mutably update work_blocks below.
+    // Main blocks are "rocks in the stream": a branch's dependencies never move
+    // them — only main's own deps may. So a main block is pushed by its
+    // main-scoped bound; every other (branch-owned) block by its full bound.
+    let main_id = model.main_plan_id();
+    let main_blocks: HashSet<WorkBlockId> = main_id
+        .and_then(|id| model.plans.get(&id))
+        .map(|p| p.root_blocks.iter().copied().collect())
+        .unwrap_or_default();
+
+    // Apply constraints in topological order. Push-only ("stay put"): a
+    // successor moves later only if it now violates its lower bound; any extra
+    // gap the user left is preserved (we never pull it earlier to be snug).
     for id in order {
-        let succ_dur = model
-            .work_blocks
-            .get(&id)
-            .map(|wb| wb.duration_days)
-            .unwrap_or(0);
-
-        let preds: Vec<(WorkBlockId, DependencyType, Day)> =
-            incoming.get(&id).cloned().unwrap_or_default();
-
-        let raw_start = preds
-            .iter()
-            .filter_map(|&(pred_id, dep_type, lag)| {
-                model.work_blocks.get(&pred_id).map(|pred| match dep_type {
-                    DependencyType::FinishToStart => pred.start_day + pred.duration_days + lag,
-                    DependencyType::StartToStart => pred.start_day + lag,
-                    DependencyType::FinishToFinish => {
-                        pred.start_day + pred.duration_days + lag - succ_dur
-                    }
-                    DependencyType::StartToFinish => pred.start_day + lag - succ_dur,
-                })
-            })
-            .fold(0, |a, b| a.max(b))
-            .max(0);
-        // Snap to the start of the next whole working day so constraint-derived
-        // starts never land mid-day on a non-working boundary.
-        let new_start = snap_to_day_start(raw_start);
-
+        let bound = match main_id {
+            Some(mid) if main_blocks.contains(&id) => predecessor_lower_bound_in(model, mid, id),
+            _ => predecessor_lower_bound(model, id),
+        };
         if let Some(wb) = model.work_blocks.get_mut(&id) {
-            wb.start_day = new_start;
+            if bound > wb.start_day {
+                wb.start_day = bound;
+            }
         }
     }
 }
@@ -1593,6 +1633,130 @@ mod tests {
         wb.start_day = start;
         wb.duration_days = dur;
         id
+    }
+
+    #[test]
+    fn lower_bound_per_dependency_type() {
+        let mut m = Model::default();
+        let a = placed(&mut m, "A", 2, 5); // start 2, end 7
+        let b = placed(&mut m, "B", 0, 3);
+
+        // FS: B.start >= A.end = 7.
+        let dep = m.create_dependency(a, b, DependencyType::FinishToStart);
+        assert_eq!(predecessor_lower_bound(&m, b), 7);
+        // lag shifts the bound.
+        m.dependencies.get_mut(&dep).unwrap().lag = 2;
+        assert_eq!(predecessor_lower_bound(&m, b), 9);
+        m.dependencies.get_mut(&dep).unwrap().lag = 0;
+
+        // SS: B.start >= A.start = 2.
+        m.dependencies.get_mut(&dep).unwrap().dependency_type = DependencyType::StartToStart;
+        assert_eq!(predecessor_lower_bound(&m, b), 2);
+
+        // FF: B.start >= A.end - B.dur = 7 - 3 = 4.
+        m.dependencies.get_mut(&dep).unwrap().dependency_type = DependencyType::FinishToFinish;
+        assert_eq!(predecessor_lower_bound(&m, b), 4);
+    }
+
+    #[test]
+    fn scoped_lower_bound_ignores_other_plans_deps() {
+        // A branch's dependency must not constrain a main drag: the plan-scoped
+        // bound for main is 0, even though the global bound reflects the dep.
+        let mut m = Model::default();
+        let main = m.create_plan("main", None);
+        let branch = m.create_plan("branch", Some(0));
+        let a = placed(&mut m, "A", 0, 5); // ends at 5
+        let b = placed(&mut m, "B", 0, 3);
+        m.create_dependency_in(branch, a, b, DependencyType::FinishToStart);
+
+        assert_eq!(predecessor_lower_bound(&m, b), 5, "global bound sees the branch dep");
+        assert_eq!(
+            predecessor_lower_bound_in(&m, main, b),
+            0,
+            "a main drag is not constrained by the branch dep"
+        );
+        assert_eq!(
+            predecessor_lower_bound_in(&m, branch, b),
+            5,
+            "the branch's own drag is constrained"
+        );
+    }
+
+    #[test]
+    fn dependency_satisfied_detects_violations() {
+        let mut m = Model::default();
+        let a = placed(&mut m, "A", 0, 5); // ends at 5
+        let b = placed(&mut m, "B", 5, 3); // starts exactly at A's end
+        let dep = m.create_dependency(a, b, DependencyType::FinishToStart);
+
+        // FS satisfied: B.start (5) >= A.end (5).
+        assert!(dependency_satisfied(&m, &m.dependencies[&dep].clone()));
+
+        // Drag B earlier — now violated.
+        m.work_blocks.get_mut(&b).unwrap().start_day = 3;
+        assert!(!dependency_satisfied(&m, &m.dependencies[&dep].clone()));
+
+        // Extra slack is still satisfied (deps don't pull snug).
+        m.work_blocks.get_mut(&b).unwrap().start_day = 12;
+        assert!(dependency_satisfied(&m, &m.dependencies[&dep].clone()));
+
+        // SS: B.start >= A.start.
+        m.dependencies.get_mut(&dep).unwrap().dependency_type = DependencyType::StartToStart;
+        m.work_blocks.get_mut(&b).unwrap().start_day = 0; // A.start is 0
+        assert!(dependency_satisfied(&m, &m.dependencies[&dep].clone()));
+        m.work_blocks.get_mut(&a).unwrap().start_day = 2; // now A.start 2 > B.start 0
+        assert!(!dependency_satisfied(&m, &m.dependencies[&dep].clone()));
+    }
+
+    #[test]
+    fn lower_bound_zero_without_predecessors() {
+        let mut m = Model::default();
+        let a = placed(&mut m, "A", 5, 3);
+        assert_eq!(predecessor_lower_bound(&m, a), 0);
+    }
+
+    #[test]
+    fn cascade_is_push_only_keeps_extra_gap() {
+        // A dependent with slack stays put when the predecessor moves earlier;
+        // it is only pushed when the predecessor would violate it.
+        let mut m = Model::default();
+        let a = placed(&mut m, "A", 0, 5); // ends at 5
+        let b = placed(&mut m, "B", 10, 3); // 5 days of slack past the FS bound
+        m.create_dependency(a, b, DependencyType::FinishToStart);
+
+        // Move A earlier — slack only grows; B must not be pulled back.
+        m.work_blocks.get_mut(&a).unwrap().start_day = -2;
+        cascade_dependencies(&mut m, a);
+        assert_eq!(m.work_blocks[&b].start_day, 10, "extra gap preserved");
+
+        // Extend A so its end (12) exceeds B's start — now B is pushed.
+        m.work_blocks.get_mut(&a).unwrap().start_day = 0;
+        m.work_blocks.get_mut(&a).unwrap().duration_days = 12;
+        cascade_dependencies(&mut m, a);
+        assert_eq!(m.work_blocks[&b].start_day, 12, "pushed to the bound when violated");
+    }
+
+    #[test]
+    fn branch_dep_never_moves_main_block_and_flags_violation() {
+        // Main blocks are rocks: a branch dep can't move one. When the branch dep
+        // would require moving the main successor, it's left violated (for the
+        // UI to highlight) rather than dragging the rock.
+        let mut m = Model::default();
+        let main = m.create_plan("main", None);
+        let branch = m.create_plan("branch", Some(0));
+        let b = placed(&mut m, "B", 5, 3); // a main block
+        m.plans.get_mut(&main).unwrap().root_blocks.push(b);
+        let a = placed(&mut m, "A", 0, 3); // a branch-owned block
+        m.plans.get_mut(&branch).unwrap().root_blocks.push(a);
+        let dep = m.create_dependency_in(branch, a, b, DependencyType::FinishToStart);
+
+        // Extend A so it ends at 10 — the FS dep would need B at ≥ 10.
+        m.work_blocks.get_mut(&a).unwrap().duration_days = 10;
+        cascade_dependencies(&mut m, a);
+
+        assert_eq!(m.work_blocks[&b].start_day, 5, "main block (rock) is not moved by a branch dep");
+        let dep = m.dependencies[&dep].clone();
+        assert!(!dependency_satisfied(&m, &dep), "the unsatisfiable branch dep is flagged violated");
     }
 
     #[test]

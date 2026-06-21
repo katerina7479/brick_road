@@ -22,7 +22,7 @@ use bevy::window::SystemCursorIcon;
 use crate::{
     constants::{PIXELS_PER_DAY, ROW_HEIGHT},
     db,
-    model::{Day, DependencyType, Model, Plan, PlanId, WorkBlockId},
+    model::{Day, DependencyId, DependencyType, Model, Plan, PlanId, WorkBlockId},
 };
 
 /// Pixels from a lane block's right edge that count as the resize handle.
@@ -670,6 +670,59 @@ pub fn lane_cursor_at(model: &Model, world: Vec2) -> Option<SystemCursorIcon> {
     }
 }
 
+/// World-space anchors (successor → predecessor) of a lane dep edge, matching
+/// the arrow drawn in `draw_lane_dependencies`. `None` if either block isn't in
+/// the same lane.
+fn lane_dep_segment(
+    geom: &std::collections::HashMap<WorkBlockId, (f32, f32, f32)>,
+    dep: &crate::model::Dependency,
+) -> Option<(Vec2, Vec2)> {
+    let (&(pxl, pxr, py), &(sxl, sxr, sy)) =
+        (geom.get(&dep.predecessor)?, geom.get(&dep.successor)?);
+    Some(match dep.dependency_type {
+        DependencyType::FinishToStart => (Vec2::new(sxl, sy), Vec2::new(pxr, py)),
+        DependencyType::StartToStart => (Vec2::new(sxl, sy), Vec2::new(pxl, py)),
+        DependencyType::FinishToFinish => (Vec2::new(sxr, sy), Vec2::new(pxr, py)),
+        DependencyType::StartToFinish => (Vec2::new(sxr, sy), Vec2::new(pxl, py)),
+    })
+}
+
+/// Distance from point `p` to segment `a`–`b`.
+fn point_segment_dist(p: Vec2, a: Vec2, b: Vec2) -> f32 {
+    let ab = b - a;
+    let t = if ab.length_squared() > 0.0 {
+        ((p - a).dot(ab) / ab.length_squared()).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    (p - (a + ab * t)).length()
+}
+
+/// The lane dependency edge nearest `world` within a small threshold, if any.
+fn lane_dep_at(model: &Model, world: Vec2) -> Option<DependencyId> {
+    const HIT: f32 = 8.0;
+    let mut best: Option<(f32, DependencyId)> = None;
+    for band in layout_bands(model) {
+        let geom: std::collections::HashMap<WorkBlockId, (f32, f32, f32)> = band
+            .blocks
+            .iter()
+            .map(|b| (b.id, (b.cx - b.w * 0.5, b.cx + b.w * 0.5, b.cy)))
+            .collect();
+        for dep in model.dependencies.values() {
+            if dep.plan_id != band.plan_id {
+                continue;
+            }
+            if let Some((src, dst)) = lane_dep_segment(&geom, dep) {
+                let d = point_segment_dist(world, src, dst);
+                if d < HIT && best.is_none_or(|(bd, _)| d < bd) {
+                    best = Some((d, dep.id));
+                }
+            }
+        }
+    }
+    best.map(|(_, id)| id)
+}
+
 /// Cursor → world helper shared by the lane interaction systems.
 fn cursor_world(
     windows: &Query<&Window>,
@@ -703,6 +756,7 @@ pub fn handle_lane_block_edit(
     mut selection: ResMut<LaneSelection>,
     mut rename: ResMut<LaneBlockRename>,
     mut main_selected: ResMut<crate::blocks::SelectedBlock>,
+    mut selected_dep: ResMut<crate::blocks::SelectedDependency>,
     dep_drag: Res<LaneDepDrag>,
 ) {
     if rename.editing.is_some() || dep_drag.from.is_some() {
@@ -724,9 +778,10 @@ pub fn handle_lane_block_edit(
         }
         if let Some(hit) = lane_block_at(&model, world) {
             // Any lane block selects (so Delete can remove a ghost from the
-            // branch); lane and main selection are exclusive.
+            // branch); lane, main, and dep selection are mutually exclusive.
             selection.0 = Some((hit.id, hit.plan));
             main_selected.0 = None;
+            selected_dep.0 = None;
 
             // Ghosts are read-only — they track main, so no drag/resize/rename.
             if !hit.owned {
@@ -761,6 +816,12 @@ pub fn handle_lane_block_edit(
                 mode,
                 grab_offset: world.x - hit.left_x,
             });
+        } else if let Some(dep_id) = lane_dep_at(&model, world) {
+            // No block under the cursor: clicking a lane dep edge selects it so
+            // Delete (handle_block_delete) can remove it.
+            selected_dep.0 = Some(dep_id);
+            selection.0 = None;
+            main_selected.0 = None;
         }
         return;
     }
@@ -774,6 +835,9 @@ pub fn handle_lane_block_edit(
         match a.mode {
             LaneDragMode::Move => {
                 let left_x = world.x - a.grab_offset;
+                // Dependencies don't constrain the drag — you can place a block
+                // into a violation; the edge just turns red. (Only the fork day
+                // is enforced.)
                 let day = ((left_x / PIXELS_PER_DAY).round() as Day).max(band.fork_day);
                 let row = ((band.row0_y - world.y) / ROW_HEIGHT).round().max(0.0) as i32;
                 model.set_block_placement(a.block, day, row);
@@ -847,27 +911,30 @@ pub fn handle_lane_dep_drag(
         return;
     }
 
-    // Release on another block in the same lane creates the dependency.
+    // Release on another block in the same lane creates the dependency. You drag
+    // FROM the dependent (successor) TO the block it depends on (predecessor).
     if mouse.just_released(MouseButton::Left) {
-        let Some((from_id, from_plan)) = drag.from.take() else {
+        let Some((succ_id, plan)) = drag.from.take() else {
             return;
         };
         let Some(hit) = lane_block_at(&model, world) else {
             return;
         };
-        if hit.plan != from_plan || hit.id == from_id {
+        if hit.plan != plan || hit.id == succ_id {
             return;
         }
-        let to_finish = world.x >= (hit.left_x + hit.right_x) * 0.5;
-        let dep_type = dep_type_from_edges(drag.from_right, to_finish);
+        let pred_id = hit.id;
+        let pred_finish = world.x >= (hit.left_x + hit.right_x) * 0.5;
+        // dep_type_from_edges is (predecessor_finish, successor_finish).
+        let dep_type = dep_type_from_edges(pred_finish, drag.from_right);
         let exists = model.dependencies.values().any(|d| {
-            d.plan_id == from_plan
-                && d.predecessor == from_id
-                && d.successor == hit.id
+            d.plan_id == plan
+                && d.predecessor == pred_id
+                && d.successor == succ_id
                 && d.dependency_type == dep_type
         });
         if !exists {
-            model.create_dependency_in(from_plan, from_id, hit.id, dep_type);
+            model.create_dependency_in(plan, pred_id, succ_id, dep_type);
             if let Err(e) = db::save_model(&conn, &model) {
                 error!("save_model failed: {e}");
             }
@@ -881,10 +948,13 @@ pub fn draw_lane_dependencies(
     mut gizmos: Gizmos,
     model: Res<Model>,
     drag: Res<LaneDepDrag>,
+    selected_dep: Res<crate::blocks::SelectedDependency>,
     windows: Query<&Window>,
     camera: Query<(&Camera, &GlobalTransform), With<Camera2d>>,
 ) {
     let edge = Color::srgba(0.35, 0.85, 0.85, 0.65);
+    let selected = Color::srgba(1.7, 1.2, 0.25, 1.0); // bright highlight, matches main
+    let violated = Color::srgba(2.2, 0.25, 0.25, 0.9); // red, matches main
     let dot = Color::srgba(0.35, 0.85, 0.85, 0.5);
 
     for band in layout_bands(&model) {
@@ -904,19 +974,28 @@ pub fn draw_lane_dependencies(
             else {
                 continue;
             };
+            // Arrow points FROM the dependent (successor) TO what it depends on
+            // (predecessor) — arrowhead on the predecessor's anchor.
             let (src, dst) = match dep.dependency_type {
-                DependencyType::FinishToStart => (Vec2::new(pxr, py), Vec2::new(sxl, sy)),
-                DependencyType::StartToStart => (Vec2::new(pxl, py), Vec2::new(sxl, sy)),
-                DependencyType::FinishToFinish => (Vec2::new(pxr, py), Vec2::new(sxr, sy)),
-                DependencyType::StartToFinish => (Vec2::new(pxl, py), Vec2::new(sxr, sy)),
+                DependencyType::FinishToStart => (Vec2::new(sxl, sy), Vec2::new(pxr, py)),
+                DependencyType::StartToStart => (Vec2::new(sxl, sy), Vec2::new(pxl, py)),
+                DependencyType::FinishToFinish => (Vec2::new(sxr, sy), Vec2::new(pxr, py)),
+                DependencyType::StartToFinish => (Vec2::new(sxr, sy), Vec2::new(pxl, py)),
             };
-            gizmos.line_2d(src, dst, edge);
+            let color = if selected_dep.0 == Some(dep.id) {
+                selected
+            } else if !crate::schedule::dependency_satisfied(&model, dep) {
+                violated
+            } else {
+                edge
+            };
+            gizmos.line_2d(src, dst, color);
             // Arrowhead at the destination.
             let dir = (dst - src).normalize_or_zero();
             if dir != Vec2::ZERO {
                 let perp = Vec2::new(-dir.y, dir.x);
-                gizmos.line_2d(dst, dst - dir * 8.0 + perp * 4.0, edge);
-                gizmos.line_2d(dst, dst - dir * 8.0 - perp * 4.0, edge);
+                gizmos.line_2d(dst, dst - dir * 8.0 + perp * 4.0, color);
+                gizmos.line_2d(dst, dst - dir * 8.0 - perp * 4.0, color);
             }
         }
 
