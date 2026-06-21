@@ -35,6 +35,7 @@ pub fn create_tables(conn: &Connection) -> Result<()> {
         "ALTER TABLE work_blocks ADD COLUMN block_row INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE work_blocks ADD COLUMN parent_id INTEGER",
         "ALTER TABLE plans ADD COLUMN branch_start_day INTEGER",
+        "ALTER TABLE dependencies ADD COLUMN plan_id INTEGER",
     ] {
         match conn.execute_batch(sql) {
             Ok(()) => {}
@@ -190,15 +191,17 @@ pub fn save_model(conn: &Connection, model: &Model) -> Result<()> {
     for dep in model.dependencies.values() {
         tx.execute(
             "INSERT INTO dependencies
-                 (id, predecessor_id, successor_id, dependency_type, lag_days)
-             VALUES (?1, ?2, ?3, ?4, ?5)
+                 (id, plan_id, predecessor_id, successor_id, dependency_type, lag_days)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
              ON CONFLICT(id) DO UPDATE SET
+                 plan_id = excluded.plan_id,
                  predecessor_id = excluded.predecessor_id,
                  successor_id = excluded.successor_id,
                  dependency_type = excluded.dependency_type,
                  lag_days = excluded.lag_days",
             (
                 dep.id.0 as i64,
+                dep.plan_id.0 as i64,
                 dep.predecessor.0 as i64,
                 dep.successor.0 as i64,
                 dependency_type_str(dep.dependency_type),
@@ -493,26 +496,29 @@ pub fn load_model(conn: &Connection) -> Result<Model> {
     // dependencies
     {
         let mut stmt = conn.prepare(
-            "SELECT id, predecessor_id, successor_id, dependency_type, lag_days
+            "SELECT id, plan_id, predecessor_id, successor_id, dependency_type, lag_days
              FROM dependencies",
         )?;
         let rows = stmt.query_map([], |row| {
             Ok((
                 row.get::<_, i64>(0)?,
-                row.get::<_, i64>(1)?,
+                row.get::<_, Option<i64>>(1)?,
                 row.get::<_, i64>(2)?,
-                row.get::<_, String>(3)?,
-                row.get::<_, i64>(4)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, i64>(5)?,
             ))
         })?;
         for row in rows {
-            let (id, pred, succ, dt_str, lag) = row?;
+            let (id, plan_id, pred, succ, dt_str, lag) = row?;
             let dependency_type = parse_dependency_type(&dt_str)?;
             bump!(id);
             model.dependencies.insert(
                 DependencyId(id as u64),
                 Dependency {
                     id: DependencyId(id as u64),
+                    // Legacy rows (NULL) get assigned to main after plans load.
+                    plan_id: PlanId(plan_id.unwrap_or(0) as u64),
                     predecessor: WorkBlockId(pred as u64),
                     successor: WorkBlockId(succ as u64),
                     dependency_type,
@@ -545,6 +551,16 @@ pub fn load_model(conn: &Connection) -> Result<Model> {
                     branch_start_day: branch_start_day.map(|d| d as i32),
                 },
             );
+        }
+    }
+
+    // Reassign any dependency whose plan_id doesn't name a real plan (legacy
+    // rows loaded with plan_id 0) to the main plan, now that plans are loaded.
+    if let Some(main_id) = model.main_plan_id() {
+        for dep in model.dependencies.values_mut() {
+            if !model.plans.contains_key(&dep.plan_id) {
+                dep.plan_id = main_id;
+            }
         }
     }
 
@@ -851,10 +867,12 @@ mod tests {
         // wb_child is a child of wb_b — exercises the parent_id round-trip.
         m.work_blocks.get_mut(&wb_child).unwrap().parent = Some(wb_b);
 
+        // Plan first, so the dependency is assigned to it (main) — mirrors the
+        // app, where the main plan exists before any dependency is created.
+        let plan_id = m.create_plan("alpha", None);
         let dep_id = m.create_dependency(wb_a, wb_b, DependencyType::FinishToStart);
         m.dependencies.get_mut(&dep_id).unwrap().lag = 1;
 
-        let plan_id = m.create_plan("alpha", None);
         m.plans.get_mut(&plan_id).unwrap().root_blocks.push(wb_a);
         m.plans.get_mut(&plan_id).unwrap().root_blocks.push(wb_b);
         m.plans
@@ -1166,6 +1184,7 @@ CREATE TABLE IF NOT EXISTS work_blocks (
 
 CREATE TABLE IF NOT EXISTS dependencies (
     id              INTEGER PRIMARY KEY,
+    plan_id         INTEGER,
     predecessor_id  INTEGER NOT NULL REFERENCES work_blocks(id),
     successor_id    INTEGER NOT NULL REFERENCES work_blocks(id),
     dependency_type TEXT    NOT NULL,

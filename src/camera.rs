@@ -34,17 +34,18 @@ impl Default for CameraTarget {
     }
 }
 
-/// Camera target that anchors day-0 / row-0 to the upper-left of the timeline
-/// viewport with margins, at 1:1 zoom. Shared by the Home key and the Re-center
-/// button so they agree — centering on the world origin instead would waste the
-/// whole left half of the screen on pre-plan (negative-day) emptiness.
-pub fn home_target(window: &Window) -> CameraTarget {
+/// Camera target for "Home": anchors **today** to the upper-left of the timeline
+/// viewport (so you open looking at today and the work ahead) with the main
+/// plan's row 0 at the top, at 1:1 zoom. Shared by the Home key, the Re-center
+/// button, and the initial view on launch so they all agree.
+pub fn home_target(window: &Window, today_day: i32) -> CameraTarget {
     let w = window.width();
     let h = window.height();
+    let today_x = today_day as f32 * PIXELS_PER_DAY;
     CameraTarget {
         zoom: 1.0,
         pos: Vec2::new(
-            w * 0.5 - HOME_LEFT_MARGIN,
+            today_x + w * 0.5 - HOME_LEFT_MARGIN,
             ROW_HEIGHT * 0.5 - (h * 0.5 - HOME_TOP_MARGIN),
         ),
     }
@@ -120,6 +121,7 @@ pub fn camera_nav_keys(
     mut target: ResMut<CameraTarget>,
     model: Res<Model>,
     schedule: Res<schedule::Schedule>,
+    today: Res<schedule::TodayMarker>,
     windows: Query<&Window>,
 ) {
     if egui_ctx
@@ -131,7 +133,7 @@ pub fn camera_nav_keys(
     }
     if keyboard.just_pressed(KeyCode::Home) {
         let Ok(window) = windows.single() else { return };
-        *target = home_target(window);
+        *target = home_target(window, today.day);
     }
     if keyboard.just_pressed(KeyCode::KeyF) {
         if let Some(new_target) = fit_to_blocks(&model, schedule.plan_id, &windows) {

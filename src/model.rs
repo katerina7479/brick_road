@@ -131,6 +131,10 @@ pub enum DependencyType {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Dependency {
     pub id: DependencyId,
+    /// The plan this dependency belongs to. Dependencies are branch-local: a dep
+    /// added in a branch lane lives in that branch and never affects main, even
+    /// between two ghosts. Main's own deps carry main's id.
+    pub plan_id: PlanId,
     pub predecessor: WorkBlockId,
     pub successor: WorkBlockId,
     pub dependency_type: DependencyType,
@@ -221,8 +225,25 @@ impl Model {
         id
     }
 
+    /// Creates a dependency belonging to the main plan. Convenience for the
+    /// common case (and all existing callers); branch deps use
+    /// [`create_dependency_in`]. Falls back to `PlanId(0)` only if no plan
+    /// exists yet (the dep then matches no plan's graph until reassigned).
     pub fn create_dependency(
         &mut self,
+        predecessor: WorkBlockId,
+        successor: WorkBlockId,
+        dependency_type: DependencyType,
+    ) -> DependencyId {
+        let plan_id = self.main_plan_id().unwrap_or(PlanId(0));
+        self.create_dependency_in(plan_id, predecessor, successor, dependency_type)
+    }
+
+    /// Creates a dependency belonging to `plan_id`. Used for branch-local deps
+    /// added in a lane.
+    pub fn create_dependency_in(
+        &mut self,
+        plan_id: PlanId,
         predecessor: WorkBlockId,
         successor: WorkBlockId,
         dependency_type: DependencyType,
@@ -232,6 +253,7 @@ impl Model {
             id,
             Dependency {
                 id,
+                plan_id,
                 predecessor,
                 successor,
                 dependency_type,
@@ -610,6 +632,25 @@ mod tests {
         assert!(!m.plans[&branch].root_blocks.contains(&shared), "ghost removed from branch");
         assert!(m.work_blocks.contains_key(&shared), "shared block kept (still in main)");
         assert!(m.plans[&main].root_blocks.contains(&shared));
+    }
+
+    #[test]
+    fn removing_a_ghost_from_one_branch_keeps_it_in_others() {
+        // A main block inherited by two branches: removing it from one branch
+        // leaves it in the other branch and in main.
+        let mut m = Model::default();
+        let main = m.create_plan("main", None);
+        let shared = placed(&mut m, main, "shared", 0, 3);
+        let a = m.fork_main(0).unwrap();
+        let b = m.fork_main(0).unwrap();
+        assert!(m.plans[&a].root_blocks.contains(&shared));
+        assert!(m.plans[&b].root_blocks.contains(&shared));
+
+        m.remove_block_from_plan(a, shared);
+        assert!(!m.plans[&a].root_blocks.contains(&shared), "removed from branch a");
+        assert!(m.plans[&b].root_blocks.contains(&shared), "still in branch b");
+        assert!(m.plans[&main].root_blocks.contains(&shared), "still in main");
+        assert!(m.work_blocks.contains_key(&shared), "block kept");
     }
 
     #[test]

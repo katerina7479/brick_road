@@ -1427,6 +1427,7 @@ pub fn update_cursor_icon(
     windows: Query<(Entity, &Window)>,
     camera: Query<(&Camera, &GlobalTransform), With<Camera2d>>,
     block_query: Query<(&Transform, &Sprite), With<BlockSprite>>,
+    model: Res<model::Model>,
 ) {
     let Ok((win_entity, window)) = windows.single() else {
         return;
@@ -1449,6 +1450,7 @@ pub fn update_cursor_icon(
     };
 
     let mut icon = SystemCursorIcon::Default;
+    let mut hit_main = false;
     for (transform, sprite) in &block_query {
         let Some(size) = sprite.custom_size else {
             continue;
@@ -1462,6 +1464,7 @@ pub fn update_cursor_icon(
             || (world_pos - Vec2::new(center.x + half.x, center.y)).length() < HANDLE_HIT_PX;
         if near_handle {
             icon = SystemCursorIcon::Crosshair;
+            hit_main = true;
             break;
         }
         let inside = world_pos.x >= center.x - half.x
@@ -1474,7 +1477,15 @@ pub fn update_cursor_icon(
             } else {
                 SystemCursorIcon::Move
             };
+            hit_main = true;
             break;
+        }
+    }
+
+    // Fall through to the branch lanes when not over a main block.
+    if !hit_main {
+        if let Some(lane_icon) = crate::bands::lane_cursor_at(&model, world_pos) {
+            icon = lane_icon;
         }
     }
 

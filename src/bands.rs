@@ -17,15 +17,19 @@
 
 use bevy::prelude::*;
 use bevy::sprite::Anchor;
+use bevy::window::SystemCursorIcon;
 
 use crate::{
     constants::{PIXELS_PER_DAY, ROW_HEIGHT},
     db,
-    model::{Day, Model, Plan, PlanId, WorkBlockId},
+    model::{Day, DependencyType, Model, Plan, PlanId, WorkBlockId},
 };
 
 /// Pixels from a lane block's right edge that count as the resize handle.
 const EDGE_GRAB_PX: f32 = 8.0;
+/// Visual radius of a dependency edge handle dot, and its hit-test radius.
+const HANDLE_RADIUS: f32 = 4.0;
+const HANDLE_HIT_PX: f32 = 8.0;
 
 /// Gap between main's lowest block and the first lane / between lanes.
 const BAND_GAP: f32 = ROW_HEIGHT * 0.7;
@@ -51,10 +55,12 @@ pub struct PlanRenameState {
     pub buf: String,
 }
 
-/// The currently selected owned (non-ghost) lane block, if any. Drives the
-/// selection highlight and arms the Delete key for lane blocks.
+/// The currently selected lane block as `(block, plan)`, if any. Carries the
+/// plan because a ghost can appear in several branches — Delete must remove it
+/// from the exact lane it was selected in. Drives the selection highlight and
+/// arms the Delete key for lane blocks.
 #[derive(Resource, Default)]
-pub struct LaneSelection(pub Option<WorkBlockId>);
+pub struct LaneSelection(pub Option<(WorkBlockId, PlanId)>);
 
 /// How an in-progress lane-block drag is changing the block.
 #[derive(Clone, Copy, PartialEq)]
@@ -83,6 +89,27 @@ pub struct LaneBlockRename {
     pub editing: Option<WorkBlockId>,
     pub buf: String,
     last_click: Option<(WorkBlockId, f32)>,
+}
+
+/// In-progress drag to create a branch-local dependency: dragging from one lane
+/// block's edge handle to another in the same lane. `from_right` records which
+/// edge was grabbed (right = the predecessor's finish, left = its start).
+#[derive(Resource, Default)]
+pub struct LaneDepDrag {
+    from: Option<(WorkBlockId, PlanId)>,
+    from_right: bool,
+}
+
+/// Dependency type implied by the source edge (which handle was grabbed) and the
+/// target edge (which half it was dropped on). The drag source is the
+/// predecessor. Mirrors main's `dep_type_from_edges`.
+fn dep_type_from_edges(from_right: bool, to_finish: bool) -> DependencyType {
+    match (from_right, to_finish) {
+        (true, false) => DependencyType::FinishToStart,
+        (true, true) => DependencyType::FinishToFinish,
+        (false, false) => DependencyType::StartToStart,
+        (false, true) => DependencyType::StartToFinish,
+    }
 }
 
 /// One block in a lane, world coordinates.
@@ -262,7 +289,7 @@ pub fn draw_band_overlays(
             if !b.owned {
                 rect(&mut gizmos, b, Color::from(b.color));
             }
-            if selection.0 == Some(b.id) {
+            if selection.0 == Some((b.id, band.plan_id)) {
                 rect(&mut gizmos, b, Color::srgba(1.0, 1.0, 1.0, 0.9));
             }
         }
@@ -403,8 +430,9 @@ pub fn handle_band_block_create(
         return;
     };
 
-    // A double-click on an existing owned block is a rename, not a create.
-    if owned_block_at(&model, world).is_some() {
+    // A double-click on an existing lane block (ghost or owned) is a
+    // rename/select, not a create.
+    if lane_block_at(&model, world).is_some() {
         return;
     }
 
@@ -588,8 +616,9 @@ pub fn draw_plan_rename_overlay(
 
 // ── owned lane-block editing ────────────────────────────────────────────────
 
-/// An owned lane block under the cursor, with the geometry needed to drag,
-/// resize, and re-derive its row during a move.
+/// A lane block under the cursor, with the geometry needed to drag, resize, and
+/// re-derive its row during a move. `owned` distinguishes the branch's own
+/// blocks (editable) from inherited ghosts (selectable + removable only).
 struct LaneHit {
     id: WorkBlockId,
     plan: PlanId,
@@ -597,15 +626,13 @@ struct LaneHit {
     row0_y: f32,
     left_x: f32,
     right_x: f32,
+    owned: bool,
 }
 
-/// Finds the owned (non-ghost) lane block under `world`, if any.
-fn owned_block_at(model: &Model, world: Vec2) -> Option<LaneHit> {
+/// Finds the lane block (ghost or owned) under `world`, if any.
+fn lane_block_at(model: &Model, world: Vec2) -> Option<LaneHit> {
     for band in layout_bands(model) {
         for b in &band.blocks {
-            if !b.owned {
-                continue;
-            }
             let hw = b.w * 0.5;
             let hh = GHOST_HEIGHT * 0.5;
             if world.x >= b.cx - hw
@@ -620,11 +647,27 @@ fn owned_block_at(model: &Model, world: Vec2) -> Option<LaneHit> {
                     row0_y: band.row0_y,
                     left_x: b.cx - hw,
                     right_x: b.cx + hw,
+                    owned: b.owned,
                 });
             }
         }
     }
     None
+}
+
+/// The cursor hint for a lane block under `world`, mirroring main's feedback:
+/// resize at the right edge of an owned block, move over its interior, and a
+/// pointer over a ghost (selectable but read-only). `None` when over no block.
+pub fn lane_cursor_at(model: &Model, world: Vec2) -> Option<SystemCursorIcon> {
+    let hit = lane_block_at(model, world)?;
+    if !hit.owned {
+        return Some(SystemCursorIcon::Pointer);
+    }
+    if (world.x - hit.right_x).abs() <= EDGE_GRAB_PX {
+        Some(SystemCursorIcon::EwResize)
+    } else {
+        Some(SystemCursorIcon::Move)
+    }
 }
 
 /// Cursor → world helper shared by the lane interaction systems.
@@ -660,8 +703,9 @@ pub fn handle_lane_block_edit(
     mut selection: ResMut<LaneSelection>,
     mut rename: ResMut<LaneBlockRename>,
     mut main_selected: ResMut<crate::blocks::SelectedBlock>,
+    dep_drag: Res<LaneDepDrag>,
 ) {
-    if rename.editing.is_some() {
+    if rename.editing.is_some() || dep_drag.from.is_some() {
         return;
     }
     if let Ok(ctx) = egui_ctx.ctx_mut() {
@@ -678,8 +722,19 @@ pub fn handle_lane_block_edit(
         if keyboard.pressed(KeyCode::ControlLeft) || keyboard.pressed(KeyCode::ControlRight) {
             return; // fork gesture
         }
-        if let Some(hit) = owned_block_at(&model, world) {
-            // Double-click → rename; otherwise begin a drag.
+        if let Some(hit) = lane_block_at(&model, world) {
+            // Any lane block selects (so Delete can remove a ghost from the
+            // branch); lane and main selection are exclusive.
+            selection.0 = Some((hit.id, hit.plan));
+            main_selected.0 = None;
+
+            // Ghosts are read-only — they track main, so no drag/resize/rename.
+            if !hit.owned {
+                rename.last_click = None;
+                return;
+            }
+
+            // Double-click an owned block → rename; otherwise begin a drag.
             let now = time.elapsed_secs();
             let double =
                 matches!(rename.last_click, Some((id, t)) if id == hit.id && now - t < 0.4);
@@ -695,8 +750,6 @@ pub fn handle_lane_block_edit(
             }
             rename.last_click = Some((hit.id, now));
 
-            selection.0 = Some(hit.id);
-            main_selected.0 = None; // lane and main selection are exclusive
             let mode = if (world.x - hit.right_x).abs() <= EDGE_GRAB_PX {
                 LaneDragMode::Resize
             } else {
@@ -738,9 +791,160 @@ pub fn handle_lane_block_edit(
         return;
     }
 
-    if mouse.just_released(MouseButton::Left) && drag.active.take().is_some() {
-        if let Err(e) = db::save_model(&conn, &model) {
-            error!("save_model failed: {e}");
+    if mouse.just_released(MouseButton::Left) {
+        if let Some(a) = drag.active.take() {
+            // Push dependents to satisfy deps, exactly like main does on a
+            // drag/resize. Cascade is global, so a dep from a ghost (a block main
+            // shares) to an owned block pushes the owned block too.
+            crate::schedule::cascade_dependencies(&mut model, a.block);
+            if let Err(e) = db::save_model(&conn, &model) {
+                error!("save_model failed: {e}");
+            }
+        }
+    }
+}
+
+/// Drag from a lane block's edge handle to another lane block in the same lane
+/// to create a branch-local dependency. Mirrors main's `handle_dep_drag`, but
+/// the new dep carries the branch's plan id so it never affects main.
+pub fn handle_lane_dep_drag(
+    mut egui_ctx: bevy_egui::EguiContexts,
+    windows: Query<&Window>,
+    camera: Query<(&Camera, &GlobalTransform), With<Camera2d>>,
+    mouse: Res<ButtonInput<MouseButton>>,
+    mut drag: ResMut<LaneDepDrag>,
+    mut model: ResMut<Model>,
+    conn: NonSend<rusqlite::Connection>,
+) {
+    if let Ok(ctx) = egui_ctx.ctx_mut() {
+        if ctx.is_pointer_over_area() {
+            drag.from = None;
+            return;
+        }
+    }
+    let Some(world) = cursor_world(&windows, &camera) else {
+        return;
+    };
+
+    // Press on an edge handle starts the drag (right = predecessor's finish).
+    if mouse.just_pressed(MouseButton::Left) {
+        for band in layout_bands(&model) {
+            for b in &band.blocks {
+                let left = Vec2::new(b.cx - b.w * 0.5, b.cy);
+                let right = Vec2::new(b.cx + b.w * 0.5, b.cy);
+                if (world - right).length() < HANDLE_HIT_PX {
+                    drag.from = Some((b.id, band.plan_id));
+                    drag.from_right = true;
+                    return;
+                }
+                if (world - left).length() < HANDLE_HIT_PX {
+                    drag.from = Some((b.id, band.plan_id));
+                    drag.from_right = false;
+                    return;
+                }
+            }
+        }
+        return;
+    }
+
+    // Release on another block in the same lane creates the dependency.
+    if mouse.just_released(MouseButton::Left) {
+        let Some((from_id, from_plan)) = drag.from.take() else {
+            return;
+        };
+        let Some(hit) = lane_block_at(&model, world) else {
+            return;
+        };
+        if hit.plan != from_plan || hit.id == from_id {
+            return;
+        }
+        let to_finish = world.x >= (hit.left_x + hit.right_x) * 0.5;
+        let dep_type = dep_type_from_edges(drag.from_right, to_finish);
+        let exists = model.dependencies.values().any(|d| {
+            d.plan_id == from_plan
+                && d.predecessor == from_id
+                && d.successor == hit.id
+                && d.dependency_type == dep_type
+        });
+        if !exists {
+            model.create_dependency_in(from_plan, from_id, hit.id, dep_type);
+            if let Err(e) = db::save_model(&conn, &model) {
+                error!("save_model failed: {e}");
+            }
+        }
+    }
+}
+
+/// Draws branch-local dependency edges, edge handles, and the in-progress
+/// drag preview in lane space.
+pub fn draw_lane_dependencies(
+    mut gizmos: Gizmos,
+    model: Res<Model>,
+    drag: Res<LaneDepDrag>,
+    windows: Query<&Window>,
+    camera: Query<(&Camera, &GlobalTransform), With<Camera2d>>,
+) {
+    let edge = Color::srgba(0.35, 0.85, 0.85, 0.65);
+    let dot = Color::srgba(0.35, 0.85, 0.85, 0.5);
+
+    for band in layout_bands(&model) {
+        // (left x, right x, y) for each block in this lane.
+        let geom: std::collections::HashMap<WorkBlockId, (f32, f32, f32)> = band
+            .blocks
+            .iter()
+            .map(|b| (b.id, (b.cx - b.w * 0.5, b.cx + b.w * 0.5, b.cy)))
+            .collect();
+
+        for dep in model.dependencies.values() {
+            if dep.plan_id != band.plan_id {
+                continue;
+            }
+            let (Some(&(pxl, pxr, py)), Some(&(sxl, sxr, sy))) =
+                (geom.get(&dep.predecessor), geom.get(&dep.successor))
+            else {
+                continue;
+            };
+            let (src, dst) = match dep.dependency_type {
+                DependencyType::FinishToStart => (Vec2::new(pxr, py), Vec2::new(sxl, sy)),
+                DependencyType::StartToStart => (Vec2::new(pxl, py), Vec2::new(sxl, sy)),
+                DependencyType::FinishToFinish => (Vec2::new(pxr, py), Vec2::new(sxr, sy)),
+                DependencyType::StartToFinish => (Vec2::new(pxl, py), Vec2::new(sxr, sy)),
+            };
+            gizmos.line_2d(src, dst, edge);
+            // Arrowhead at the destination.
+            let dir = (dst - src).normalize_or_zero();
+            if dir != Vec2::ZERO {
+                let perp = Vec2::new(-dir.y, dir.x);
+                gizmos.line_2d(dst, dst - dir * 8.0 + perp * 4.0, edge);
+                gizmos.line_2d(dst, dst - dir * 8.0 - perp * 4.0, edge);
+            }
+        }
+
+        // Edge handles on every lane block.
+        for b in &band.blocks {
+            gizmos.circle_2d(Vec2::new(b.cx - b.w * 0.5, b.cy), HANDLE_RADIUS, dot);
+            gizmos.circle_2d(Vec2::new(b.cx + b.w * 0.5, b.cy), HANDLE_RADIUS, dot);
+        }
+    }
+
+    // Drag preview: line from the grabbed handle to the cursor.
+    if let Some((from_id, from_plan)) = drag.from {
+        if let Some(world) = cursor_world(&windows, &camera) {
+            for band in layout_bands(&model) {
+                if band.plan_id != from_plan {
+                    continue;
+                }
+                for b in &band.blocks {
+                    if b.id == from_id {
+                        let x = if drag.from_right {
+                            b.cx + b.w * 0.5
+                        } else {
+                            b.cx - b.w * 0.5
+                        };
+                        gizmos.line_2d(Vec2::new(x, b.cy), world, Color::WHITE);
+                    }
+                }
+            }
         }
     }
 }
@@ -757,8 +961,10 @@ pub fn clear_lane_selection_on_main_select(
     }
 }
 
-/// Delete/Backspace removes the selected owned lane block (and the underlying
-/// WorkBlock, since it's owned by exactly this branch).
+/// Delete/Backspace removes the selected lane block from its branch. For an
+/// owned block this deletes the underlying WorkBlock; for a ghost it just
+/// removes the membership, hiding the inherited block in this branch only (the
+/// block stays in main). `Model::remove_block_from_plan` handles both.
 pub fn handle_lane_block_delete(
     mut egui_ctx: bevy_egui::EguiContexts,
     keyboard: Res<ButtonInput<KeyCode>>,
@@ -778,21 +984,12 @@ pub fn handle_lane_block_delete(
     if !(keyboard.just_pressed(KeyCode::Delete) || keyboard.just_pressed(KeyCode::Backspace)) {
         return;
     }
-    let Some(id) = selection.0.take() else {
+    let Some((id, plan)) = selection.0.take() else {
         return;
     };
-    // Find the branch that owns it and remove it there (deletes the block since
-    // an owned block is rooted by exactly one plan).
-    let plan = model
-        .plans
-        .values()
-        .find(|p| p.branch_start_day.is_some() && p.root_blocks.contains(&id))
-        .map(|p| p.id);
-    if let Some(plan) = plan {
-        model.remove_block_from_plan(plan, id);
-        if let Err(e) = db::save_model(&conn, &model) {
-            error!("save_model failed: {e}");
-        }
+    model.remove_block_from_plan(plan, id);
+    if let Err(e) = db::save_model(&conn, &model) {
+        error!("save_model failed: {e}");
     }
 }
 

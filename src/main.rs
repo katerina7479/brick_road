@@ -56,6 +56,7 @@ fn main() {
         .insert_resource(bands::LaneSelection::default())
         .insert_resource(bands::LaneDrag::default())
         .insert_resource(bands::LaneBlockRename::default())
+        .insert_resource(bands::LaneDepDrag::default())
         .add_systems(Startup, (setup_db, setup_camera))
         .add_systems(Startup, setup_demo_schedule.after(setup_db))
         .add_systems(
@@ -81,6 +82,10 @@ fn main() {
         )
         .add_systems(
             Update,
+            set_initial_view.after(schedule::update_today_marker),
+        )
+        .add_systems(
+            Update,
             (camera_nav_keys, update_camera_target, smooth_camera).chain(),
         )
         .add_systems(Update, draw_grid)
@@ -94,9 +99,14 @@ fn main() {
         )
         .add_systems(
             Update,
+            bands::handle_lane_dep_drag.before(bands::handle_lane_block_edit),
+        )
+        .add_systems(
+            Update,
             bands::handle_lane_block_edit.before(blocks::handle_block_selection),
         )
         .add_systems(Update, bands::handle_lane_block_delete)
+        .add_systems(Update, bands::draw_lane_dependencies)
         .add_systems(
             Update,
             bands::clear_lane_selection_on_main_select.after(blocks::handle_block_selection),
@@ -223,6 +233,34 @@ fn setup_db(world: &mut World) {
 
 fn setup_camera(mut commands: Commands) {
     commands.spawn((Camera2d, Hdr, Tonemapping::TonyMcMapface, Bloom::default()));
+}
+
+/// On launch, snap the camera to the "Home" view (today at upper-left, main plan
+/// at the top) once `today` is known. Runs a single time; afterwards the user
+/// drives the camera. Snapping (not easing from the origin) avoids an opening
+/// pan across pre-plan emptiness.
+fn set_initial_view(
+    mut done: Local<bool>,
+    mut target: ResMut<CameraTarget>,
+    today: Res<schedule::TodayMarker>,
+    windows: Query<&Window>,
+    mut cam: Query<(&mut Transform, &mut Projection), With<Camera2d>>,
+) {
+    if *done {
+        return;
+    }
+    let Ok(window) = windows.single() else { return };
+    let home = camera::home_target(window, today.day);
+    let (pos, zoom) = (home.pos, home.zoom);
+    *target = home;
+    if let Ok((mut tf, mut proj)) = cam.single_mut() {
+        tf.translation.x = pos.x;
+        tf.translation.y = pos.y;
+        if let Projection::Orthographic(o) = &mut *proj {
+            o.scale = zoom;
+        }
+    }
+    *done = true;
 }
 
 fn draw_grid(
@@ -906,7 +944,7 @@ fn top_bar_ui(
                     }
                     if ui.small_button("Re-center [Home]").clicked() {
                         if let Ok(window) = windows.single() {
-                            *target = camera::home_target(window);
+                            *target = camera::home_target(window, today.day);
                         }
                     }
                     // Dev: wipe all blocks, branches, and links; keep one empty
