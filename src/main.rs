@@ -99,7 +99,11 @@ fn main() {
         .add_systems(Update, bands::sync_band_visuals)
         .add_systems(
             Update,
-            bands::handle_band_rename_click.run_if(at_plan_level),
+            // After branch-marker selection so a name click (which disambiguates
+            // overlapping same-day forks by height) wins over the nearest marker.
+            bands::handle_band_rename_click
+                .run_if(at_plan_level)
+                .after(handle_branch_selection),
         )
         .add_systems(
             Update,
@@ -1106,7 +1110,9 @@ fn top_bar_ui(
     egui::TopBottomPanel::top("top_bar")
         .frame(
             egui::Frame::new()
-                .fill(egui::Color32::from_rgba_unmultiplied(18, 12, 4, 230))
+                // Opaque — a translucent fill let the timeline show through the
+                // empty area to the right of the breadcrumb.
+                .fill(egui::Color32::from_rgb(18, 12, 4))
                 .inner_margin(egui::Margin::symmetric(8, 4)),
         )
         .show(ctx, |ui| {
@@ -1298,7 +1304,13 @@ fn handle_branch_selection(
         .unwrap_or(1.0);
 
     // ~6 screen pixels of grab tolerance on either side of the marker line.
-    if let Some(id) = branch_plan_at_x(&model, schedule.plan_id, world.x, 6.0 * scale) {
+    // Prefer the lane the click is in (disambiguates same-day forks by height);
+    // fall back to the nearest marker by x for clicks on the line above the
+    // lanes (in the main timeline area).
+    let hit = 6.0 * scale;
+    let plan = bands::plan_marker_in_lane_at(&model, world, hit)
+        .or_else(|| branch_plan_at_x(&model, schedule.plan_id, world.x, hit));
+    if let Some(id) = plan {
         selected_plan.0 = Some(id);
         selected_block.0 = None;
         selected_dep.0 = None;
