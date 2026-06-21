@@ -48,6 +48,15 @@ pub struct WorkBlock {
     /// Selected t-shirt size label (e.g. "M"), if any. The resolved day count
     /// is always stored in `duration_days`; this tracks which size was chosen.
     pub t_shirt_size: Option<String>,
+    /// Roll-up mode: when `true` and the block has children, its `start_day` and
+    /// `duration_days` are computed to span its children (a read-only summary
+    /// bar). When `false`, the block keeps its own timeline and children sit
+    /// inside it without resizing it. Per-block toggle; ignored for leaf blocks.
+    pub rollup: bool,
+    /// How many rows this block occupies vertically. `1` for an ordinary block;
+    /// a rolled-up parent whose children span several rows takes their full row
+    /// span so it visually covers all of them. Computed in roll-up; otherwise 1.
+    pub row_span: i32,
 }
 
 /// A named t-shirt size that maps a label (e.g. "M") to a day count.
@@ -202,6 +211,8 @@ impl Model {
                 description: String::new(),
                 priority: 1,
                 t_shirt_size: None,
+                rollup: false,
+                row_span: 1,
             },
         );
         id
@@ -286,6 +297,96 @@ impl Model {
     /// to ensure new IDs don't collide with any already stored in the DB.
     pub fn set_next_id(&mut self, id: u64) {
         self.next_id = id;
+    }
+
+    // --- Nesting (children / drill-in) ---
+
+    /// The placed children of `parent` (blocks whose `parent` is `parent`,
+    /// `duration_days > 0`), sorted by ascending start day then id.
+    pub fn children(&self, parent: WorkBlockId) -> Vec<WorkBlockId> {
+        let mut kids: Vec<&WorkBlock> = self
+            .work_blocks
+            .values()
+            .filter(|wb| wb.parent == Some(parent) && wb.duration_days > 0)
+            .collect();
+        kids.sort_by(|a, b| a.start_day.cmp(&b.start_day).then(a.id.0.cmp(&b.id.0)));
+        kids.into_iter().map(|wb| wb.id).collect()
+    }
+
+    /// Whether `block` has any child blocks (placed or not).
+    pub fn has_children(&self, block: WorkBlockId) -> bool {
+        self.work_blocks.values().any(|wb| wb.parent == Some(block))
+    }
+
+    /// Creates a child of `parent` at the given placement and returns its id.
+    pub fn add_child_block(
+        &mut self,
+        parent: WorkBlockId,
+        name: impl Into<String>,
+        start_day: Day,
+        duration_days: Day,
+        row: i32,
+    ) -> WorkBlockId {
+        let id = self.create_work_block(name);
+        if let Some(wb) = self.work_blocks.get_mut(&id) {
+            wb.parent = Some(parent);
+            wb.start_day = start_day;
+            wb.duration_days = duration_days;
+            wb.row = row;
+        }
+        self.recompute_rollup(parent);
+        id
+    }
+
+    /// If `block` is in roll-up mode and has children, recompute its start/
+    /// duration to span its children's extent, then propagate up its ancestors.
+    /// Blocks not in roll-up mode (or with no children) keep their own placement.
+    pub fn recompute_rollup(&mut self, block: WorkBlockId) {
+        let mut current = Some(block);
+        while let Some(id) = current {
+            let rollup = self.work_blocks.get(&id).map(|wb| wb.rollup).unwrap_or(false);
+            if rollup {
+                let kids = self.children(id);
+                if !kids.is_empty() {
+                    let start = kids
+                        .iter()
+                        .filter_map(|k| self.work_blocks.get(k))
+                        .map(|wb| wb.start_day)
+                        .min()
+                        .unwrap_or(0);
+                    let end = kids
+                        .iter()
+                        .filter_map(|k| self.work_blocks.get(k))
+                        .map(|wb| wb.start_day + wb.duration_days)
+                        .max()
+                        .unwrap_or(0);
+                    // Vertical span: a rolled-up parent covers the full row range
+                    // of its children (taking a child's own row_span into account
+                    // for deeper nesting).
+                    let min_row = kids
+                        .iter()
+                        .filter_map(|k| self.work_blocks.get(k))
+                        .map(|wb| wb.row)
+                        .min()
+                        .unwrap_or(0);
+                    let max_row = kids
+                        .iter()
+                        .filter_map(|k| self.work_blocks.get(k))
+                        .map(|wb| wb.row + wb.row_span - 1)
+                        .max()
+                        .unwrap_or(0);
+                    if let Some(wb) = self.work_blocks.get_mut(&id) {
+                        wb.start_day = start;
+                        wb.duration_days = (end - start).max(1);
+                        wb.row = min_row;
+                        wb.row_span = (max_row - min_row + 1).max(1);
+                    }
+                } else if let Some(wb) = self.work_blocks.get_mut(&id) {
+                    wb.row_span = 1;
+                }
+            }
+            current = self.work_blocks.get(&id).and_then(|wb| wb.parent);
+        }
     }
 
     // --- Accessors ---
@@ -722,6 +823,74 @@ mod tests {
 
         let child = m.get_work_block(child_id).unwrap();
         assert_eq!(child.parent, Some(block_id));
+    }
+
+    #[test]
+    fn children_are_placed_and_sorted() {
+        let mut m = Model::default();
+        let p = m.create_work_block("p");
+        let b = m.add_child_block(p, "b", 10, 3, 0);
+        let a = m.add_child_block(p, "a", 2, 3, 0);
+        m.create_work_block("unrelated");
+        // A child block with no duration is excluded (unplaced).
+        let _empty = m.add_child_block(p, "empty", 0, 0, 1);
+        assert_eq!(m.children(p), vec![a, b], "placed children, sorted by start");
+        assert!(m.has_children(p));
+    }
+
+    #[test]
+    fn rollup_spans_children_when_enabled() {
+        let mut m = Model::default();
+        let p = m.create_work_block("p");
+        m.work_blocks.get_mut(&p).unwrap().rollup = true;
+        m.add_child_block(p, "a", 5, 3, 0); // [5, 8)
+        m.add_child_block(p, "b", 10, 4, 1); // [10, 14)
+        // add_child_block recomputes the rollup: parent spans 5 -> 14.
+        assert_eq!(m.work_blocks[&p].start_day, 5);
+        assert_eq!(m.work_blocks[&p].duration_days, 9);
+    }
+
+    #[test]
+    fn rollup_off_keeps_own_timeline() {
+        let mut m = Model::default();
+        let p = m.create_work_block("p");
+        let wb = m.work_blocks.get_mut(&p).unwrap();
+        wb.start_day = 0;
+        wb.duration_days = 2;
+        wb.rollup = false; // independent
+        m.add_child_block(p, "a", 5, 3, 0);
+        // Not rolled up: the parent keeps its own placement.
+        assert_eq!(m.work_blocks[&p].start_day, 0);
+        assert_eq!(m.work_blocks[&p].duration_days, 2);
+    }
+
+    #[test]
+    fn rollup_spans_children_rows() {
+        // Children on rows 0 and 2 → the rolled-up parent covers rows 0..2
+        // (row 0, row_span 3) so it visually spans all of them.
+        let mut m = Model::default();
+        let p = m.create_work_block("p");
+        m.work_blocks.get_mut(&p).unwrap().rollup = true;
+        m.add_child_block(p, "top", 0, 3, 0);
+        m.add_child_block(p, "bottom", 4, 3, 2);
+        assert_eq!(m.work_blocks[&p].row, 0);
+        assert_eq!(m.work_blocks[&p].row_span, 3);
+    }
+
+    #[test]
+    fn rollup_propagates_up_ancestors() {
+        let mut m = Model::default();
+        let gp = m.create_work_block("gp");
+        m.work_blocks.get_mut(&gp).unwrap().rollup = true;
+        let p = m.add_child_block(gp, "p", 0, 1, 0);
+        m.work_blocks.get_mut(&p).unwrap().rollup = true;
+        m.add_child_block(p, "leaf", 8, 4, 0); // [8, 12)
+        m.recompute_rollup(p);
+        // p spans its leaf (8..12); gp spans p (8..12).
+        assert_eq!(m.work_blocks[&p].start_day, 8);
+        assert_eq!(m.work_blocks[&p].duration_days, 4);
+        assert_eq!(m.work_blocks[&gp].start_day, 8);
+        assert_eq!(m.work_blocks[&gp].duration_days, 4);
     }
 
     #[test]

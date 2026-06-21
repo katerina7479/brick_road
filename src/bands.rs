@@ -297,12 +297,22 @@ pub fn draw_band_overlays(
 }
 
 /// Rebuilds lane fills, owned (solid) bars, and all text when the model changes.
-pub fn sync_band_visuals(mut commands: Commands, model: Res<Model>, mut ents: ResMut<BandEntities>) {
-    if !model.is_changed() {
+/// While drilled into a block, the branch lanes are hidden — all band entities
+/// are despawned and nothing is spawned until you return to the plan level.
+pub fn sync_band_visuals(
+    mut commands: Commands,
+    model: Res<Model>,
+    drill: Res<crate::schedule::DrillScope>,
+    mut ents: ResMut<BandEntities>,
+) {
+    if !model.is_changed() && !drill.is_changed() {
         return;
     }
     for e in ents.0.drain(..) {
         commands.entity(e).despawn();
+    }
+    if !drill.path.is_empty() {
+        return; // drilled in: no branch lanes
     }
 
     for (i, band) in layout_bands(&model).into_iter().enumerate() {

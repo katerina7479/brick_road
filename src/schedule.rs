@@ -87,22 +87,40 @@ pub fn sorted_blocks(model: &Model) -> Vec<&WorkBlock> {
     blocks
 }
 
-/// Returns the given plan's placed blocks (`duration_days > 0`), sorted by
-/// ascending `start_day` with `id` as a tie-breaker. Only the plan's own
-/// `root_blocks` are returned, so other plans' blocks (e.g. a branch's) never
-/// render on this plan's surface.
-pub fn visible_blocks(model: &Model, plan_id: PlanId) -> Vec<&WorkBlock> {
-    let Some(plan) = model.plans.get(&plan_id) else {
-        return Vec::new();
+/// The blocks shown on the active timeline. With no drill-in (`drill` = `None`)
+/// these are the plan's own top-level `root_blocks`; when drilled into a block,
+/// they are that block's children. Placed (`duration_days > 0`) only, sorted by
+/// ascending `start_day` with `id` as a tie-breaker.
+pub fn visible_blocks(model: &Model, plan_id: PlanId, drill: Option<WorkBlockId>) -> Vec<&WorkBlock> {
+    let ids: Vec<WorkBlockId> = match drill {
+        Some(parent) => model.children(parent),
+        None => match model.plans.get(&plan_id) {
+            Some(plan) => plan.root_blocks.clone(),
+            None => return Vec::new(),
+        },
     };
-    let mut blocks: Vec<&WorkBlock> = plan
-        .root_blocks
+    let mut blocks: Vec<&WorkBlock> = ids
         .iter()
         .filter_map(|id| model.work_blocks.get(id))
         .filter(|wb| wb.duration_days > 0)
         .collect();
     blocks.sort_by(|a, b| a.start_day.cmp(&b.start_day).then(a.id.0.cmp(&b.id.0)));
     blocks
+}
+
+/// Drill-in navigation path. Empty = the plan's top level; otherwise the last
+/// entry is the block currently drilled into, and the timeline shows its
+/// children. Earlier entries are the breadcrumb trail back out.
+#[derive(Debug, Default, Resource)]
+pub struct DrillScope {
+    pub path: Vec<WorkBlockId>,
+}
+
+impl DrillScope {
+    /// The block currently drilled into, if any.
+    pub fn current(&self) -> Option<WorkBlockId> {
+        self.path.last().copied()
+    }
 }
 
 /// Cached result of `visible_blocks()`, recomputed only when `Model` changes.
@@ -121,12 +139,13 @@ pub struct VisibleBlocks {
 pub fn update_visible_blocks(
     model: Res<Model>,
     schedule: Res<Schedule>,
+    drill: Res<DrillScope>,
     mut cache: ResMut<VisibleBlocks>,
 ) {
-    if !model.is_changed() && !schedule.is_changed() {
+    if !model.is_changed() && !schedule.is_changed() && !drill.is_changed() {
         return;
     }
-    let new_ids: Vec<WorkBlockId> = visible_blocks(&model, schedule.plan_id)
+    let new_ids: Vec<WorkBlockId> = visible_blocks(&model, schedule.plan_id, drill.current())
         .into_iter()
         .map(|wb| wb.id)
         .collect();
@@ -2157,7 +2176,7 @@ mod tests {
         let unplaced = m.create_work_block("unplaced");
         let plan = m.create_plan("p", None);
         m.plans.get_mut(&plan).unwrap().root_blocks = vec![a, b, unplaced];
-        let ids: Vec<WorkBlockId> = visible_blocks(&m, plan).iter().map(|wb| wb.id).collect();
+        let ids: Vec<WorkBlockId> = visible_blocks(&m, plan, None).iter().map(|wb| wb.id).collect();
         assert_eq!(ids, vec![a, b]);
     }
 
@@ -2172,7 +2191,7 @@ mod tests {
         let branch = m.create_plan("branch", Some(0));
         m.plans.get_mut(&main).unwrap().root_blocks = vec![mine];
         m.plans.get_mut(&branch).unwrap().root_blocks = vec![theirs];
-        let ids: Vec<WorkBlockId> = visible_blocks(&m, main).iter().map(|wb| wb.id).collect();
+        let ids: Vec<WorkBlockId> = visible_blocks(&m, main, None).iter().map(|wb| wb.id).collect();
         assert_eq!(ids, vec![mine]);
     }
 }

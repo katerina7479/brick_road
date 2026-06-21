@@ -44,6 +44,7 @@ fn main() {
         .insert_resource(blocks::CreateModeState::default())
         .insert_resource(blocks::SizePickerState::default())
         .insert_resource(schedule::VisibleBlocks::default())
+        .insert_resource(schedule::DrillScope::default())
         .insert_resource(analysis::ScheduleAnalysis::default())
         .insert_resource(schedule::TodayMarker::default())
         .insert_resource(blocks::BlockSpriteMap::default())
@@ -89,34 +90,52 @@ fn main() {
             (camera_nav_keys, update_camera_target, smooth_camera).chain(),
         )
         .add_systems(Update, draw_grid)
-        .add_systems(Update, draw_branch_markers)
-        .add_systems(Update, bands::draw_band_overlays)
+        .add_systems(Update, frame_on_drill)
+        .add_systems(Update, draw_parent_bounds)
+        // Plan/branch UI only exists at the plan level — drilling into a block is
+        // a focused view of just that block's children (no branches).
+        .add_systems(Update, draw_branch_markers.run_if(at_plan_level))
+        .add_systems(Update, bands::draw_band_overlays.run_if(at_plan_level))
         .add_systems(Update, bands::sync_band_visuals)
-        .add_systems(Update, bands::handle_band_rename_click)
         .add_systems(
             Update,
-            bands::handle_band_block_create.before(blocks::handle_block_selection),
+            bands::handle_band_rename_click.run_if(at_plan_level),
         )
         .add_systems(
             Update,
-            bands::handle_lane_dep_drag.before(bands::handle_lane_block_edit),
+            bands::handle_band_block_create
+                .run_if(at_plan_level)
+                .before(blocks::handle_block_selection),
         )
         .add_systems(
             Update,
-            bands::handle_lane_block_edit.before(blocks::handle_block_selection),
+            bands::handle_lane_dep_drag
+                .run_if(at_plan_level)
+                .before(bands::handle_lane_block_edit),
         )
-        .add_systems(Update, bands::handle_lane_block_delete)
-        .add_systems(Update, bands::draw_lane_dependencies)
+        .add_systems(
+            Update,
+            bands::handle_lane_block_edit
+                .run_if(at_plan_level)
+                .before(blocks::handle_block_selection),
+        )
+        .add_systems(
+            Update,
+            bands::handle_lane_block_delete.run_if(at_plan_level),
+        )
+        .add_systems(Update, bands::draw_lane_dependencies.run_if(at_plan_level))
         .add_systems(
             Update,
             bands::clear_lane_selection_on_main_select.after(blocks::handle_block_selection),
         )
-        .add_systems(Update, handle_fork_hover)
+        .add_systems(Update, handle_fork_hover.run_if(at_plan_level))
         .add_systems(
             Update,
-            handle_branch_selection.before(blocks::handle_block_selection),
+            handle_branch_selection
+                .run_if(at_plan_level)
+                .before(blocks::handle_block_selection),
         )
-        .add_systems(Update, handle_branch_delete.after(blocks::handle_name_edit))
+        .add_systems(Update, handle_branch_delete.after(blocks::handle_block_drill))
         .add_systems(Update, schedule::update_today_marker)
         .add_systems(Update, sync_total_duration)
         .add_systems(Update, sync_weekend_bands.after(sync_total_duration))
@@ -131,21 +150,35 @@ fn main() {
                 .after(blocks::handle_block_delete)
                 .after(blocks::handle_undo),
         )
-        .add_systems(Update, blocks::handle_name_edit)
+        .add_systems(Update, blocks::handle_block_drill)
+        .add_systems(Update, blocks::handle_drill_out)
+        // Runs before the keyboard shortcut handlers so the first typed
+        // character opens the rename instead of triggering F/N/S/Home.
         .add_systems(
             Update,
-            blocks::handle_block_delete.after(blocks::handle_name_edit),
+            blocks::handle_type_to_rename
+                .before(camera_nav_keys)
+                .before(blocks::handle_create_mode_toggle)
+                .before(blocks::handle_size_picker_hotkey),
+        )
+        .add_systems(
+            Update,
+            blocks::handle_canvas_create.after(blocks::handle_block_drill),
+        )
+        .add_systems(
+            Update,
+            blocks::handle_block_delete.after(blocks::handle_block_drill),
         )
         .add_systems(Update, blocks::handle_undo)
         .add_systems(
             Update,
-            blocks::handle_create_mode_toggle.after(blocks::handle_name_edit),
+            blocks::handle_create_mode_toggle.after(blocks::handle_block_drill),
         )
         .add_systems(Update, blocks::handle_create_mode_click_exit)
         .add_systems(Update, blocks::handle_size_picker_hotkey)
         .add_systems(
             Update,
-            blocks::handle_block_selection.after(blocks::handle_name_edit),
+            blocks::handle_block_selection.after(blocks::handle_block_drill),
         )
         .add_systems(
             Update,
@@ -235,6 +268,75 @@ fn setup_camera(mut commands: Commands) {
     commands.spawn((Camera2d, Hdr, Tonemapping::TonyMcMapface, Bloom::default()));
 }
 
+/// Run condition: true at the plan's top level (not drilled into a block). The
+/// branch/plan UI runs only here; drilling into a block is a focused view of
+/// just that block's children.
+fn at_plan_level(drill: Res<schedule::DrillScope>) -> bool {
+    drill.path.is_empty()
+}
+
+/// On a drill-in/out change, reframe the camera: drilling into a block frames
+/// that block's span (with slack to place children beyond it); drilling back to
+/// the plan level fits the plan's blocks (or returns to the today/home view).
+fn frame_on_drill(
+    drill: Res<schedule::DrillScope>,
+    model: Res<model::Model>,
+    schedule: Res<schedule::Schedule>,
+    today: Res<schedule::TodayMarker>,
+    windows: Query<&Window>,
+    mut target: ResMut<CameraTarget>,
+    mut cam: Query<(&mut Transform, &mut Projection), With<Camera2d>>,
+) {
+    if !drill.is_changed() {
+        return;
+    }
+    let Ok(window) = windows.single() else { return };
+    let new_target = match drill.current().and_then(|id| model.work_blocks.get(&id)) {
+        Some(wb) => camera::frame_day_span(window, wb.start_day, wb.start_day + wb.duration_days),
+        None => camera::fit_to_blocks(&model, schedule.plan_id, &windows)
+            .unwrap_or_else(|| camera::home_target(window, today.day)),
+    };
+    let (pos, zoom) = (new_target.pos, new_target.zoom);
+    *target = new_target;
+    // Snap the camera (don't ease): a programmatic reframe must finish instantly
+    // so a double-click to create a block right after maps to the cursor — an
+    // in-progress ease would place the block offset from where you clicked.
+    if let Ok((mut tf, mut proj)) = cam.single_mut() {
+        tf.translation.x = pos.x;
+        tf.translation.y = pos.y;
+        if let Projection::Orthographic(o) = &mut *proj {
+            o.scale = zoom;
+        }
+    }
+}
+
+/// While drilled into a block, draws vertical boundary lines at the parent
+/// block's start and end days, so children placed beyond them read as "outside
+/// the parent" (where the roll-up toggle decides whether the parent grows).
+fn draw_parent_bounds(
+    mut gizmos: Gizmos,
+    drill: Res<schedule::DrillScope>,
+    model: Res<model::Model>,
+    cam_q: Query<(&Transform, &Projection), With<Camera2d>>,
+    windows: Query<&Window>,
+) {
+    let Some(wb) = drill.current().and_then(|id| model.work_blocks.get(&id)) else {
+        return;
+    };
+    let Ok((cam_t, proj)) = cam_q.single() else { return };
+    let Projection::Orthographic(ortho) = proj else { return };
+    let Ok(window) = windows.single() else { return };
+    let half_h = (window.height() * 0.5 * ortho.scale).max(800.0);
+    let y_top = cam_t.translation.y + half_h;
+    let y_bot = cam_t.translation.y - half_h;
+    let color = Color::from(LinearRgba::new(2.4, 1.6, 0.3, 0.5)); // amber, bloomed
+
+    for day in [wb.start_day, wb.start_day + wb.duration_days] {
+        let x = day as f32 * PIXELS_PER_DAY;
+        gizmos.line_2d(Vec2::new(x, y_top), Vec2::new(x, y_bot), color);
+    }
+}
+
 /// On launch, snap the camera to the "Home" view (today at upper-left, main plan
 /// at the top) once `today` is known. Runs a single time; afterwards the user
 /// drives the camera. Snapping (not easing from the origin) avoids an opening
@@ -306,6 +408,18 @@ fn draw_grid(
             line_color
         };
         gizmos.line_2d(Vec2::new(x, y_bottom), Vec2::new(x, y_top), color);
+    }
+
+    // Faint horizontal hints at the row (lane) boundaries, so you can sense where
+    // blocks will snap vertically without a heavy grid. Boundaries sit halfway
+    // between row centers: y = (k + 0.5) * ROW_HEIGHT.
+    let row_hint = Color::srgba(0.45, 0.50, 0.66, 0.05);
+    let rh = constants::ROW_HEIGHT;
+    let k_min = (y_bottom / rh - 0.5).floor() as i32;
+    let k_max = (y_top / rh - 0.5).ceil() as i32;
+    for k in k_min..=k_max {
+        let y = (k as f32 + 0.5) * rh;
+        gizmos.line_2d(Vec2::new(x_left, y), Vec2::new(x_right, y), row_hint);
     }
 
     gizmos.line_2d(
@@ -901,17 +1015,22 @@ fn calendar_ruler_ui(
 /// Renders a fixed top bar containing the brand logo and camera/view navigation
 /// buttons. Using TopBottomPanel reserves space so block labels and side panel
 /// content cannot render behind the controls.
+#[allow(clippy::too_many_arguments)]
 fn top_bar_ui(
     mut contexts: EguiContexts,
     mut target: ResMut<CameraTarget>,
     mut model: ResMut<model::Model>,
     mut schedule: ResMut<schedule::Schedule>,
+    mut drill: ResMut<schedule::DrillScope>,
     windows: Query<&Window>,
     today: Res<schedule::TodayMarker>,
     conn: NonSend<rusqlite::Connection>,
 ) {
     let Ok(ctx) = contexts.ctx_mut() else { return };
     let mut clear_all = false;
+    // Breadcrumb path (block ids) to optionally truncate to, and a rollup toggle.
+    let mut jump_to: Option<usize> = None; // new path length
+    let mut toggle_rollup: Option<model::WorkBlockId> = None;
     egui::TopBottomPanel::top("top_bar")
         .frame(
             egui::Frame::new()
@@ -929,6 +1048,51 @@ fn top_bar_ui(
                 if ui.add(btn).on_hover_text("Fit to view [F]").clicked() {
                     if let Some(new_target) = camera::fit_to_blocks(&model, schedule.plan_id, &windows) {
                         *target = new_target;
+                    }
+                }
+
+                // Drill-in breadcrumb: Plan / Block / Block… Click a crumb to
+                // jump out to that level. A roll-up toggle for the current block.
+                if !drill.path.is_empty() {
+                    ui.separator();
+                    if ui
+                        .selectable_label(false, egui::RichText::new("Plan").color(
+                            egui::Color32::from_rgb(196, 162, 110),
+                        ))
+                        .clicked()
+                    {
+                        jump_to = Some(0);
+                    }
+                    for (i, id) in drill.path.iter().enumerate() {
+                        ui.label(egui::RichText::new("/").color(egui::Color32::from_gray(110)));
+                        let name = model
+                            .work_blocks
+                            .get(id)
+                            .map(|wb| wb.name.clone())
+                            .unwrap_or_else(|| "?".to_string());
+                        let is_last = i + 1 == drill.path.len();
+                        let text = egui::RichText::new(name).color(if is_last {
+                            egui::Color32::from_rgb(232, 234, 244)
+                        } else {
+                            egui::Color32::from_rgb(196, 162, 110)
+                        });
+                        if ui.selectable_label(is_last, text).clicked() {
+                            jump_to = Some(i + 1);
+                        }
+                    }
+                    if let Some(&current) = drill.path.last() {
+                        let mut rolled = model
+                            .work_blocks
+                            .get(&current)
+                            .map(|wb| wb.rollup)
+                            .unwrap_or(false);
+                        if ui
+                            .checkbox(&mut rolled, "Roll up")
+                            .on_hover_text("Size this block from its children")
+                            .changed()
+                        {
+                            toggle_rollup = Some(current);
+                        }
                     }
                 }
 
@@ -966,6 +1130,18 @@ fn top_bar_ui(
     if clear_all {
         let main_id = model.clear_all_work();
         *schedule = schedule::Schedule::new(main_id);
+        if let Err(e) = db::save_model(&conn, &model) {
+            error!("save_model failed: {e}");
+        }
+    }
+    if let Some(len) = jump_to {
+        drill.path.truncate(len);
+    }
+    if let Some(id) = toggle_rollup {
+        if let Some(wb) = model.work_blocks.get_mut(&id) {
+            wb.rollup = !wb.rollup;
+        }
+        model.recompute_rollup(id);
         if let Err(e) = db::save_model(&conn, &model) {
             error!("save_model failed: {e}");
         }

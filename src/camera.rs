@@ -51,6 +51,29 @@ pub fn home_target(window: &Window, today_day: i32) -> CameraTarget {
     }
 }
 
+/// Camera target that frames the day span `[start_day, end_day]` centered, with
+/// generous horizontal margin so there's room to place blocks beyond it (used
+/// when drilling into a block — you see the parent's span plus slack on either
+/// side). Row 0 anchors near the top, like Home.
+pub fn frame_day_span(window: &Window, start_day: i32, end_day: i32) -> CameraTarget {
+    let w = window.width();
+    let h = window.height();
+    let x_min = start_day as f32 * PIXELS_PER_DAY;
+    let x_max = end_day as f32 * PIXELS_PER_DAY;
+    let span = (x_max - x_min).max(PIXELS_PER_DAY);
+    // 1.8 leaves ~45% of the width as slack around the parent's span.
+    const MARGIN: f32 = 1.8;
+    let avail_w = (w - 2.0 * HOME_LEFT_MARGIN).max(1.0);
+    let zoom = ((span / avail_w) * MARGIN).clamp(0.3, 6.0);
+    CameraTarget {
+        zoom,
+        pos: Vec2::new(
+            (x_min + x_max) * 0.5,
+            ROW_HEIGHT * 0.5 - (h * 0.5 - HOME_TOP_MARGIN) * zoom,
+        ),
+    }
+}
+
 /// Reads mouse / trackpad input and updates `CameraTarget`. Must run before
 /// `smooth_camera`.
 ///
@@ -122,8 +145,15 @@ pub fn camera_nav_keys(
     model: Res<Model>,
     schedule: Res<schedule::Schedule>,
     today: Res<schedule::TodayMarker>,
+    name_edit: Res<crate::blocks::NameEditState>,
     windows: Query<&Window>,
 ) {
+    // A rename in progress owns the keyboard — don't let typing a name that
+    // contains 'f' fit-to-view, or 'Home' jump, etc. (`handle_type_to_rename`
+    // runs first and sets this on the same keystroke that opens the editor.)
+    if name_edit.editing.is_some() {
+        return;
+    }
     if egui_ctx
         .ctx_mut()
         .ok()
@@ -156,7 +186,7 @@ pub fn fit_to_blocks(
     let window_w = window.width();
     let window_h = window.height();
 
-    let visible: Vec<_> = schedule::visible_blocks(model, plan_id)
+    let visible: Vec<_> = schedule::visible_blocks(model, plan_id, None)
         .into_iter()
         .filter(|wb| wb.duration_days > 0)
         .collect();
