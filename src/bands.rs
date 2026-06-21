@@ -297,12 +297,22 @@ pub fn draw_band_overlays(
 }
 
 /// Rebuilds lane fills, owned (solid) bars, and all text when the model changes.
-pub fn sync_band_visuals(mut commands: Commands, model: Res<Model>, mut ents: ResMut<BandEntities>) {
-    if !model.is_changed() {
+/// While drilled into a block, the branch lanes are hidden — all band entities
+/// are despawned and nothing is spawned until you return to the plan level.
+pub fn sync_band_visuals(
+    mut commands: Commands,
+    model: Res<Model>,
+    drill: Res<crate::schedule::DrillScope>,
+    mut ents: ResMut<BandEntities>,
+) {
+    if !model.is_changed() && !drill.is_changed() {
         return;
     }
     for e in ents.0.drain(..) {
         commands.entity(e).despawn();
+    }
+    if !drill.path.is_empty() {
+        return; // drilled in: no branch lanes
     }
 
     for (i, band) in layout_bands(&model).into_iter().enumerate() {
@@ -617,13 +627,11 @@ pub fn draw_plan_rename_overlay(
 // ── owned lane-block editing ────────────────────────────────────────────────
 
 /// A lane block under the cursor, with the geometry needed to drag, resize, and
-/// re-derive its row during a move. `owned` distinguishes the branch's own
-/// blocks (editable) from inherited ghosts (selectable + removable only).
+/// detect dependency edges. `owned` distinguishes the branch's own blocks
+/// (editable) from inherited ghosts (selectable + removable only).
 struct LaneHit {
     id: WorkBlockId,
     plan: PlanId,
-    fork_day: Day,
-    row0_y: f32,
     left_x: f32,
     right_x: f32,
     owned: bool,
@@ -643,8 +651,6 @@ fn lane_block_at(model: &Model, world: Vec2) -> Option<LaneHit> {
                 return Some(LaneHit {
                     id: b.id,
                     plan: band.plan_id,
-                    fork_day: band.fork_day,
-                    row0_y: band.row0_y,
                     left_x: b.cx - hw,
                     right_x: b.cx + hw,
                     owned: b.owned,

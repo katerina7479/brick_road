@@ -59,6 +59,16 @@ pub const PALETTE: &[LinearRgba] = &[
     LinearRgba::new(2.40, 1.60, 0.10, 1.0), // gold
 ];
 
+/// The vertical placement of a block bar: `(center_y, height)`. A normal block
+/// is one row tall; a rolled-up parent spanning `row_span` rows covers all of
+/// them (from its top row down to the last), centered over the range.
+pub fn block_extent(wb: &model::WorkBlock) -> (f32, f32) {
+    let span = wb.row_span.max(1) as f32;
+    let center_y = -(wb.row as f32 + (span - 1.0) * 0.5) * ROW_HEIGHT;
+    let height = (span - 1.0) * ROW_HEIGHT + BLOCK_HEIGHT;
+    (center_y, height)
+}
+
 /// The fill color a work block renders with: its explicit `color` if set,
 /// otherwise the palette default for its row. Shared so ghosts in branch
 /// swimlanes can outline in exactly the source block's color.
@@ -119,8 +129,6 @@ pub const BRANCH_PALETTE: &[LinearRgba] = &[
 pub struct NameEditState {
     pub editing: Option<WorkBlockId>,
     pub text_buf: String,
-    /// (block_id, elapsed_secs) of the most recent left-click on a block sprite.
-    last_click: Option<(WorkBlockId, f32)>,
 }
 
 /// Marker: this sprite visualises one ScheduledBlock.
@@ -394,11 +402,12 @@ pub fn sync_block_sprites(
         let x = wb.start_day as f32 * PIXELS_PER_DAY + visual_width * 0.5;
         // Read the live model row (not the cached BlockSprite.row, which only
         // refreshes when the visible set changes) so vertical drags track the
-        // cursor immediately — same as start_day does for x.
-        let y = -(wb.row as f32) * ROW_HEIGHT;
+        // cursor immediately — same as start_day does for x. A rolled-up parent
+        // spans its children's rows (taller bar).
+        let (y, height) = block_extent(wb);
         transform.translation.x = x;
         transform.translation.y = y;
-        sprite.custom_size = Some(Vec2::new(visual_width, BLOCK_HEIGHT));
+        sprite.custom_size = Some(Vec2::new(visual_width, height));
 
         let base = PALETTE[wb.row.rem_euclid(PALETTE.len() as i32) as usize];
         let id = block_sprite.work_block_id;
@@ -621,11 +630,9 @@ pub fn handle_block_selection(
     mut selected_plan: ResMut<crate::SelectedPlan>,
     block_query: Query<(&BlockSprite, &Transform, &Sprite)>,
     name_edit: Res<NameEditState>,
-    mut model: ResMut<model::Model>,
-    conn: NonSend<rusqlite::Connection>,
-    time: Res<Time>,
-    mut last_empty_click: Local<f32>,
+    model: Res<model::Model>,
     dep_drag: Res<DepDragState>,
+    drill: Res<schedule::DrillScope>,
     active_schedule: Res<schedule::Schedule>,
 ) {
     // Yield when a dep-handle drag is in progress.
@@ -659,38 +666,38 @@ pub fn handle_block_selection(
         return;
     };
 
-    // Below the first branch lane is band territory: those clicks belong to the
-    // band handlers (create/select in a branch), never to main. Without this a
-    // lane double-click would also drop a block into main far below row 0.
-    if let Some(top) = crate::bands::bands_top_y(&model) {
-        if world_pos.y <= top {
+    // Branch/plan UI only exists at the plan level; inside a drilled block there
+    // are no lanes or markers, so these guards are skipped.
+    if drill.path.is_empty() {
+        // Below the first branch lane is band territory: those clicks belong to
+        // the band handlers, never to main.
+        if let Some(top) = crate::bands::bands_top_y(&model) {
+            if world_pos.y <= top {
+                return;
+            }
+        }
+
+        // A click on (or near) a branch marker belongs to `handle_branch_selection`.
+        let marker_scale = cam_proj
+            .single()
+            .ok()
+            .and_then(|p| match p {
+                Projection::Orthographic(o) => Some(o.scale),
+                _ => None,
+            })
+            .unwrap_or(1.0);
+        if crate::branch_plan_at_x(
+            &model,
+            active_schedule.plan_id,
+            world_pos.x,
+            6.0 * marker_scale,
+        )
+        .is_some()
+        {
             return;
         }
+        selected_plan.0 = None;
     }
-
-    // A click on (or near) a branch marker belongs to `handle_branch_selection`;
-    // defer to it and don't also select/create a block. Any other click clears
-    // the branch selection, keeping block and branch selection mutually
-    // exclusive so the Delete key is unambiguous.
-    let marker_scale = cam_proj
-        .single()
-        .ok()
-        .and_then(|p| match p {
-            Projection::Orthographic(o) => Some(o.scale),
-            _ => None,
-        })
-        .unwrap_or(1.0);
-    if crate::branch_plan_at_x(
-        &model,
-        active_schedule.plan_id,
-        world_pos.x,
-        6.0 * marker_scale,
-    )
-    .is_some()
-    {
-        return;
-    }
-    selected_plan.0 = None;
 
     // Hit-test against the block sprites.
     let mut clicked: Option<WorkBlockId> = None;
@@ -711,8 +718,6 @@ pub fn handle_block_selection(
     }
 
     if let Some(id) = clicked {
-        // Reset so a later empty-space click doesn't inherit a stale timestamp.
-        *last_empty_click = 0.0;
         // Re-clicking the selected block toggles it off; otherwise select it.
         selected.0 = if Some(id) == selected.0 {
             None
@@ -736,48 +741,122 @@ pub fn handle_block_selection(
         if let Some(dep_id) = nearest_dep_edge(&model, world_pos, 7.0 * scale) {
             selected_dep.0 = Some(dep_id);
             selected.0 = None;
-            *last_empty_click = 0.0;
             return;
         }
         selected_dep.0 = None;
+        // Empty space: deselect. (Double-click-to-create lives in
+        // `handle_canvas_create`.)
+        selected.0 = None;
+    }
+}
 
-        // Empty space: single click deselects, double-click (≤350 ms) creates a block.
-        let now = time.elapsed_secs();
-        let is_double_click = now - *last_empty_click < 0.35;
-        if is_double_click {
-            // Reset so a subsequent third click doesn't trigger another creation.
-            *last_empty_click = 0.0;
-            let raw_start = (world_pos.x / PIXELS_PER_DAY).max(0.0).round() as Day;
-            let branch_min = model
-                .plans
-                .get(&active_schedule.plan_id)
-                .and_then(|p| p.branch_start_day)
-                .unwrap_or(0);
-            let start_day = raw_start.max(branch_min);
-            let new_id = model.create_work_block("New Block");
-            // Spawn at the double-clicked lane; the block stays where you put it.
-            let row = (-world_pos.y / ROW_HEIGHT).round() as i32;
-            if let Some(wb) = model.work_blocks.get_mut(&new_id) {
-                wb.start_day = start_day;
-                wb.duration_days = 5;
-                wb.row = row;
-            }
-            let plan_id = active_schedule.plan_id;
-            if let Some(plan) = model.plans.get_mut(&plan_id) {
-                plan.root_blocks.push(new_id);
-            }
-            // A new block on main links through to existing branches as a ghost
-            // (those whose fork day is at/before its start). No-op off main.
-            model.link_main_block_to_branches(new_id);
-            if let Err(e) = db::save_model(&conn, &model) {
-                error!("save_model failed: {e}");
-            }
-            selected.0 = Some(new_id);
-        } else {
-            *last_empty_click = now;
-            selected.0 = None;
+/// Double-click empty canvas to create a block. At the plan's top level the
+/// block is a new root block (and links through to branches as a ghost); when
+/// drilled into a block, it's created as a child of that block instead.
+#[allow(clippy::too_many_arguments)]
+pub fn handle_canvas_create(
+    mut egui_ctx: EguiContexts,
+    windows: Query<&Window>,
+    camera: Query<(&Camera, &GlobalTransform)>,
+    mouse: Res<ButtonInput<MouseButton>>,
+    time: Res<Time>,
+    name_edit: Res<NameEditState>,
+    dep_drag: Res<DepDragState>,
+    drill: Res<schedule::DrillScope>,
+    active_schedule: Res<schedule::Schedule>,
+    mut selected: ResMut<SelectedBlock>,
+    mut model: ResMut<model::Model>,
+    conn: NonSend<rusqlite::Connection>,
+    block_query: Query<(&BlockSprite, &Transform, &Sprite)>,
+    mut last_click: Local<f32>,
+) {
+    if name_edit.editing.is_some() || dep_drag.from.is_some() {
+        return;
+    }
+    if !mouse.just_pressed(MouseButton::Left) {
+        return;
+    }
+    if let Ok(ctx) = egui_ctx.ctx_mut() {
+        if ctx.is_pointer_over_area() {
+            return;
         }
     }
+    let Ok(window) = windows.single() else { return };
+    let Ok((cam, cam_tr)) = camera.single() else {
+        return;
+    };
+    let Some(cursor) = window.cursor_position() else {
+        return;
+    };
+    let Ok(world_pos) = cam.viewport_to_world_2d(cam_tr, cursor) else {
+        return;
+    };
+
+    // Band territory belongs to the lane handlers — only at the plan level.
+    if drill.current().is_none() {
+        if let Some(top) = crate::bands::bands_top_y(&model) {
+            if world_pos.y <= top {
+                return;
+            }
+        }
+    }
+    // Only empty space — bail if a block is under the cursor.
+    for (_, transform, sprite) in &block_query {
+        let Some(size) = sprite.custom_size else {
+            continue;
+        };
+        let center = transform.translation.truncate();
+        let half = size * 0.5;
+        if world_pos.x >= center.x - half.x
+            && world_pos.x <= center.x + half.x
+            && world_pos.y >= center.y - half.y
+            && world_pos.y <= center.y + half.y
+        {
+            return;
+        }
+    }
+
+    // Require a double-click (≤ 0.35s).
+    let now = time.elapsed_secs();
+    if now - *last_click >= 0.35 {
+        *last_click = now;
+        return;
+    }
+    *last_click = 0.0;
+
+    // Rows are centered on integers, so round picks the lane the cursor is in.
+    // Days are cells starting at the boundary, so floor puts the block in the
+    // cell you clicked (round would jump to the next cell past a cell's midpoint).
+    let row = (-world_pos.y / ROW_HEIGHT).round() as i32;
+    let raw_start = (world_pos.x / PIXELS_PER_DAY).max(0.0).floor() as Day;
+
+    let new_id = if let Some(parent) = drill.current() {
+        // Drilled in: the new block is a child of the current block. Children
+        // default to 1 day (finer-grained detail than the week-default roots).
+        model.add_child_block(parent, "New Block", raw_start.max(0), 1, row)
+    } else {
+        let branch_min = model
+            .plans
+            .get(&active_schedule.plan_id)
+            .and_then(|p| p.branch_start_day)
+            .unwrap_or(0);
+        let id = model.create_work_block("New Block");
+        if let Some(wb) = model.work_blocks.get_mut(&id) {
+            wb.start_day = raw_start.max(branch_min);
+            wb.duration_days = 5;
+            wb.row = row;
+        }
+        if let Some(plan) = model.plans.get_mut(&active_schedule.plan_id) {
+            plan.root_blocks.push(id);
+        }
+        // Link through to existing branches as a ghost. No-op off main.
+        model.link_main_block_to_branches(id);
+        id
+    };
+    if let Err(e) = db::save_model(&conn, &model) {
+        error!("save_model failed: {e}");
+    }
+    selected.0 = Some(new_id);
 }
 
 /// Tracks an in-progress block drag initiated by the user.
@@ -867,6 +946,11 @@ pub fn handle_block_resize(
     // Held: update duration_days so the right edge follows the cursor.
     if mouse.pressed(MouseButton::Left) {
         if let Some(id) = resize.dragging {
+            // Cancel if the block left the view (e.g. drilled away).
+            if !block_query.iter().any(|(bs, _, _)| bs.work_block_id == id) {
+                resize.dragging = None;
+                return;
+            }
             if let Some(wb) = model.work_blocks.get_mut(&id) {
                 let raw_dur = ((world_pos.x - wb.start_day as f32 * PIXELS_PER_DAY)
                     / PIXELS_PER_DAY)
@@ -881,6 +965,10 @@ pub fn handle_block_resize(
     if mouse.just_released(MouseButton::Left) {
         if let Some(id) = resize.dragging.take() {
             schedule::cascade_dependencies(&mut model, id);
+            // Resizing a child may change its parent's rolled-up extent.
+            if let Some(parent) = model.work_blocks.get(&id).and_then(|wb| wb.parent) {
+                model.recompute_rollup(parent);
+            }
             if let Err(e) = db::save_model(&conn, &model) {
                 error!("save_model failed: {e}");
             }
@@ -970,6 +1058,12 @@ pub fn handle_block_drag(
     // Held: slide start_day to follow cursor.
     if mouse.pressed(MouseButton::Left) {
         if let Some((id, offset_px)) = drag.dragging {
+            // Cancel if the block left the view (e.g. a double-click drilled into
+            // it) — never keep moving a block that's no longer on screen.
+            if !block_query.iter().any(|(bs, _, _)| bs.work_block_id == id) {
+                drag.dragging = None;
+                return;
+            }
             let branch_min = model
                 .plans
                 .get(&active_schedule.plan_id)
@@ -997,6 +1091,10 @@ pub fn handle_block_drag(
     if mouse.just_released(MouseButton::Left) {
         if let Some((id, _)) = drag.dragging.take() {
             schedule::cascade_dependencies(&mut model, id);
+            // Moving a child may change its parent's rolled-up extent.
+            if let Some(parent) = model.work_blocks.get(&id).and_then(|wb| wb.parent) {
+                model.recompute_rollup(parent);
+            }
             if let Err(e) = db::save_model(&conn, &model) {
                 error!("save_model failed: {e}");
             }
@@ -1623,20 +1721,23 @@ pub fn handle_dep_drag(
     }
 }
 
-/// Detects double-click on a block sprite and enters inline name-edit mode
-/// by populating `NameEditState`.
+/// Double-click a block to "drill in" — push it onto the drill path so the
+/// timeline shows its children (a mini-plan you edit the same way). Renaming is
+/// now select-then-type (`handle_type_to_rename`), so double-click is free.
 ///
 /// Must run before `handle_block_selection` so the guard there sees the updated
-/// `editing` flag on the same frame the double-click fires.
-pub fn handle_name_edit(
+/// drill state on the same frame.
+pub fn handle_block_drill(
     mut egui_ctx: EguiContexts,
     windows: Query<&Window>,
     camera: Query<(&Camera, &GlobalTransform)>,
     mouse: Res<ButtonInput<MouseButton>>,
     time: Res<Time>,
-    model: Res<model::Model>,
-    mut name_edit: ResMut<NameEditState>,
+    name_edit: Res<NameEditState>,
+    mut drill: ResMut<schedule::DrillScope>,
+    mut selected: ResMut<SelectedBlock>,
     block_query: Query<(&BlockSprite, &Transform, &Sprite)>,
+    mut last_click: Local<Option<(WorkBlockId, f32)>>,
 ) {
     if name_edit.editing.is_some() {
         return;
@@ -1663,7 +1764,6 @@ pub fn handle_name_edit(
 
     let now = time.elapsed_secs();
 
-    // Double-click on a block sprite → enter inline name-edit mode.
     for (block_sprite, transform, sprite) in &block_query {
         let Some(size) = sprite.custom_size else {
             continue;
@@ -1676,23 +1776,83 @@ pub fn handle_name_edit(
             && world_pos.y <= center.y + half.y
         {
             let id = block_sprite.work_block_id;
-            if let Some((last_id, last_time)) = name_edit.last_click {
+            if let Some((last_id, last_time)) = *last_click {
                 if last_id == id && now - last_time < 0.4 {
-                    name_edit.last_click = None;
-                    if let Some(wb) = model.work_blocks.get(&id) {
-                        // Rename the block inline.
-                        name_edit.editing = Some(id);
-                        name_edit.text_buf = wb.name.clone();
-                    }
+                    *last_click = None;
+                    drill.path.push(id);
+                    selected.0 = None; // the old selection isn't in the new view
                     return;
                 }
             }
-            name_edit.last_click = Some((id, now));
+            *last_click = Some((id, now));
             return;
         }
     }
 
-    name_edit.last_click = None;
+    *last_click = None;
+}
+
+/// Escape drills out one level (when not editing a name). Paired with the
+/// breadcrumb in the top bar for jumping multiple levels at once.
+pub fn handle_drill_out(
+    mut egui_ctx: EguiContexts,
+    keyboard: Res<ButtonInput<KeyCode>>,
+    name_edit: Res<NameEditState>,
+    mut drill: ResMut<schedule::DrillScope>,
+) {
+    if name_edit.editing.is_some() {
+        return;
+    }
+    if let Ok(ctx) = egui_ctx.ctx_mut() {
+        if ctx.wants_keyboard_input() {
+            return;
+        }
+    }
+    if keyboard.just_pressed(KeyCode::Escape) && !drill.path.is_empty() {
+        drill.path.pop();
+    }
+}
+
+/// When a block is selected and you start typing a character, begin renaming it
+/// with that character replacing the name (spreadsheet-style). Modifier combos
+/// (Ctrl/Cmd) are ignored so shortcuts don't trigger a rename.
+pub fn handle_type_to_rename(
+    mut egui_ctx: EguiContexts,
+    selected: Res<SelectedBlock>,
+    keyboard: Res<ButtonInput<KeyCode>>,
+    mut key_events: MessageReader<bevy::input::keyboard::KeyboardInput>,
+    mut name_edit: ResMut<NameEditState>,
+) {
+    if name_edit.editing.is_some() {
+        key_events.clear();
+        return;
+    }
+    if let Ok(ctx) = egui_ctx.ctx_mut() {
+        if ctx.wants_keyboard_input() {
+            key_events.clear();
+            return;
+        }
+    }
+    let Some(id) = selected.0 else {
+        key_events.clear();
+        return;
+    };
+    let modifier = keyboard.any_pressed([
+        KeyCode::ControlLeft,
+        KeyCode::ControlRight,
+        KeyCode::SuperLeft,
+        KeyCode::SuperRight,
+    ]);
+    for ev in key_events.read() {
+        if !ev.state.is_pressed() || modifier {
+            continue;
+        }
+        if let bevy::input::keyboard::Key::Character(s) = &ev.logical_key {
+            name_edit.editing = Some(id);
+            name_edit.text_buf = s.to_string();
+            return;
+        }
+    }
 }
 
 /// Renders an egui `TextEdit` overlay anchored to the editing block's screen
@@ -1721,12 +1881,12 @@ pub fn draw_name_edit_overlay(
         return;
     };
 
-    // Locate the block sprite's screen position to anchor the overlay.
-    let mut screen_pos = egui::pos2(50.0, 200.0);
+    // Center the field on the block being renamed (fall back near the corner).
+    let mut center = egui::pos2(80.0, 120.0);
     for (bs, transform) in &block_query {
         if bs.work_block_id == edit_id {
             if let Ok(vp) = camera.world_to_viewport(camera_transform, transform.translation) {
-                screen_pos = egui::pos2(vp.x, vp.y - 10.0);
+                center = egui::pos2(vp.x, vp.y);
             }
             break;
         }
@@ -1742,19 +1902,29 @@ pub fn draw_name_edit_overlay(
     let mut commit = false;
 
     if !escaped && !entered {
+        const W: f32 = 150.0;
         egui::Area::new(egui::Id::new("name_edit_overlay"))
-            .fixed_pos(screen_pos)
+            .fixed_pos(egui::pos2(center.x - W * 0.5, center.y - 12.0))
             .show(ctx, |ui| {
-                let response = ui.add(
-                    egui::TextEdit::singleline(&mut name_edit.text_buf)
-                        .min_size(egui::Vec2::new(120.0, 20.0)),
-                );
-                response.request_focus();
-                // Fallback: commit if focus is lost through any other means
-                // (Tab, clicking outside the overlay, etc.).
-                if response.lost_focus() {
-                    commit = true;
-                }
+                egui::Frame::new()
+                    .fill(egui::Color32::from_rgb(18, 20, 28))
+                    .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(120, 160, 235)))
+                    .corner_radius(4.0)
+                    .inner_margin(egui::Margin::symmetric(6, 3))
+                    .show(ui, |ui| {
+                        let response = ui.add(
+                            egui::TextEdit::singleline(&mut name_edit.text_buf)
+                                .desired_width(W)
+                                .frame(false)
+                                .font(egui::FontId::proportional(13.0))
+                                .text_color(egui::Color32::from_rgb(232, 234, 244)),
+                        );
+                        response.request_focus();
+                        // Commit if focus is lost (Tab, click outside, etc.).
+                        if response.lost_focus() {
+                            commit = true;
+                        }
+                    });
             });
     } else if entered {
         commit = true;
@@ -2212,10 +2382,15 @@ pub fn draw_create_mode_overlay(
 pub fn draw_block_tooltip(
     mut egui_ctx: EguiContexts,
     model: Res<model::Model>,
+    name_edit: Res<NameEditState>,
     windows: Query<&Window>,
     camera: Query<(&Camera, &GlobalTransform), With<Camera2d>>,
     block_q: Query<(&BlockSprite, &Transform, &Sprite)>,
 ) {
+    // Don't clutter an inline rename with the hover stats popup.
+    if name_edit.editing.is_some() {
+        return;
+    }
     let Ok(ctx) = egui_ctx.ctx_mut() else { return };
     if ctx.is_pointer_over_area() {
         return;
