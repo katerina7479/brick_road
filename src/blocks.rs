@@ -862,8 +862,11 @@ pub fn handle_canvas_create(
 /// Tracks an in-progress block drag initiated by the user.
 #[derive(Resource, Default)]
 pub struct DragState {
-    /// The block being dragged and the cursor's x-offset from the block's left edge (pixels).
-    dragging: Option<(WorkBlockId, f32)>,
+    /// `(block, x-offset-from-left-edge px, grab-row-delta)`. The row delta is
+    /// `block.row − cursor_row` at grab time, so the block keeps its row when you
+    /// click without moving (important for tall multi-row roll-up parents — a
+    /// click on the lower part must not snap the whole block to that row).
+    dragging: Option<(WorkBlockId, f32, i32)>,
 }
 
 /// Tracks an in-progress right-edge resize drag.
@@ -991,7 +994,6 @@ pub fn handle_block_drag(
     camera: Query<(&Camera, &GlobalTransform)>,
     mouse: Res<ButtonInput<MouseButton>>,
     mut drag: ResMut<DragState>,
-    mut selected: ResMut<SelectedBlock>,
     mut model: ResMut<model::Model>,
     conn: NonSend<rusqlite::Connection>,
     block_query: Query<(&BlockSprite, &Transform, &Sprite)>,
@@ -1041,14 +1043,17 @@ pub fn handle_block_drag(
                 && world_pos.y <= center.y + half.y
             {
                 let id = block_sprite.work_block_id;
-                let start_px = model
+                let (start_px, block_row) = model
                     .work_blocks
                     .get(&id)
-                    .map(|wb| wb.start_day as f32 * PIXELS_PER_DAY)
-                    .unwrap_or(0.0);
-                // Offset preserves where within the block the user grabbed.
-                drag.dragging = Some((id, world_pos.x - start_px));
-                selected.0 = Some(id);
+                    .map(|wb| (wb.start_day as f32 * PIXELS_PER_DAY, wb.row))
+                    .unwrap_or((0.0, 0));
+                let cursor_row = (-world_pos.y / ROW_HEIGHT).round() as i32;
+                // Offsets preserve where within the block the user grabbed, in x
+                // and in rows — so a click without dragging never moves it.
+                drag.dragging = Some((id, world_pos.x - start_px, block_row - cursor_row));
+                // Selection is owned by handle_block_selection (which toggles on
+                // re-click); don't re-select here or a second click can't deselect.
                 break;
             }
         }
@@ -1057,7 +1062,7 @@ pub fn handle_block_drag(
 
     // Held: slide start_day to follow cursor.
     if mouse.pressed(MouseButton::Left) {
-        if let Some((id, offset_px)) = drag.dragging {
+        if let Some((id, offset_px, grab_row_delta)) = drag.dragging {
             // Cancel if the block left the view (e.g. a double-click drilled into
             // it) — never keep moving a block that's no longer on screen.
             if !block_query.iter().any(|(bs, _, _)| bs.work_block_id == id) {
@@ -1076,9 +1081,10 @@ pub fn handle_block_drag(
             // violation; the offending edge just turns red. (Only >= 0 / the
             // fork day are enforced.)
             let new_start = new_start.max(branch_min);
-            // Vertical drag snaps the block to whichever lane the cursor is over
-            // (negative rows sit above the baseline).
-            let new_row = (-world_pos.y / ROW_HEIGHT).round() as i32;
+            // Row follows the cursor but offset by where you grabbed, so a tall
+            // block keeps its top row when clicked without moving.
+            let cursor_row = (-world_pos.y / ROW_HEIGHT).round() as i32;
+            let new_row = cursor_row + grab_row_delta;
             if let Some(wb) = model.work_blocks.get_mut(&id) {
                 wb.start_day = new_start;
                 wb.row = new_row;
@@ -1089,7 +1095,7 @@ pub fn handle_block_drag(
 
     // Release: cascade dependencies and persist.
     if mouse.just_released(MouseButton::Left) {
-        if let Some((id, _)) = drag.dragging.take() {
+        if let Some((id, _, _)) = drag.dragging.take() {
             schedule::cascade_dependencies(&mut model, id);
             // Moving a child may change its parent's rolled-up extent.
             if let Some(parent) = model.work_blocks.get(&id).and_then(|wb| wb.parent) {
@@ -1819,11 +1825,13 @@ pub fn handle_drill_out(
 pub fn handle_type_to_rename(
     mut egui_ctx: EguiContexts,
     selected: Res<SelectedBlock>,
+    lane_selected: Res<crate::bands::LaneSelection>,
     keyboard: Res<ButtonInput<KeyCode>>,
     mut key_events: MessageReader<bevy::input::keyboard::KeyboardInput>,
     mut name_edit: ResMut<NameEditState>,
+    mut lane_rename: ResMut<crate::bands::LaneBlockRename>,
 ) {
-    if name_edit.editing.is_some() {
+    if name_edit.editing.is_some() || lane_rename.editing.is_some() {
         key_events.clear();
         return;
     }
@@ -1833,7 +1841,10 @@ pub fn handle_type_to_rename(
             return;
         }
     }
-    let Some(id) = selected.0 else {
+    // A selected main block renames via the main overlay; a selected lane block
+    // via the lane overlay. Exactly one is selected at a time.
+    let target = selected.0.map(|id| (id, false)).or_else(|| lane_selected.0.map(|(id, _)| (id, true)));
+    let Some((id, is_lane)) = target else {
         key_events.clear();
         return;
     };
@@ -1848,8 +1859,13 @@ pub fn handle_type_to_rename(
             continue;
         }
         if let bevy::input::keyboard::Key::Character(s) = &ev.logical_key {
-            name_edit.editing = Some(id);
-            name_edit.text_buf = s.to_string();
+            if is_lane {
+                lane_rename.editing = Some(id);
+                lane_rename.buf = s.to_string();
+            } else {
+                name_edit.editing = Some(id);
+                name_edit.text_buf = s.to_string();
+            }
             return;
         }
     }

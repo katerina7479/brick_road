@@ -808,6 +808,7 @@ pub fn handle_lane_block_edit(
     mut rename: ResMut<LaneBlockRename>,
     mut main_selected: ResMut<crate::blocks::SelectedBlock>,
     mut selected_dep: ResMut<crate::blocks::SelectedDependency>,
+    mut drill: ResMut<crate::schedule::DrillScope>,
     dep_drag: Res<LaneDepDrag>,
 ) {
     if rename.editing.is_some() || dep_drag.from.is_some() {
@@ -834,27 +835,23 @@ pub fn handle_lane_block_edit(
             main_selected.0 = None;
             selected_dep.0 = None;
 
-            // Ghosts are read-only — they track main, so no drag/resize/rename.
-            if !hit.owned {
-                rename.last_click = None;
-                return;
-            }
-
-            // Double-click an owned block → rename; otherwise begin a drag.
+            // Double-click any lane block → drill into it (edit its children),
+            // matching main. Renaming is select-then-type.
             let now = time.elapsed_secs();
             let double =
                 matches!(rename.last_click, Some((id, t)) if id == hit.id && now - t < 0.4);
             if double {
-                rename.editing = Some(hit.id);
-                rename.buf = model
-                    .work_blocks
-                    .get(&hit.id)
-                    .map(|wb| wb.name.clone())
-                    .unwrap_or_default();
+                drill.path.push(hit.id);
+                selection.0 = None; // the old selection isn't in the new view
                 rename.last_click = None;
                 return;
             }
             rename.last_click = Some((hit.id, now));
+
+            // Ghosts are read-only otherwise — they track main, so no drag/resize.
+            if !hit.owned {
+                return;
+            }
 
             let mode = if (world.x - hit.right_x).abs() <= EDGE_GRAB_PX {
                 LaneDragMode::Resize
