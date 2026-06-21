@@ -53,10 +53,6 @@ pub struct WorkBlock {
     /// bar). When `false`, the block keeps its own timeline and children sit
     /// inside it without resizing it. Per-block toggle; ignored for leaf blocks.
     pub rollup: bool,
-    /// How many rows this block occupies vertically. `1` for an ordinary block;
-    /// a rolled-up parent whose children span several rows takes their full row
-    /// span so it visually covers all of them. Computed in roll-up; otherwise 1.
-    pub row_span: i32,
 }
 
 /// A named t-shirt size that maps a label (e.g. "M") to a day count.
@@ -212,7 +208,6 @@ impl Model {
                 priority: 1,
                 t_shirt_size: None,
                 rollup: false,
-                row_span: 1,
             },
         );
         id
@@ -360,29 +355,13 @@ impl Model {
                         .map(|wb| wb.start_day + wb.duration_days)
                         .max()
                         .unwrap_or(0);
-                    // Vertical span: a rolled-up parent covers the full row range
-                    // of its children (taking a child's own row_span into account
-                    // for deeper nesting).
-                    let min_row = kids
-                        .iter()
-                        .filter_map(|k| self.work_blocks.get(k))
-                        .map(|wb| wb.row)
-                        .min()
-                        .unwrap_or(0);
-                    let max_row = kids
-                        .iter()
-                        .filter_map(|k| self.work_blocks.get(k))
-                        .map(|wb| wb.row + wb.row_span - 1)
-                        .max()
-                        .unwrap_or(0);
+                    // A rolled-up parent's time extent is its children's; its row,
+                    // however, belongs to its own level's resource axis (children
+                    // live on a different, independent axis) and is left untouched.
                     if let Some(wb) = self.work_blocks.get_mut(&id) {
                         wb.start_day = start;
                         wb.duration_days = (end - start).max(1);
-                        wb.row = min_row;
-                        wb.row_span = (max_row - min_row + 1).max(1);
                     }
-                } else if let Some(wb) = self.work_blocks.get_mut(&id) {
-                    wb.row_span = 1;
                 }
             }
             current = self.work_blocks.get(&id).and_then(|wb| wb.parent);
@@ -865,16 +844,18 @@ mod tests {
     }
 
     #[test]
-    fn rollup_spans_children_rows() {
-        // Children on rows 0 and 2 → the rolled-up parent covers rows 0..2
-        // (row 0, row_span 3) so it visually spans all of them.
+    fn rollup_keeps_parent_row_independent_of_children() {
+        // Children live on a different resource axis than the parent, so rolling
+        // up spans the parent in *time* but never moves it off its own row.
         let mut m = Model::default();
         let p = m.create_work_block("p");
         m.work_blocks.get_mut(&p).unwrap().rollup = true;
-        m.add_child_block(p, "top", 0, 3, 0);
-        m.add_child_block(p, "bottom", 4, 3, 2);
-        assert_eq!(m.work_blocks[&p].row, 0);
-        assert_eq!(m.work_blocks[&p].row_span, 3);
+        m.work_blocks.get_mut(&p).unwrap().row = 1;
+        m.add_child_block(p, "top", 0, 3, 0); // [0, 3)
+        m.add_child_block(p, "bottom", 4, 3, 2); // [4, 7)
+        assert_eq!(m.work_blocks[&p].row, 1); // unchanged
+        assert_eq!(m.work_blocks[&p].start_day, 0);
+        assert_eq!(m.work_blocks[&p].duration_days, 7);
     }
 
     #[test]

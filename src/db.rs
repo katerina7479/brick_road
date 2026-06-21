@@ -35,7 +35,6 @@ pub fn create_tables(conn: &Connection) -> Result<()> {
         "ALTER TABLE work_blocks ADD COLUMN block_row INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE work_blocks ADD COLUMN parent_id INTEGER",
         "ALTER TABLE work_blocks ADD COLUMN rollup INTEGER NOT NULL DEFAULT 0",
-        "ALTER TABLE work_blocks ADD COLUMN row_span INTEGER NOT NULL DEFAULT 1",
         "ALTER TABLE plans ADD COLUMN branch_start_day INTEGER",
         "ALTER TABLE dependencies ADD COLUMN plan_id INTEGER",
     ] {
@@ -59,6 +58,7 @@ pub fn create_tables(conn: &Connection) -> Result<()> {
         "ALTER TABLE work_blocks DROP COLUMN estimate_optimistic",
         "ALTER TABLE work_blocks DROP COLUMN estimate_pessimistic",
         "ALTER TABLE work_blocks DROP COLUMN estimate_confidence",
+        "ALTER TABLE work_blocks DROP COLUMN row_span",
     ] {
         match conn.execute_batch(sql) {
             Ok(()) => {}
@@ -159,8 +159,8 @@ pub fn save_model(conn: &Connection, model: &Model) -> Result<()> {
             "INSERT INTO work_blocks
                  (id, name,
                   start_day, duration_days, color_r, color_g, color_b, description, priority,
-                  t_shirt_size, block_row, parent_id, rollup, row_span)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+                  t_shirt_size, block_row, parent_id, rollup)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
              ON CONFLICT(id) DO UPDATE SET
                  name = excluded.name,
                  start_day = excluded.start_day,
@@ -173,8 +173,7 @@ pub fn save_model(conn: &Connection, model: &Model) -> Result<()> {
                  t_shirt_size = excluded.t_shirt_size,
                  block_row = excluded.block_row,
                  parent_id = excluded.parent_id,
-                 rollup = excluded.rollup,
-                 row_span = excluded.row_span",
+                 rollup = excluded.rollup",
             (
                 wb.id.0 as i64,
                 &wb.name,
@@ -189,7 +188,6 @@ pub fn save_model(conn: &Connection, model: &Model) -> Result<()> {
                 wb.row as i64,
                 wb.parent.map(|p| p.0 as i64),
                 wb.rollup as i64,
-                wb.row_span as i64,
             ),
         )?;
     }
@@ -442,7 +440,7 @@ pub fn load_model(conn: &Connection) -> Result<Model> {
         let mut stmt = conn.prepare(
             "SELECT id, name,
                     start_day, duration_days, color_r, color_g, color_b, description, priority,
-                    t_shirt_size, block_row, parent_id, rollup, row_span
+                    t_shirt_size, block_row, parent_id, rollup
              FROM work_blocks",
         )?;
         let rows = stmt.query_map([], |row| {
@@ -460,7 +458,6 @@ pub fn load_model(conn: &Connection) -> Result<Model> {
                 row.get::<_, i64>(10)?,
                 row.get::<_, Option<i64>>(11)?,
                 row.get::<_, i64>(12)?,
-                row.get::<_, i64>(13)?,
             ))
         })?;
         for row in rows {
@@ -478,7 +475,6 @@ pub fn load_model(conn: &Connection) -> Result<Model> {
                 block_row,
                 parent_id,
                 rollup,
-                row_span,
             ) = row?;
             let color = match (cr, cg, cb) {
                 (Some(r), Some(g), Some(b)) => Some([r as f32, g as f32, b as f32]),
@@ -499,7 +495,6 @@ pub fn load_model(conn: &Connection) -> Result<Model> {
                     priority: priority.clamp(0, 3) as u8,
                     t_shirt_size,
                     rollup: rollup != 0,
-                    row_span: (row_span as i32).max(1),
                 },
             );
         }
@@ -1192,8 +1187,7 @@ CREATE TABLE IF NOT EXISTS work_blocks (
     color_g              REAL,
     color_b              REAL,
     parent_id            INTEGER,
-    rollup               INTEGER NOT NULL DEFAULT 0,
-    row_span             INTEGER NOT NULL DEFAULT 1
+    rollup               INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS dependencies (

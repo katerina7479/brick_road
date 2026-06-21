@@ -59,14 +59,11 @@ pub const PALETTE: &[LinearRgba] = &[
     LinearRgba::new(2.40, 1.60, 0.10, 1.0), // gold
 ];
 
-/// The vertical placement of a block bar: `(center_y, height)`. A normal block
-/// is one row tall; a rolled-up parent spanning `row_span` rows covers all of
-/// them (from its top row down to the last), centered over the range.
+/// The vertical placement of a block bar: `(center_y, height)`. Every block —
+/// leaf or rolled-up parent — occupies exactly one row on its own level's
+/// resource axis.
 pub fn block_extent(wb: &model::WorkBlock) -> (f32, f32) {
-    let span = wb.row_span.max(1) as f32;
-    let center_y = -(wb.row as f32 + (span - 1.0) * 0.5) * ROW_HEIGHT;
-    let height = (span - 1.0) * ROW_HEIGHT + BLOCK_HEIGHT;
-    (center_y, height)
+    (-(wb.row as f32) * ROW_HEIGHT, BLOCK_HEIGHT)
 }
 
 /// The fill color a work block renders with: its explicit `color` if set,
