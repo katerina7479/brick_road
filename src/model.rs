@@ -169,6 +169,36 @@ pub struct Plan {
     /// clamped to ≥ d (the working-day offset of "today" at branch creation).
     /// `None` for the baseline plan, which may contain historical blocks.
     pub branch_start_day: Option<Day>,
+    /// User-given names for resource rows, keyed by drill scope: `None` is the
+    /// plan's top level; `Some(block)` is the rows seen when drilled into that
+    /// block. Each scope owns an independent, per-plan ordered list (index =
+    /// row number). A row with no entry falls back to a default label.
+    pub row_names: HashMap<Option<WorkBlockId>, Vec<String>>,
+}
+
+impl Plan {
+    /// The resource-row name for `row` within `scope` (the drilled-into block,
+    /// or `None` at top level), or `None` if the user hasn't named it.
+    pub fn row_name(&self, scope: Option<WorkBlockId>, row: i32) -> Option<&str> {
+        self.row_names
+            .get(&scope)
+            .and_then(|names| usize::try_from(row).ok().and_then(|i| names.get(i)))
+            .map(|s| s.as_str())
+            .filter(|s| !s.is_empty())
+    }
+
+    /// Sets the name for `row` within `scope`, growing the list with empty
+    /// placeholders as needed so `row` is addressable.
+    pub fn set_row_name(&mut self, scope: Option<WorkBlockId>, row: i32, name: String) {
+        let Ok(idx) = usize::try_from(row) else {
+            return;
+        };
+        let names = self.row_names.entry(scope).or_default();
+        if names.len() <= idx {
+            names.resize(idx + 1, String::new());
+        }
+        names[idx] = name;
+    }
 }
 
 /// Central data store. All entities are keyed by their ID type.
@@ -283,6 +313,7 @@ impl Model {
                 root_blocks: vec![],
                 allocations: vec![],
                 branch_start_day,
+                row_names: HashMap::new(),
             },
         );
         id
