@@ -152,7 +152,6 @@ pub fn camera_nav_keys(
     keyboard: Res<ButtonInput<KeyCode>>,
     mut target: ResMut<CameraTarget>,
     model: Res<Model>,
-    schedule: Res<schedule::Schedule>,
     today: Res<schedule::TodayMarker>,
     name_edit: Res<crate::blocks::NameEditState>,
     windows: Query<&Window>,
@@ -175,7 +174,9 @@ pub fn camera_nav_keys(
         *target = home_target(window, today.day, &model.calendar);
     }
     if keyboard.just_pressed(KeyCode::KeyF) {
-        if let Some(new_target) = fit_to_blocks(&model, schedule.plan_id, &windows) {
+        if let Some(new_target) =
+            model.main_plan_id().and_then(|p| fit_to_blocks(&model, p, &windows))
+        {
             *target = new_target;
         }
     }

@@ -289,7 +289,6 @@ fn at_plan_level(drill: Res<schedule::DrillScope>) -> bool {
 fn frame_on_drill(
     drill: Res<schedule::DrillScope>,
     model: Res<model::Model>,
-    schedule: Res<schedule::Schedule>,
     today: Res<schedule::TodayMarker>,
     windows: Query<&Window>,
     mut target: ResMut<CameraTarget>,
@@ -306,7 +305,9 @@ fn frame_on_drill(
             wb.start_day + wb.duration_days,
             &model.calendar,
         ),
-        None => camera::fit_to_blocks(&model, schedule.plan_id, &windows)
+        None => model
+            .main_plan_id()
+            .and_then(|p| camera::fit_to_blocks(&model, p, &windows))
             .unwrap_or_else(|| camera::home_target(window, today.day, &model.calendar)),
     };
     let (pos, zoom) = (new_target.pos, new_target.zoom);
@@ -691,10 +692,10 @@ fn setup_demo_schedule(mut model: ResMut<model::Model>, mut commands: Commands) 
             .cloned();
         if let Some(plan) = default_plan {
             let graph = graph::build_graph(&model, &plan);
-            if let Ok(sched) = schedule::forward_pass(&model, &plan, &graph) {
+            if let Ok(sched) = schedule::forward_pass(&model, &graph) {
                 commands.insert_resource(sched);
             } else {
-                commands.insert_resource(schedule::Schedule::new(plan.id));
+                commands.insert_resource(schedule::Schedule::default());
             }
         }
         return;
@@ -726,7 +727,7 @@ fn setup_demo_schedule(mut model: ResMut<model::Model>, mut commands: Commands) 
     };
 
     let dep_graph = graph::build_graph(&model, &plan);
-    if let Ok(sched) = schedule::forward_pass(&model, &plan, &dep_graph) {
+    if let Ok(sched) = schedule::forward_pass(&model, &dep_graph) {
         for sb in sched.blocks.values() {
             if let Some(wb) = model.work_blocks.get_mut(&sb.work_block_id) {
                 wb.start_day = sb.start_day;
@@ -794,7 +795,6 @@ fn handle_fork_hover(
 fn draw_branch_markers(
     mut gizmos: Gizmos,
     model: Res<model::Model>,
-    schedule: Res<schedule::Schedule>,
     selected_plan: Res<SelectedPlan>,
     fork: Res<ForkHoverState>,
     cam_q: Query<(&Transform, &Projection), With<Camera2d>>,
@@ -809,13 +809,13 @@ fn draw_branch_markers(
     let Ok(window) = windows.single() else { return };
     let half_h = (window.height() * 0.5 * ortho.scale).max(800.0);
 
-    let active_id = schedule.plan_id;
+    let active_id = model.main_plan_id();
 
     // Branch-point markers for non-active plans.
     let mut branch_plans: Vec<&model::Plan> = model
         .plans
         .values()
-        .filter(|p| p.id != active_id && p.branch_start_day.is_some())
+        .filter(|p| Some(p.id) != active_id && p.branch_start_day.is_some())
         .collect();
     branch_plans.sort_by_key(|p| p.id.0);
 
@@ -1818,7 +1818,10 @@ fn top_bar_ui(
                     .fill(egui::Color32::TRANSPARENT)
                     .stroke(egui::Stroke::NONE);
                 if ui.add(btn).on_hover_text("Fit to view [F]").clicked() {
-                    if let Some(new_target) = camera::fit_to_blocks(&model, schedule.plan_id, &windows) {
+                    if let Some(new_target) = model
+                        .main_plan_id()
+                        .and_then(|p| camera::fit_to_blocks(&model, p, &windows))
+                    {
                         *target = new_target;
                     }
                 }
@@ -1885,7 +1888,10 @@ fn top_bar_ui(
                         .on_hover_text("Fit to view [F]")
                         .clicked()
                     {
-                        if let Some(new_target) = camera::fit_to_blocks(&model, schedule.plan_id, &windows) {
+                        if let Some(new_target) = model
+                            .main_plan_id()
+                            .and_then(|p| camera::fit_to_blocks(&model, p, &windows))
+                        {
                             *target = new_target;
                         }
                     }
@@ -1921,8 +1927,8 @@ fn top_bar_ui(
         });
 
     if clear_all {
-        let main_id = model.clear_all_work();
-        *schedule = schedule::Schedule::new(main_id);
+        model.clear_all_work();
+        *schedule = schedule::Schedule::default();
         if let Err(e) = db::save_model(&conn, &model) {
             error!("save_model failed: {e}");
         }
@@ -2001,7 +2007,6 @@ fn handle_branch_selection(
     mouse: Res<ButtonInput<MouseButton>>,
     keyboard: Res<ButtonInput<KeyCode>>,
     model: Res<model::Model>,
-    schedule: Res<schedule::Schedule>,
     mut selected_plan: ResMut<SelectedPlan>,
     mut selected_block: ResMut<blocks::SelectedBlock>,
     mut selected_dep: ResMut<blocks::SelectedDependency>,
@@ -2042,8 +2047,11 @@ fn handle_branch_selection(
     // fall back to the nearest marker by x for clicks on the line above the
     // lanes (in the main timeline area).
     let hit = 6.0 * scale;
-    let plan = bands::plan_marker_in_lane_at(&model, world, hit)
-        .or_else(|| branch_plan_at_x(&model, schedule.plan_id, world.x, hit));
+    let plan = bands::plan_marker_in_lane_at(&model, world, hit).or_else(|| {
+        model
+            .main_plan_id()
+            .and_then(|p| branch_plan_at_x(&model, p, world.x, hit))
+    });
     if let Some(id) = plan {
         selected_plan.0 = Some(id);
         selected_block.0 = None;

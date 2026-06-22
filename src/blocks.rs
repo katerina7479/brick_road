@@ -488,7 +488,7 @@ pub fn sync_compare_overlays(
     };
 
     let cmp_graph = graph::build_graph(&model, &cmp_plan);
-    let Ok(cmp_sched) = schedule::forward_pass(&model, &cmp_plan, &cmp_graph) else {
+    let Ok(cmp_sched) = schedule::forward_pass(&model, &cmp_graph) else {
         return;
     };
 
@@ -665,7 +665,6 @@ pub fn handle_block_selection(
     model: Res<model::Model>,
     dep_drag: Res<DepDragState>,
     drill: Res<schedule::DrillScope>,
-    active_schedule: Res<schedule::Schedule>,
 ) {
     // Yield when a dep-handle drag is in progress.
     if dep_drag.from.is_some() {
@@ -718,14 +717,9 @@ pub fn handle_block_selection(
                 _ => None,
             })
             .unwrap_or(1.0);
-        if crate::branch_plan_at_x(
-            &model,
-            active_schedule.plan_id,
-            world_pos.x,
-            6.0 * marker_scale,
-        )
-        .is_some()
-        {
+        if model.main_plan_id().is_some_and(|p| {
+            crate::branch_plan_at_x(&model, p, world_pos.x, 6.0 * marker_scale).is_some()
+        }) {
             return;
         }
         selected_plan.0 = None;
@@ -795,7 +789,6 @@ pub fn handle_canvas_create(
     name_edit: Res<NameEditState>,
     dep_drag: Res<DepDragState>,
     drill: Res<schedule::DrillScope>,
-    active_schedule: Res<schedule::Schedule>,
     mut selected: ResMut<SelectedBlock>,
     mut model: ResMut<model::Model>,
     conn: NonSend<rusqlite::Connection>,
@@ -862,7 +855,9 @@ pub fn handle_canvas_create(
     let row = (-world_pos.y / ROW_HEIGHT).round() as i32;
     let raw_start = crate::calendar::x_to_day(world_pos.x, &model.calendar).max(0);
 
-    let plan_id = active_schedule.plan_id;
+    let Some(plan_id) = model.main_plan_id() else {
+        return;
+    };
     let new_id = if let Some(parent) = drill.current() {
         // Drilled in: the new block is a child of the current block. Children
         // default to 1 day (finer-grained detail than the week-default roots).
@@ -1036,7 +1031,6 @@ pub fn handle_block_drag(
     block_query: Query<(&BlockSprite, &Transform, &Sprite)>,
     resize: Res<ResizeDragState>,
     dep_drag: Res<DepDragState>,
-    active_schedule: Res<schedule::Schedule>,
 ) {
     if dep_drag.from.is_some() {
         drag.dragging = None;
@@ -1085,7 +1079,10 @@ pub fn handle_block_drag(
                     .get(&id)
                     .map(|wb| crate::calendar::day_to_x(wb.start_day, &model.calendar))
                     .unwrap_or(0.0);
-                let block_row = model.block_row(active_schedule.plan_id, id);
+                let block_row = model
+                    .main_plan_id()
+                    .map(|p| model.block_row(p, id))
+                    .unwrap_or(0);
                 let cursor_row = (-world_pos.y / ROW_HEIGHT).round() as i32;
                 // Offsets preserve where within the block the user grabbed, in x
                 // and in rows — so a click without dragging never moves it.
@@ -1108,8 +1105,8 @@ pub fn handle_block_drag(
                 return;
             }
             let branch_min = model
-                .plans
-                .get(&active_schedule.plan_id)
+                .main_plan_id()
+                .and_then(|p| model.plans.get(&p))
                 .and_then(|p| p.branch_start_day)
                 .unwrap_or(0);
             let new_start = crate::calendar::x_to_day(
@@ -1128,7 +1125,9 @@ pub fn handle_block_drag(
             if let Some(wb) = model.work_blocks.get_mut(&id) {
                 wb.start_day = new_start;
             }
-            model.set_block_row(active_schedule.plan_id, id, new_row);
+            if let Some(p) = model.main_plan_id() {
+                model.set_block_row(p, id, new_row);
+            }
         }
         return;
     }
@@ -2330,7 +2329,6 @@ pub fn draw_create_mode_overlay(
     mut state: ResMut<CreateModeState>,
     mut model: ResMut<model::Model>,
     conn: NonSend<rusqlite::Connection>,
-    active_schedule: Res<schedule::Schedule>,
 ) {
     if !state.active {
         return;
@@ -2372,8 +2370,10 @@ pub fn draw_create_mode_overlay(
     if create_block {
         let name = state.text_buf.trim().to_string();
         if !name.is_empty() {
+            let Some(plan_id) = model.main_plan_id() else {
+                return;
+            };
             let new_id = model.create_work_block(name);
-            let plan_id = active_schedule.plan_id;
             // Place the new block at branch_min so it appears immediately on the timeline.
             // For baseline plans (branch_start_day=None) branch_min is 0.0 — day 0 is the
             // correct default since the user can drag to reposition. Leaving duration_days=0
