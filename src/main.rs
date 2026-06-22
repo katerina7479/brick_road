@@ -45,7 +45,6 @@ fn main() {
         .insert_resource(blocks::SizePickerState::default())
         .insert_resource(schedule::VisibleBlocks::default())
         .insert_resource(schedule::DrillScope::default())
-        .insert_resource(analysis::ScheduleAnalysis::default())
         .insert_resource(schedule::TodayMarker::default())
         .insert_resource(blocks::BlockSpriteMap::default())
         .insert_resource(blocks::ComparePlanState::default())
@@ -62,10 +61,6 @@ fn main() {
         .insert_resource(bands::LaneDepDrag::default())
         .add_systems(Startup, (setup_db, setup_camera))
         .add_systems(Startup, setup_demo_schedule.after(setup_db))
-        .add_systems(
-            PostStartup,
-            update_analysis.before(blocks::reconcile_block_sprites),
-        )
         .add_systems(
             PostStartup,
             schedule::update_visible_blocks.before(blocks::reconcile_block_sprites),
@@ -146,7 +141,6 @@ fn main() {
         .add_systems(Update, sync_total_duration)
         .add_systems(Update, sync_weekend_bands.after(sync_total_duration))
         .add_systems(Update, sync_period_bands.after(sync_total_duration))
-        .add_systems(Update, update_analysis)
         .add_systems(
             Update,
             schedule::update_visible_blocks
@@ -229,7 +223,7 @@ fn main() {
         )
         .add_systems(Update, blocks::draw_block_handles)
         .add_systems(Update, blocks::update_cursor_icon)
-        .add_systems(Update, blocks::draw_dependency_edges.after(update_analysis))
+        .add_systems(Update, blocks::draw_dependency_edges)
         .add_systems(
             Update,
             labels::spawn_labels
@@ -741,37 +735,6 @@ fn setup_demo_schedule(mut model: ResMut<model::Model>, mut commands: Commands) 
         }
         commands.insert_resource(sched);
     }
-}
-
-fn update_analysis(model: Res<model::Model>, mut sa: ResMut<analysis::ScheduleAnalysis>) {
-    if !model.is_changed() {
-        return;
-    }
-    let dep = analysis::analyze_dependencies(&model);
-    let (critical_path, float) = model
-        .plans
-        .values()
-        .next()
-        .and_then(|plan| {
-            let graph = graph::build_graph(&model, plan);
-            schedule::analyze_user_placement(&model, &graph).ok()
-        })
-        .map(|cpa| (cpa.critical_path, cpa.float))
-        .unwrap_or_default();
-
-    let resource_conflicts = model
-        .plans
-        .values()
-        .next()
-        .map(|plan| analysis::analyze_resources(&model, plan))
-        .unwrap_or_default();
-
-    *sa = analysis::ScheduleAnalysis {
-        violations: dep.violations,
-        resource_conflicts,
-        critical_path,
-        float,
-    };
 }
 
 /// Tracks mouse position over the timeline and updates `ForkHoverState`.

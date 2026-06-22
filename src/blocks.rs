@@ -380,7 +380,7 @@ pub fn sync_description_dots(
 /// Recomputes `Transform`, `Sprite::custom_size`, and color every frame.
 ///
 /// Color priority (highest wins):
-///   1. Critical-path gold — block is on `schedule.critical_path`
+///   1. Explicit per-block `color` override
 ///   2. Selection 2× — block is the currently selected block
 ///   3. Palette default
 pub fn sync_block_sprites(

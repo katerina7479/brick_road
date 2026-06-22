@@ -1,7 +1,5 @@
 use std::collections::HashMap;
 
-use bevy::prelude::Resource;
-
 use crate::model::{
     Day, DependencyId, DependencyType, Model, Plan, ResourceBlock, ResourceBlockId, WorkBlockId,
 };
@@ -35,17 +33,6 @@ pub struct ResourceConflict {
     pub contributing_blocks: Vec<WorkBlockId>,
 }
 
-/// All analysis results computed from the current model/plan state.
-#[derive(Debug, Clone, Default, PartialEq, Resource)]
-pub struct ScheduleAnalysis {
-    pub violations: Vec<DependencyViolation>,
-    pub resource_conflicts: Vec<ResourceConflict>,
-    /// Zero-float blocks in topological order (from user placement backward pass).
-    pub critical_path: Vec<WorkBlockId>,
-    /// Total float per block (latest_finish − earliest_finish over user placement).
-    pub float: HashMap<WorkBlockId, Day>,
-}
-
 /// Check every dependency in `model` against the current user-placed
 /// `start_day` / `duration_days` on each `WorkBlock`.
 ///
@@ -57,7 +44,7 @@ pub struct ScheduleAnalysis {
 ///
 /// A violation occurs when the required bound exceeds the placed value;
 /// `violation_days` is the magnitude of the shortfall.
-pub fn analyze_dependencies(model: &Model) -> ScheduleAnalysis {
+pub fn analyze_dependencies(model: &Model) -> Vec<DependencyViolation> {
     let mut violations = Vec::new();
 
     for (&dep_id, dep) in &model.dependencies {
@@ -91,12 +78,7 @@ pub fn analyze_dependencies(model: &Model) -> ScheduleAnalysis {
         }
     }
 
-    ScheduleAnalysis {
-        violations,
-        resource_conflicts: vec![],
-        critical_path: vec![],
-        float: HashMap::new(),
-    }
+    violations
 }
 
 /// Detect time windows where allocated resource demand exceeds capacity for
@@ -225,7 +207,7 @@ mod tests {
         let a = placed(&mut m, "A", 0, 5);
         let b = placed(&mut m, "B", 5, 3);
         m.create_dependency(a, b, DependencyType::FinishToStart);
-        assert!(analyze_dependencies(&m).violations.is_empty());
+        assert!(analyze_dependencies(&m).is_empty());
     }
 
     #[test]
@@ -234,7 +216,7 @@ mod tests {
         let a = placed(&mut m, "A", 0, 5);
         let b = placed(&mut m, "B", 3, 3);
         m.create_dependency(a, b, DependencyType::FinishToStart);
-        let v = &analyze_dependencies(&m).violations;
+        let v = &analyze_dependencies(&m);
         assert_eq!(v.len(), 1);
         assert_eq!(v[0].predecessor, a);
         assert_eq!(v[0].successor, b);
@@ -248,7 +230,7 @@ mod tests {
         let b = placed(&mut m, "B", 4, 2);
         let dep_id = m.create_dependency(a, b, DependencyType::FinishToStart);
         m.dependencies.get_mut(&dep_id).unwrap().lag = 2;
-        let v = &analyze_dependencies(&m).violations;
+        let v = &analyze_dependencies(&m);
         assert_eq!(v.len(), 1);
         assert_eq!(v[0].violation_days, 1);
     }
@@ -259,7 +241,7 @@ mod tests {
         let a = placed(&mut m, "A", 2, 4);
         let b = placed(&mut m, "B", 2, 3);
         m.create_dependency(a, b, DependencyType::StartToStart);
-        assert!(analyze_dependencies(&m).violations.is_empty());
+        assert!(analyze_dependencies(&m).is_empty());
     }
 
     #[test]
@@ -268,7 +250,7 @@ mod tests {
         let a = placed(&mut m, "A", 3, 4);
         let b = placed(&mut m, "B", 2, 3);
         m.create_dependency(a, b, DependencyType::StartToStart);
-        let v = &analyze_dependencies(&m).violations;
+        let v = &analyze_dependencies(&m);
         assert_eq!(v.len(), 1);
         assert_eq!(v[0].violation_days, 1);
     }
@@ -279,7 +261,7 @@ mod tests {
         let a = placed(&mut m, "A", 0, 5);
         let b = placed(&mut m, "B", 1, 4);
         m.create_dependency(a, b, DependencyType::FinishToFinish);
-        assert!(analyze_dependencies(&m).violations.is_empty());
+        assert!(analyze_dependencies(&m).is_empty());
     }
 
     #[test]
@@ -288,7 +270,7 @@ mod tests {
         let a = placed(&mut m, "A", 0, 6);
         let b = placed(&mut m, "B", 1, 4);
         m.create_dependency(a, b, DependencyType::FinishToFinish);
-        let v = &analyze_dependencies(&m).violations;
+        let v = &analyze_dependencies(&m);
         assert_eq!(v.len(), 1);
         assert_eq!(v[0].violation_days, 1);
     }
@@ -299,7 +281,7 @@ mod tests {
         let a = placed(&mut m, "A", 4, 2);
         let b = placed(&mut m, "B", 0, 5);
         m.create_dependency(a, b, DependencyType::StartToFinish);
-        assert!(analyze_dependencies(&m).violations.is_empty());
+        assert!(analyze_dependencies(&m).is_empty());
     }
 
     #[test]
@@ -308,7 +290,7 @@ mod tests {
         let a = placed(&mut m, "A", 5, 2);
         let b = placed(&mut m, "B", 0, 4);
         m.create_dependency(a, b, DependencyType::StartToFinish);
-        let v = &analyze_dependencies(&m).violations;
+        let v = &analyze_dependencies(&m);
         assert_eq!(v.len(), 1);
         assert_eq!(v[0].violation_days, 1);
     }
@@ -321,7 +303,7 @@ mod tests {
         let c = placed(&mut m, "C", 13, 4);
         m.create_dependency(a, b, DependencyType::FinishToStart);
         m.create_dependency(b, c, DependencyType::FinishToStart);
-        assert!(analyze_dependencies(&m).violations.is_empty());
+        assert!(analyze_dependencies(&m).is_empty());
     }
 
     #[test]
@@ -331,7 +313,7 @@ mod tests {
         let b = placed(&mut m, "B", 5, 2);
         m.create_dependency(a, b, DependencyType::FinishToStart);
         m.work_blocks.remove(&b);
-        assert!(analyze_dependencies(&m).violations.is_empty());
+        assert!(analyze_dependencies(&m).is_empty());
     }
 
     // ── analyze_resources tests ─────────────────────────────────────────────
