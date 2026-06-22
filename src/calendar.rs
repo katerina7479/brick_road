@@ -216,6 +216,24 @@ pub fn first_working_day_of_month(
     }
 }
 
+/// Converts a UTC Unix timestamp (seconds since the Unix epoch) to a
+/// Gregorian calendar date using the Howard Hinnant civil-from-days algorithm
+/// (public domain). Falls back to 2025-01-01 on malformed arithmetic (cannot
+/// occur with timestamps produced by `SystemTime::now`).
+pub fn unix_secs_to_date(secs: u64) -> NaiveDate {
+    let z = (secs / 86400) as i64 + 719468;
+    let era = (if z >= 0 { z } else { z - 146096 }) / 146097;
+    let doe = (z - era * 146097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe as i64 + era * 400 + if m <= 2 { 1 } else { 0 };
+    NaiveDate::from_ymd_opt(y as i32, m as u32, d as u32)
+        .unwrap_or_else(|| NaiveDate::from_ymd_opt(2025, 1, 1).unwrap())
+}
+
 /// Converts effort in working days to a calendar duration in calendar days.
 ///
 /// Returns the number of calendar days from `start_date` to complete
@@ -386,6 +404,41 @@ mod tests {
         };
         assert!(holiday_columns(&cfg, 20).is_empty());
         assert_eq!(day_to_x(5, &cfg), 5.0 * PIXELS_PER_DAY);
+    }
+
+    #[test]
+    fn unix_secs_to_date_epoch_is_jan_1_1970() {
+        assert_eq!(
+            unix_secs_to_date(0),
+            NaiveDate::from_ymd_opt(1970, 1, 1).unwrap()
+        );
+    }
+
+    #[test]
+    fn unix_secs_to_date_one_day() {
+        assert_eq!(
+            unix_secs_to_date(86400),
+            NaiveDate::from_ymd_opt(1970, 1, 2).unwrap()
+        );
+    }
+
+    #[test]
+    fn unix_secs_to_date_leap_day_2000() {
+        // 2000-02-29: 11016 days after epoch. 946684800 = 2000-01-01, plus 59 days.
+        let secs = 946684800 + 59 * 86400;
+        assert_eq!(
+            unix_secs_to_date(secs),
+            NaiveDate::from_ymd_opt(2000, 2, 29).unwrap()
+        );
+    }
+
+    #[test]
+    fn unix_secs_to_date_modern_date() {
+        // 2025-01-06 00:00:00 UTC = 1736121600
+        assert_eq!(
+            unix_secs_to_date(1_736_121_600),
+            NaiveDate::from_ymd_opt(2025, 1, 6).unwrap()
+        );
     }
 
     #[test]

@@ -147,18 +147,7 @@ pub fn update_today_marker(model: Res<Model>, mut today: ResMut<TodayMarker>) {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    // Civil date from Unix day count (Hinnant algorithm, public domain).
-    let z = (secs / 86400) as i64 + 719468;
-    let era = (if z >= 0 { z } else { z - 146096 }) / 146097;
-    let doe = (z - era * 146097) as u64;
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = yoe as i64 + era * 400 + if m <= 2 { 1 } else { 0 };
-    let today_date = NaiveDate::from_ymd_opt(y as i32, m as u32, d as u32)
-        .unwrap_or_else(|| NaiveDate::from_ymd_opt(2025, 1, 1).unwrap());
+    let today_date = crate::calendar::unix_secs_to_date(secs);
     today.day = crate::calendar::today_marker_day(today_date, &model.calendar);
 }
 
@@ -786,6 +775,33 @@ mod tests {
 
         assert_eq!(m.work_blocks[&b].start_day, 10);
         assert_eq!(m.work_blocks[&c].start_day, 13);
+    }
+
+    #[test]
+    fn cascade_diamond_max_bound() {
+        // A → B, A → C, B → D, C → D: moving A must push D to the later of B.end / C.end.
+        let mut m = Model::default();
+        let a = placed(&mut m, "A", 0, 5);
+        let b = placed(&mut m, "B", 5, 3); // FS from A; ends at 8
+        let c = placed(&mut m, "C", 5, 4); // FS from A; ends at 9
+        let d = placed(&mut m, "D", 9, 2); // FS from both B and C
+        m.create_dependency(a, b, DependencyType::FinishToStart);
+        m.create_dependency(a, c, DependencyType::FinishToStart);
+        m.create_dependency(b, d, DependencyType::FinishToStart);
+        m.create_dependency(c, d, DependencyType::FinishToStart);
+
+        // Extend A from 5 → 10 days. B and C each shift to day 10.
+        // B ends at 13, C ends at 14. D must wait for the later one (14).
+        m.work_blocks.get_mut(&a).unwrap().duration_days = 10;
+        cascade_dependencies(&mut m, a);
+
+        assert_eq!(m.work_blocks[&b].start_day, 10);
+        assert_eq!(m.work_blocks[&c].start_day, 10);
+        assert_eq!(
+            m.work_blocks[&d].start_day,
+            14,
+            "D should wait for C (ends at 14), not just B (ends at 13)"
+        );
     }
 
     #[test]
