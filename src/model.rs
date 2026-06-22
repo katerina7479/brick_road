@@ -529,9 +529,12 @@ impl Model {
                     .is_some_and(|wb| wb.start_day >= fork_day)
             })
             .collect();
+        let row_names = self.plans[&main_id].row_names.clone();
         let n = self.plans.len() + 1;
         let new_id = self.create_plan(format!("Plan {n}"), Some(fork_day));
-        self.plans.get_mut(&new_id).unwrap().root_blocks = forward;
+        let branch = self.plans.get_mut(&new_id).unwrap();
+        branch.root_blocks = forward;
+        branch.row_names = row_names;
         Some(new_id)
     }
 
