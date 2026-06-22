@@ -182,6 +182,32 @@ pub fn camera_nav_keys(
     }
 }
 
+/// Pure-math inner kernel of [`fit_to_blocks`]: given raw window and block
+/// bounds, returns the camera target with appropriate zoom and anchor position.
+fn fit_zoom_and_pos(
+    window_w: f32,
+    window_h: f32,
+    x_min: f32,
+    x_max: f32,
+    y_min: f32,
+    y_max: f32,
+) -> CameraTarget {
+    let x_span = (x_max - x_min).max(1.0);
+    let y_span = (y_max - y_min).max(1.0);
+    const MARGIN: f32 = 1.15;
+    let avail_w = (window_w - 2.0 * HOME_LEFT_MARGIN).max(1.0);
+    let avail_h = (window_h - HOME_TOP_MARGIN).max(1.0);
+    // Clamp lower bound to 1.0: fitting a tiny plan magnifies it to 1:1, not more.
+    let zoom = ((x_span / avail_w).max(y_span / avail_h) * MARGIN).clamp(1.0, 6.0);
+    // Anchor plan start at the upper-left corner; pos is the world point at centre.
+    let pos_x = x_min + (window_w * 0.5 - HOME_LEFT_MARGIN) * zoom;
+    let pos_y = y_max - (window_h * 0.5 - HOME_TOP_MARGIN) * zoom;
+    CameraTarget {
+        pos: Vec2::new(pos_x, pos_y),
+        zoom,
+    }
+}
+
 /// Computes a `CameraTarget` that fits the visible (placed) blocks into the
 /// timeline area with a 15% padding margin.
 /// Returns `None` when there are no placed visible blocks or no window.
@@ -226,28 +252,127 @@ pub fn fit_to_blocks(
     let y_max = -min_row * ROW_HEIGHT + ROW_HEIGHT * 0.5;
     let y_min = -max_row * ROW_HEIGHT - ROW_HEIGHT * 0.5;
 
-    let x_span = (x_max - x_min).max(1.0);
-    let y_span = (y_max - y_min).max(1.0);
+    Some(fit_zoom_and_pos(window_w, window_h, x_min, x_max, y_min, y_max))
+}
 
-    const MARGIN: f32 = 1.15;
-    // The side panel is gone, so the whole window width is available (minus a
-    // symmetric margin matching the left anchor).
-    let avail_w = (window_w - 2.0 * HOME_LEFT_MARGIN).max(1.0);
-    let avail_h = (window_h - HOME_TOP_MARGIN).max(1.0);
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bevy::window::WindowResolution;
+    use chrono::NaiveDate;
 
-    // Clamp the lower bound to 1.0 so fitting a sparse plan (e.g. a single small
-    // block) frames it at 1:1 instead of magnifying it to fill the screen.
-    let zoom = ((x_span / avail_w).max(y_span / avail_h) * MARGIN).clamp(1.0, 6.0);
+    use crate::{
+        calendar::day_to_x,
+        model::CalendarConfig,
+    };
 
-    // Anchor plan start at the upper-left corner of the timeline viewport.
-    // pos is the world-space point at the window centre.
-    let pos_x = x_min + (window_w * 0.5 - HOME_LEFT_MARGIN) * zoom;
-    let pos_y = y_max - (window_h * 0.5 - HOME_TOP_MARGIN) * zoom;
+    fn test_window(w: f32, h: f32) -> Window {
+        Window {
+            resolution: WindowResolution::new(w as u32, h as u32),
+            ..Default::default()
+        }
+    }
 
-    Some(CameraTarget {
-        pos: Vec2::new(pos_x, pos_y),
-        zoom,
-    })
+    fn simple_config() -> CalendarConfig {
+        CalendarConfig {
+            start_date: NaiveDate::from_ymd_opt(2025, 1, 6).unwrap(),
+            working_days_per_week: 5,
+            non_working_dates: vec![],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn home_target_zoom_is_always_one() {
+        let win = test_window(1000.0, 600.0);
+        let cfg = simple_config();
+        let t = home_target(&win, 0, &cfg);
+        assert_eq!(t.zoom, 1.0);
+    }
+
+    #[test]
+    fn home_target_pos_anchors_today_upper_left() {
+        let w = 1000.0f32;
+        let h = 600.0f32;
+        let win = test_window(w, h);
+        let cfg = simple_config();
+        let today_day = 10;
+        let t = home_target(&win, today_day, &cfg);
+        let today_x = day_to_x(today_day, &cfg);
+        assert_eq!(t.pos.x, today_x + w * 0.5 - HOME_LEFT_MARGIN);
+        assert_eq!(t.pos.y, ROW_HEIGHT * 0.5 - (h * 0.5 - HOME_TOP_MARGIN));
+    }
+
+    #[test]
+    fn frame_day_span_clamps_zoom_to_min_when_span_tiny() {
+        let win = test_window(1000.0, 600.0);
+        let cfg = simple_config();
+        // A one-day span on a 1000px window is far smaller than avail_w.
+        let t = frame_day_span(&win, 0, 1, &cfg);
+        assert_eq!(t.zoom, 0.3, "tiny span should clamp to minimum zoom 0.3");
+    }
+
+    #[test]
+    fn frame_day_span_clamps_zoom_to_max_when_span_huge() {
+        let win = test_window(1000.0, 600.0);
+        let cfg = simple_config();
+        // 10000 working days spans 200 000 px on a 1000px window → above max.
+        let t = frame_day_span(&win, 0, 10_000, &cfg);
+        assert_eq!(t.zoom, 6.0, "huge span should clamp to maximum zoom 6.0");
+    }
+
+    #[test]
+    fn frame_day_span_pos_x_is_span_midpoint() {
+        let win = test_window(1000.0, 600.0);
+        let cfg = simple_config();
+        let t = frame_day_span(&win, 0, 20, &cfg);
+        let x_min = day_to_x(0, &cfg);
+        let x_max = day_to_x(20, &cfg);
+        assert_eq!(t.pos.x, (x_min + x_max) * 0.5);
+    }
+
+    #[test]
+    fn fit_zoom_and_pos_clamps_min_to_one_for_small_span() {
+        // Span 10×10px on a 1000×600 window is tiny — zoom must not go below 1.0.
+        let t = fit_zoom_and_pos(1000.0, 600.0, 0.0, 10.0, -5.0, 5.0);
+        assert_eq!(t.zoom, 1.0);
+    }
+
+    #[test]
+    fn fit_zoom_and_pos_clamps_max_to_six_for_huge_span() {
+        let t = fit_zoom_and_pos(1000.0, 600.0, 0.0, 1_000_000.0, -5.0, 5.0);
+        assert_eq!(t.zoom, 6.0);
+    }
+
+    #[test]
+    fn fit_zoom_and_pos_proportional_zoom_when_span_fills_width() {
+        // avail_w = 1000 - 2*24 = 952; x_span = 952 exactly fills it.
+        // zoom = (952/952).max(10/516) * 1.15 = 1.0 * 1.15 = 1.15, within [1,6].
+        let avail_w = 1000.0 - 2.0 * HOME_LEFT_MARGIN;
+        let avail_h = 600.0 - HOME_TOP_MARGIN;
+        let t = fit_zoom_and_pos(1000.0, 600.0, 0.0, avail_w, -5.0, 5.0);
+        let expected_zoom = (1.0_f32.max(10.0 / avail_h) * 1.15).clamp(1.0, 6.0);
+        assert!(
+            (t.zoom - expected_zoom).abs() < 1e-4,
+            "zoom {:.4} should equal {:.4}",
+            t.zoom,
+            expected_zoom
+        );
+    }
+
+    #[test]
+    fn fit_zoom_and_pos_anchor_is_upper_left() {
+        // pos.x should place x_min at the left edge of the viewport at the
+        // computed zoom. pos.y should place y_max at the top edge.
+        let (w, h) = (1000.0f32, 600.0f32);
+        let (x_min, x_max) = (0.0f32, 500.0f32);
+        let (y_min, y_max) = (-40.0f32, 20.0f32);
+        let t = fit_zoom_and_pos(w, h, x_min, x_max, y_min, y_max);
+        let expected_pos_x = x_min + (w * 0.5 - HOME_LEFT_MARGIN) * t.zoom;
+        let expected_pos_y = y_max - (h * 0.5 - HOME_TOP_MARGIN) * t.zoom;
+        assert!((t.pos.x - expected_pos_x).abs() < 1e-4);
+        assert!((t.pos.y - expected_pos_y).abs() < 1e-4);
+    }
 }
 
 /// Exponentially smooths the actual camera transform toward `CameraTarget`.

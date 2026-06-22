@@ -233,6 +233,41 @@ mod tests {
     }
 
     #[test]
+    fn cycle_nodes_include_downstream() {
+        // B → C → B forms a cycle. A → B (upstream, sorts fine). C → D (D is
+        // downstream of the cycle and therefore also unsortable).
+        // Expected: A is sorted successfully; B, C, D remain with in_degree > 0.
+        let mut model = Model::default();
+        let plan_id = model.create_plan("p", None);
+
+        let a = model.create_work_block("A");
+        let b = model.create_work_block("B");
+        let c = model.create_work_block("C");
+        let d = model.create_work_block("D");
+        model.create_dependency(a, b, DependencyType::FinishToStart);
+        model.create_dependency(b, c, DependencyType::FinishToStart);
+        model.create_dependency(c, b, DependencyType::FinishToStart); // closes B↔C cycle
+        model.create_dependency(c, d, DependencyType::FinishToStart); // D downstream
+
+        let plan = {
+            let p = model.plans.get_mut(&plan_id).unwrap();
+            p.root_blocks = vec![a, b, c, d];
+            p.clone()
+        };
+
+        let graph = build_graph(&model, &plan);
+        let result = topological_sort(&graph);
+        assert!(result.is_err());
+        let mut nodes = result.unwrap_err().nodes;
+        nodes.sort_by_key(|id| id.0);
+        assert_eq!(nodes.len(), 3, "B, C, and D should all be unsortable");
+        assert!(nodes.contains(&b), "B is in the cycle");
+        assert!(nodes.contains(&c), "C is in the cycle");
+        assert!(nodes.contains(&d), "D is downstream of the cycle");
+        assert!(!nodes.contains(&a), "A has no predecessors and sorts fine");
+    }
+
+    #[test]
     fn inactive_blocks_excluded() {
         // Blocks not in plan.root_blocks must not appear in the graph,
         // even if dependencies reference them.

@@ -120,6 +120,67 @@ pub struct PeriodLabel;
 
 const PERIOD_LABEL_Y: f32 = 48.0;
 
+/// One entry produced by [`compute_quarter_ranges`]: a quarter label and its
+/// horizontal centre in world space.
+pub(crate) struct QuarterRange {
+    pub label: String,
+    pub cx: f32,
+}
+
+/// Pure computation: builds the ordered list of quarter labels and their
+/// centres for a timeline that starts at `config.start_date` and spans
+/// `span_days` working days. Called by [`spawn_period_labels`]; extracted
+/// here so the loop logic can be unit-tested without a Bevy world.
+pub(crate) fn compute_quarter_ranges(
+    config: &crate::model::CalendarConfig,
+    span_days: crate::model::Day,
+) -> Vec<QuarterRange> {
+    let span_px = day_to_x(span_days, config);
+    let start_year = config.start_date.year();
+    let mut year = start_year;
+    let mut month = config.start_date.month();
+    let mut ranges = Vec::new();
+
+    loop {
+        let x_start = match first_working_day_of_month(year, month, config) {
+            Some(d) => day_to_x(date_to_day(d, config), config).max(0.0),
+            None => {
+                let (ny, nm) = next_ym(year, month);
+                year = ny;
+                month = nm;
+                if year > start_year + 50 {
+                    break;
+                }
+                continue;
+            }
+        };
+        if x_start >= span_px {
+            break;
+        }
+
+        let quarter = (month - 1) / 3 + 1;
+        let q_end_month = quarter * 3 + 1;
+        let (q_end_year, q_end_mon) = if q_end_month > 12 {
+            (year + 1, 1)
+        } else {
+            (year, q_end_month)
+        };
+        let x_end = match first_working_day_of_month(q_end_year, q_end_mon, config) {
+            Some(d) => day_to_x(date_to_day(d, config), config).min(span_px),
+            None => span_px,
+        };
+
+        ranges.push(QuarterRange {
+            label: format!("Q{} '{:02}", quarter, year % 100),
+            cx: (x_start + x_end) * 0.5,
+        });
+
+        month = q_end_mon;
+        year = q_end_year;
+    }
+    ranges
+}
+
 /// Spawns (or re-spawns) quarter labels ("Q1 '25", "Q2 '25") above the day labels.
 /// Fires when model or schedule changes.
 pub fn spawn_period_labels(
@@ -136,64 +197,17 @@ pub fn spawn_period_labels(
     }
 
     let span_days = schedule.total_duration_days + 30;
-    let config = &model.calendar;
-    let span_px = day_to_x(span_days, config);
-
-    let start_year = config.start_date.year();
-    let start_month = config.start_date.month();
-
-    let mut year = start_year;
-    let mut month = start_month;
-
-    loop {
-        let x_start = match first_working_day_of_month(year, month, config) {
-            Some(d) => day_to_x(date_to_day(d, config), config).max(0.0),
-            None => {
-                let (ny, nm) = next_ym(year, month);
-                year = ny;
-                month = nm;
-                if year > start_year + 50 {
-                    break;
-                }
-                continue;
-            }
-        };
-
-        if x_start >= span_px {
-            break;
-        }
-
-        let quarter = (month - 1) / 3 + 1;
-
-        // Find the end of the quarter: x_start of the first month in the next quarter.
-        let q_end_month = quarter * 3 + 1;
-        let (q_end_year, q_end_mon) = if q_end_month > 12 {
-            (year + 1, 1)
-        } else {
-            (year, q_end_month)
-        };
-        let x_end = match first_working_day_of_month(q_end_year, q_end_mon, config) {
-            Some(d) => day_to_x(date_to_day(d, config), config).min(span_px),
-            None => span_px,
-        };
-
-        let cx = (x_start + x_end) * 0.5;
-        let label = format!("Q{} '{:02}", quarter, year % 100);
-
+    for qr in compute_quarter_ranges(&model.calendar, span_days) {
         commands.spawn((
             PeriodLabel,
-            Text2d::new(label),
+            Text2d::new(qr.label),
             TextFont {
                 font_size: 11.0,
                 ..default()
             },
             TextColor(Color::srgba(0.65, 0.65, 0.85, 0.70)),
-            Transform::from_xyz(cx, PERIOD_LABEL_Y, 1.0),
+            Transform::from_xyz(qr.cx, PERIOD_LABEL_Y, 1.0),
         ));
-
-        // Advance to the start of the next quarter.
-        month = q_end_mon;
-        year = q_end_year;
     }
 }
 
@@ -253,6 +267,63 @@ mod tests {
         let mut model = Model::default();
         model.calendar = mon_config();
         assert_eq!(format_day_label(0, true, &model), "Jun 2025");
+    }
+
+    #[test]
+    fn next_ym_increments_month() {
+        assert_eq!(next_ym(2025, 1), (2025, 2));
+        assert_eq!(next_ym(2025, 11), (2025, 12));
+    }
+
+    #[test]
+    fn next_ym_wraps_december_to_january_of_next_year() {
+        assert_eq!(next_ym(2025, 12), (2026, 1));
+        assert_eq!(next_ym(1999, 12), (2000, 1));
+    }
+
+    #[test]
+    fn quarter_ranges_jan_start_two_years() {
+        // Start on a Monday in Jan; span ~500 working days covers ≈2 full years.
+        // Expect exactly 8 quarter labels: Q1..Q4 '25, Q1..Q4 '26.
+        let cfg = crate::model::CalendarConfig {
+            start_date: chrono::NaiveDate::from_ymd_opt(2025, 1, 6).unwrap(),
+            working_days_per_week: 5,
+            non_working_dates: vec![],
+            ..Default::default()
+        };
+        let ranges = compute_quarter_ranges(&cfg, 500);
+        assert_eq!(ranges.len(), 8, "two full years → 8 quarters");
+        assert_eq!(ranges[0].label, "Q1 '25");
+        assert_eq!(ranges[3].label, "Q4 '25");
+        assert_eq!(ranges[4].label, "Q1 '26");
+        assert_eq!(ranges[7].label, "Q4 '26");
+    }
+
+    #[test]
+    fn quarter_ranges_q4_wraps_to_next_year() {
+        // Start in October (Q4). The first label should be Q4 of the start year
+        // and the next should be Q1 of the following year.
+        let cfg = crate::model::CalendarConfig {
+            start_date: chrono::NaiveDate::from_ymd_opt(2025, 10, 6).unwrap(),
+            working_days_per_week: 5,
+            non_working_dates: vec![],
+            ..Default::default()
+        };
+        let ranges = compute_quarter_ranges(&cfg, 150);
+        assert!(!ranges.is_empty());
+        assert_eq!(ranges[0].label, "Q4 '25");
+        // With 150 working days we cross into 2026; Q1 '26 should appear.
+        assert!(
+            ranges.iter().any(|r| r.label == "Q1 '26"),
+            "Q1 '26 should appear after 150 days starting in Oct 2025"
+        );
+    }
+
+    #[test]
+    fn quarter_ranges_zero_span_is_empty() {
+        let cfg = mon_config();
+        let ranges = compute_quarter_ranges(&cfg, 0);
+        assert!(ranges.is_empty(), "span of 0 should produce no labels");
     }
 
     #[test]
