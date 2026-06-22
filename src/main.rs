@@ -74,10 +74,6 @@ fn main() {
             sync_period_bands.after(blocks::reconcile_block_sprites),
         )
         .add_systems(
-            PostStartup,
-            labels::spawn_labels.after(blocks::reconcile_block_sprites),
-        )
-        .add_systems(
             Update,
             set_initial_view.after(schedule::update_today_marker),
         )
@@ -223,12 +219,6 @@ fn main() {
         .add_systems(Update, blocks::draw_block_handles)
         .add_systems(Update, blocks::update_cursor_icon)
         .add_systems(Update, blocks::draw_dependency_edges)
-        .add_systems(
-            Update,
-            labels::spawn_labels
-                .after(blocks::handle_block_selection)
-                .after(blocks::reconcile_block_sprites),
-        )
         .add_systems(
             Update,
             blocks::sync_block_labels.after(blocks::reconcile_block_sprites),
@@ -680,10 +670,8 @@ fn setup_demo_schedule(mut model: ResMut<model::Model>, mut commands: Commands) 
     // all downstream systems (side_panel_ui, draw_create_mode_overlay, spawn_day_labels, etc.)
     // have a valid Schedule on the very first Update tick.
     if !model.plans.is_empty() {
-        // Default the active plan to the lowest-id root plan (forks sort last
-        // via `branch_start_day.is_some()`). Picking an arbitrary
-        // `values().next()` could make a fork active — and the active plan can't
-        // be deleted, so a randomly-active branch would be impossible to remove.
+        // Use the lowest-id root plan (forks sort last via branch_start_day.is_some())
+        // for the initial forward pass. Picking values().next() could land on a fork.
         let default_plan = model
             .plans
             .values()
@@ -808,13 +796,13 @@ fn draw_branch_markers(
     let Ok(window) = windows.single() else { return };
     let half_h = (window.height() * 0.5 * ortho.scale).max(800.0);
 
-    let active_id = model.main_plan_id();
+    let main_id = model.main_plan_id();
 
-    // Branch-point markers for non-active plans.
+    // Branch-point markers for forked plans.
     let mut branch_plans: Vec<&model::Plan> = model
         .plans
         .values()
-        .filter(|p| Some(p.id) != active_id && p.branch_start_day.is_some())
+        .filter(|p| Some(p.id) != main_id && p.branch_start_day.is_some())
         .collect();
     branch_plans.sort_by_key(|p| p.id.0);
 
@@ -1519,13 +1507,6 @@ fn quarter_start_x(y: i32, q: i32, config: &model::CalendarConfig) -> f32 {
     calendar::day_to_x(calendar::date_to_day(date, config), config)
 }
 
-/// Renders Re-center and Fit-to-view buttons in a small floating area
-/// anchored to the top-right of the window. Keyboard shortcuts (Home / F)
-/// are handled by `camera_nav_keys` in `camera.rs`.
-/// Renders a fixed top bar containing the brand logo and camera/view navigation
-/// buttons. Using TopBottomPanel reserves space so block labels and side panel
-/// content cannot render behind the controls.
-#[allow(clippy::too_many_arguments)]
 /// Applies the warm-amber theme to the current `ui`'s button widget states, so
 /// every `tool_button` in the row gets a consistent fill, rounded corner, and
 /// hover/active feedback instead of egui's flat grey default.
@@ -1951,9 +1932,8 @@ fn top_bar_ui(
 #[derive(Resource, Default)]
 pub struct SelectedPlan(pub Option<model::PlanId>);
 
-/// Inline resource-row rename state: which (plan, drill scope, row) is being
-/// State for the resource gutter: tracks which row has an open picker popup
-/// and, when "Add New" is chosen, the text buffer for the new name.
+/// Resource-gutter state: which row has an open picker popup and, when editing,
+/// the text buffer for the row name.
 #[derive(Resource, Default)]
 pub struct RowRename {
     pub editing: Option<(model::PlanId, Option<model::WorkBlockId>, i32)>,

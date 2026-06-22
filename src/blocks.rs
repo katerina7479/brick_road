@@ -915,8 +915,8 @@ const HANDLE_HIT_PX: f32 = 8.0;
 ///
 /// - Press: if the cursor is within `EDGE_GRAB_PX` of the right edge and inside
 ///   the block's Y bounds, begin resize (takes priority over the move drag).
-/// - Held: update `duration_days` so the right edge tracks the cursor, snapped
-///   to the nearest 0.5-day grid and clamped to ≥ 0.5.
+/// - Held: update `duration_days` so the right edge tracks the cursor, clamped
+///   to ≥ 1 day.
 /// - Release: cascade dependency constraints, persist to DB.
 #[allow(clippy::too_many_arguments)]
 pub fn handle_block_resize(
@@ -2761,13 +2761,13 @@ pub fn draw_block_tooltip(
                             .spacing([8.0, 2.0])
                             .show(ui, |ui| {
                                 ui.label("Start:");
-                                ui.label(format!("day {:.1}", wb.start_day));
+                                ui.label(format!("day {}", wb.start_day));
                                 ui.end_row();
                                 ui.label("End:");
-                                ui.label(format!("day {:.1}", end_day));
+                                ui.label(format!("day {}", end_day));
                                 ui.end_row();
                                 ui.label("Duration:");
-                                ui.label(format!("{:.1} days", wb.duration_days));
+                                ui.label(format!("{} days", wb.duration_days));
                                 ui.end_row();
                             });
                         if !wb.description.is_empty() {
