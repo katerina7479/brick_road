@@ -5,7 +5,7 @@ use chrono::NaiveDate;
 
 use crate::graph::{CycleError, DependencyGraph};
 use crate::model::{
-    CalendarConfig, Day, DependencyType, Model, Plan, PlanId, WorkBlock, WorkBlockId,
+    CalendarConfig, Day, DependencyType, Model, PlanId, WorkBlock, WorkBlockId,
 };
 
 /// Converts a working-day position to a calendar date using the plan's calendar.
@@ -40,26 +40,14 @@ pub struct ScheduledBlock {
 }
 
 /// The full output of a scheduler run over a Plan.
-#[derive(Debug, Clone, Resource)]
+#[derive(Debug, Clone, Default, Resource)]
 pub struct Schedule {
-    pub plan_id: PlanId,
     /// Placement for every block that was scheduled.
     pub blocks: HashMap<WorkBlockId, ScheduledBlock>,
     /// Day on which the last block finishes.
     pub total_duration_days: Day,
     /// Ordered sequence of block IDs on the critical path (longest path).
     pub critical_path: Vec<WorkBlockId>,
-}
-
-impl Schedule {
-    pub fn new(plan_id: PlanId) -> Self {
-        Self {
-            plan_id,
-            blocks: HashMap::new(),
-            total_duration_days: 0,
-            critical_path: vec![],
-        }
-    }
 }
 
 /// Output of a backward-pass critical-path analysis over a forward-pass Schedule.
@@ -148,10 +136,13 @@ pub fn update_visible_blocks(
     if !model.is_changed() && !schedule.is_changed() && !drill.is_changed() {
         return;
     }
-    let new_ids: Vec<WorkBlockId> = visible_blocks(&model, schedule.plan_id, drill.current())
-        .into_iter()
-        .map(|wb| wb.id)
-        .collect();
+    let new_ids: Vec<WorkBlockId> = match model.main_plan_id() {
+        Some(main_id) => visible_blocks(&model, main_id, drill.current())
+            .into_iter()
+            .map(|wb| wb.id)
+            .collect(),
+        None => Vec::new(),
+    };
     if new_ids != cache.ids {
         cache.ids = new_ids;
     }
@@ -377,11 +368,7 @@ pub fn cascade_dependencies(model: &mut Model, root: WorkBlockId) {
 ///   SF:    end(S) ≥ start(P) + lag
 ///
 /// Returns `Err(CycleError)` if the dependency graph contains a cycle.
-pub fn forward_pass(
-    model: &Model,
-    plan: &Plan,
-    graph: &DependencyGraph,
-) -> Result<Schedule, CycleError> {
+pub fn forward_pass(model: &Model, graph: &DependencyGraph) -> Result<Schedule, CycleError> {
     let order = crate::graph::topological_sort(graph)?;
 
     // Lower bound on start day from FS/SS edges.
@@ -390,7 +377,7 @@ pub fn forward_pass(
     let mut min_end: HashMap<WorkBlockId, Option<Day>> =
         graph.nodes.iter().map(|&id| (id, None)).collect();
 
-    let mut sched = Schedule::new(plan.id);
+    let mut sched = Schedule::default();
 
     for &id in &order {
         let dur = model
@@ -672,7 +659,7 @@ mod tests {
         let mut p = plan.clone();
         p.root_blocks = roots;
         let graph = build_graph(model, &p);
-        forward_pass(model, &p, &graph).expect("no cycle")
+        forward_pass(model, &graph).expect("no cycle")
     }
 
     fn base() -> (Model, crate::model::PlanId) {
@@ -835,7 +822,7 @@ mod tests {
         p.root_blocks = roots;
         let graph = build_graph(model, &p);
         let order = topological_sort(&graph).expect("no cycle");
-        let sched = forward_pass(model, &p, &graph).expect("no cycle");
+        let sched = forward_pass(model, &graph).expect("no cycle");
         let analysis = backward_pass(&order, &graph, &sched);
         (sched, analysis)
     }
