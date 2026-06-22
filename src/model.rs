@@ -94,10 +94,29 @@ impl Default for CalendarConfig {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResourceType {
-    Person,
+    Engineer,
     Team,
     Equipment,
     Budget,
+}
+
+impl ResourceType {
+    /// All variants, for type pickers.
+    pub const ALL: [ResourceType; 4] = [
+        ResourceType::Engineer,
+        ResourceType::Team,
+        ResourceType::Equipment,
+        ResourceType::Budget,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ResourceType::Engineer => "Engineer",
+            ResourceType::Team => "Team",
+            ResourceType::Equipment => "Equipment",
+            ResourceType::Budget => "Budget",
+        }
+    }
 }
 
 /// A resource that can be allocated to work blocks.
@@ -241,6 +260,48 @@ impl Model {
             },
         );
         id
+    }
+
+    /// Every distinct, non-empty resource name used across all plans' gutter
+    /// rows, case-insensitively de-duplicated and sorted. These are the "named
+    /// resources" the settings panel types and (for people) gives vacations.
+    pub fn named_resources(&self) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .plans
+            .values()
+            .flat_map(|p| p.row_names.values())
+            .flatten()
+            .filter(|n| !n.is_empty())
+            .cloned()
+            .collect();
+        names.sort_by_key(|n| n.to_lowercase());
+        names.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
+        names
+    }
+
+    /// The typed resource registered under `name` (case-insensitive), if any.
+    pub fn resource_by_name(&self, name: &str) -> Option<&ResourceBlock> {
+        self.resource_blocks
+            .values()
+            .find(|r| r.name.eq_ignore_ascii_case(name))
+    }
+
+    /// The type assigned to the resource named `name`, if it's been typed.
+    pub fn resource_kind(&self, name: &str) -> Option<ResourceType> {
+        self.resource_by_name(name).map(|r| r.resource_type)
+    }
+
+    /// Sets the type for `name`, creating its registry entry on first use.
+    pub fn set_resource_kind(&mut self, name: &str, kind: ResourceType) {
+        if let Some(r) = self
+            .resource_blocks
+            .values_mut()
+            .find(|r| r.name.eq_ignore_ascii_case(name))
+        {
+            r.resource_type = kind;
+        } else {
+            self.create_resource_block(name.to_string(), kind);
+        }
     }
 
     pub fn create_resource_block(
@@ -935,7 +996,7 @@ mod tests {
     fn create_and_retrieve_all_entity_types() {
         let mut m = Model::default();
         let plan_id = m.create_plan("plan A", None);
-        let res_id = m.create_resource_block("Alice", ResourceType::Person);
+        let res_id = m.create_resource_block("Alice", ResourceType::Engineer);
         let block_a = m.create_work_block("a");
         let block_b = m.create_work_block("b");
         let dep_id = m.create_dependency(block_a, block_b, DependencyType::FinishToStart);

@@ -1312,7 +1312,7 @@ mod tests {
     fn two_blocks_serialized_by_resource() {
         // A(2) and B(3) both need resource R at full capacity → B can't start until A ends.
         let (mut m, pid) = base();
-        let r = m.create_resource_block("R", ResourceType::Person);
+        let r = m.create_resource_block("R", ResourceType::Engineer);
         let a = mk(&mut m, "A", 2);
         let b = mk(&mut m, "B", 3);
         {
@@ -1332,7 +1332,7 @@ mod tests {
     fn partial_allocations_allow_overlap() {
         // A and B each need 0.5 of resource R (total 1.0 ≤ capacity 1.0) → can run in parallel.
         let (mut m, pid) = base();
-        let r = m.create_resource_block("R", ResourceType::Person);
+        let r = m.create_resource_block("R", ResourceType::Engineer);
         let a = mk(&mut m, "A", 3);
         let b = mk(&mut m, "B", 3);
         {
@@ -1350,7 +1350,7 @@ mod tests {
     fn overallocation_serializes() {
         // A needs 0.7, B needs 0.5 → combined 1.2 > 1.0 → must serialize.
         let (mut m, pid) = base();
-        let r = m.create_resource_block("R", ResourceType::Person);
+        let r = m.create_resource_block("R", ResourceType::Engineer);
         let a = mk(&mut m, "A", 2);
         let b = mk(&mut m, "B", 2);
         {
@@ -1368,7 +1368,7 @@ mod tests {
         // Resource R is unavailable (factor=0.0) for days [0,5) and available after.
         // Block A needs R → must start at day 5.
         let (mut m, pid) = base();
-        let r = m.create_resource_block("R", ResourceType::Person);
+        let r = m.create_resource_block("R", ResourceType::Engineer);
         {
             let rb = m.resource_blocks.get_mut(&r).unwrap();
             rb.availability.segments.push(AvailabilitySegment {
@@ -1399,7 +1399,7 @@ mod tests {
         // b has a FS dep on a (min_start = 3) and needs R; at day 3 R is free,
         // so b starts at 3 — the resource conflict does NOT delay b here.
         let (mut m, pid) = base();
-        let r = m.create_resource_block("R", ResourceType::Person);
+        let r = m.create_resource_block("R", ResourceType::Engineer);
         let a = mk(&mut m, "A", 3); // no resource
         let b = mk(&mut m, "B", 2); // needs R
         let c = mk(&mut m, "C", 3); // occupies R [3,6)
@@ -1435,7 +1435,7 @@ mod tests {
         //   [5,8): avail=1.0, used=0.8 → 1.0 ≤ 1.0 ✓
         //   → accepts day 3.
         let (mut m, pid) = base();
-        let r = m.create_resource_block("R", ResourceType::Person);
+        let r = m.create_resource_block("R", ResourceType::Engineer);
         {
             let rb = m.resource_blocks.get_mut(&r).unwrap();
             rb.availability.segments.push(AvailabilitySegment {
@@ -1470,7 +1470,7 @@ mod tests {
     fn three_blocks_one_resource_chain() {
         // A(1), B(1), C(1) all need R at full capacity → serialize: [0,1), [1,2), [2,3).
         let (mut m, pid) = base();
-        let r = m.create_resource_block("R", ResourceType::Person);
+        let r = m.create_resource_block("R", ResourceType::Engineer);
         let a = mk(&mut m, "A", 1);
         let b = mk(&mut m, "B", 1);
         let c = mk(&mut m, "C", 1);
@@ -2081,7 +2081,7 @@ mod tests {
         use crate::graph::build_graph;
         use crate::model::{AvailabilitySegment, AvailabilityTimeline, ResourceType};
         let (mut m, pid) = base();
-        let rb = m.create_resource_block("R", ResourceType::Person);
+        let rb = m.create_resource_block("R", ResourceType::Engineer);
         m.resource_blocks.get_mut(&rb).unwrap().availability = AvailabilityTimeline {
             segments: vec![AvailabilitySegment {
                 start: 0,

@@ -1153,17 +1153,15 @@ fn resource_gutter_ui(
         return;
     }
 
-    // Resolve each row's display name (with branch→main inheritance) up front so
-    // the egui closure borrows no model state while we may mutate on commit.
-    let labels: Vec<(i32, Option<String>)> = rows
+    // Resolve each row's display name (with branch→main inheritance) and its
+    // resource type up front so the egui closure borrows no model state while we
+    // may mutate on commit.
+    let labels: Vec<(i32, Option<String>, Option<model::ResourceType>)> = rows
         .iter()
         .map(|&r| {
-            (
-                r,
-                model
-                    .resolved_row_name(plan_id, scope, r)
-                    .map(|s| s.to_string()),
-            )
+            let name = model.resolved_row_name(plan_id, scope, r);
+            let kind = name.and_then(|n| model.resource_kind(n));
+            (r, name.map(|s| s.to_string()), kind)
         })
         .collect();
 
@@ -1203,7 +1201,7 @@ fn resource_gutter_ui(
             let rect = ui.max_rect();
             let half = (rh / scale * 0.5).clamp(9.0, 22.0);
 
-            for (r, name) in &labels {
+            for (r, name, kind) in &labels {
                 let cy = row_screen_y(*r);
                 if cy < rect.top() - half || cy > rect.bottom() + half {
                     continue;
@@ -1246,9 +1244,20 @@ fn resource_gutter_ui(
                             egui::Color32::from_rgb(138, 128, 114),
                         ),
                     };
+                    // A small coloured dot marks the resource's type, if set.
+                    let mut text_x = rect.left() + 10.0;
+                    if let Some(k) = kind {
+                        let (cr, cg, cb) = resource_type_rgb(*k);
+                        ui.painter().circle_filled(
+                            egui::pos2(rect.left() + 8.0, cy),
+                            3.5,
+                            egui::Color32::from_rgb(cr, cg, cb),
+                        );
+                        text_x = rect.left() + 18.0;
+                    }
                     let hovered = resp.hovered();
                     ui.painter().text(
-                        egui::pos2(rect.left() + 10.0, cy),
+                        egui::pos2(text_x, cy),
                         egui::Align2::LEFT_CENTER,
                         text,
                         egui::FontId::proportional(13.0),
@@ -1341,6 +1350,16 @@ fn commit_row_name(
 /// named it.
 fn default_row_label(row: i32) -> String {
     format!("Resource {}", row + 1)
+}
+
+/// The accent colour marking a resource's type in the gutter and settings.
+fn resource_type_rgb(kind: model::ResourceType) -> (u8, u8, u8) {
+    match kind {
+        model::ResourceType::Engineer => (98, 154, 224),   // blue
+        model::ResourceType::Team => (120, 196, 140),     // green
+        model::ResourceType::Equipment => (224, 176, 92), // amber
+        model::ResourceType::Budget => (180, 150, 222),   // violet
+    }
 }
 
 /// World-space x of the start of calendar year `y` (its Jan 1, mapped to a
@@ -1559,6 +1578,59 @@ fn settings_flyout_ui(
                     }
                 }
             });
+
+            // ── Resources ──────────────────────────────────────────────────
+            ui.add_space(16.0);
+            ui.label(
+                egui::RichText::new("RESOURCES")
+                    .size(11.0)
+                    .color(egui::Color32::from_rgb(150, 130, 96)),
+            );
+            ui.separator();
+            ui.add_space(4.0);
+
+            let names = model.named_resources();
+            if names.is_empty() {
+                ui.label(
+                    egui::RichText::new("Name rows in the gutter to add resources")
+                        .italics()
+                        .color(egui::Color32::from_rgb(120, 110, 96)),
+                );
+            }
+            for name in &names {
+                ui.horizontal(|ui| {
+                    let kind = model.resource_kind(name);
+                    if let Some(k) = kind {
+                        let (r, g, b) = resource_type_rgb(k);
+                        let dot = ui.allocate_space(egui::vec2(9.0, 9.0)).1;
+                        ui.painter().circle_filled(
+                            dot.center(),
+                            3.5,
+                            egui::Color32::from_rgb(r, g, b),
+                        );
+                    }
+                    ui.label(
+                        egui::RichText::new(name)
+                            .color(egui::Color32::from_rgb(206, 190, 164)),
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        egui::ComboBox::from_id_salt(format!("restype:{name}"))
+                            .selected_text(kind.map(|k| k.label()).unwrap_or("—"))
+                            .width(96.0)
+                            .show_ui(ui, |ui| {
+                                for k in model::ResourceType::ALL {
+                                    if ui
+                                        .selectable_label(kind == Some(k), k.label())
+                                        .clicked()
+                                    {
+                                        model.set_resource_kind(name, k);
+                                        changed = true;
+                                    }
+                                }
+                            });
+                    });
+                });
+            }
         });
 
     if close {

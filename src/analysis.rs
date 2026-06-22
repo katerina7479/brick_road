@@ -356,7 +356,7 @@ mod tests {
     fn serialized_blocks_no_conflict() {
         // A [0,3) then B [3,6) on R — no overlap, no conflict.
         let mut m = Model::default();
-        let r = m.create_resource_block("R", ResourceType::Person);
+        let r = m.create_resource_block("R", ResourceType::Engineer);
         let a = placed(&mut m, "A", 0, 3);
         let b = placed(&mut m, "B", 3, 3);
         let pid = make_plan(&mut m, vec![alloc(r, a, 1.0), alloc(r, b, 1.0)]);
@@ -368,7 +368,7 @@ mod tests {
     fn overlapping_full_blocks_conflict() {
         // A [0,5) and B [2,8) both at factor 1.0 → demand 2.0 in [2,5).
         let mut m = Model::default();
-        let r = m.create_resource_block("R", ResourceType::Person);
+        let r = m.create_resource_block("R", ResourceType::Engineer);
         let a = placed(&mut m, "A", 0, 5);
         let b = placed(&mut m, "B", 2, 6);
         let pid = make_plan(&mut m, vec![alloc(r, a, 1.0), alloc(r, b, 1.0)]);
@@ -390,7 +390,7 @@ mod tests {
     fn partial_allocations_sum_under_capacity_no_conflict() {
         // Two blocks at 0.5 each, fully overlapping → demand 1.0 = capacity.
         let mut m = Model::default();
-        let r = m.create_resource_block("R", ResourceType::Person);
+        let r = m.create_resource_block("R", ResourceType::Engineer);
         let a = placed(&mut m, "A", 0, 4);
         let b = placed(&mut m, "B", 0, 4);
         let pid = make_plan(&mut m, vec![alloc(r, a, 0.5), alloc(r, b, 0.5)]);
@@ -402,7 +402,7 @@ mod tests {
     fn partial_allocations_exceed_capacity_conflict() {
         // Two blocks at 0.6 each, overlapping → demand 1.2 > 1.0.
         let mut m = Model::default();
-        let r = m.create_resource_block("R", ResourceType::Person);
+        let r = m.create_resource_block("R", ResourceType::Engineer);
         let a = placed(&mut m, "A", 0, 4);
         let b = placed(&mut m, "B", 0, 4);
         let pid = make_plan(&mut m, vec![alloc(r, a, 0.6), alloc(r, b, 0.6)]);
@@ -416,7 +416,7 @@ mod tests {
     fn reduced_availability_causes_conflict() {
         // R available at factor 0.5; one block allocated at 1.0 → overload.
         let mut m = Model::default();
-        let r = m.create_resource_block("R", ResourceType::Person);
+        let r = m.create_resource_block("R", ResourceType::Engineer);
         m.resource_blocks.get_mut(&r).unwrap().availability = AvailabilityTimeline {
             segments: vec![AvailabilitySegment {
                 start: 0,
@@ -439,7 +439,7 @@ mod tests {
         // A block placed entirely in that gap at factor 1.2 exceeds capacity 1.0
         // (the gap-is-full-capacity rule), producing a conflict with capacity=1.0.
         let mut m = Model::default();
-        let r = m.create_resource_block("R", ResourceType::Person);
+        let r = m.create_resource_block("R", ResourceType::Engineer);
         m.resource_blocks.get_mut(&r).unwrap().availability = AvailabilityTimeline {
             segments: vec![
                 AvailabilitySegment {

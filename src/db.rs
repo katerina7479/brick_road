@@ -807,7 +807,7 @@ pub fn validate_model(model: &Model) -> Result<()> {
 
 fn parse_resource_type(s: &str) -> Result<ResourceType> {
     match s {
-        "Person" => Ok(ResourceType::Person),
+        "Engineer" | "Person" => Ok(ResourceType::Engineer),
         "Team" => Ok(ResourceType::Team),
         "Equipment" => Ok(ResourceType::Equipment),
         "Budget" => Ok(ResourceType::Budget),
@@ -831,7 +831,7 @@ fn parse_dependency_type(s: &str) -> Result<DependencyType> {
 
 fn resource_type_str(rt: ResourceType) -> &'static str {
     match rt {
-        ResourceType::Person => "Person",
+        ResourceType::Engineer => "Engineer",
         ResourceType::Team => "Team",
         ResourceType::Equipment => "Equipment",
         ResourceType::Budget => "Budget",
@@ -933,7 +933,7 @@ mod tests {
         let mut m = Model::default();
 
         // Resources created in ascending ID order so ORDER BY id on reload is deterministic.
-        let rb1 = m.create_resource_block("Alice", ResourceType::Person);
+        let rb1 = m.create_resource_block("Alice", ResourceType::Engineer);
         m.resource_blocks
             .get_mut(&rb1)
             .unwrap()
@@ -1097,7 +1097,7 @@ mod tests {
     #[test]
     fn validate_accepts_valid_model() {
         let mut m = Model::default();
-        let rb = m.create_resource_block("Alice", ResourceType::Person);
+        let rb = m.create_resource_block("Alice", ResourceType::Engineer);
         let wb_a = m.create_work_block("a");
         let wb_b = m.create_work_block("b");
         let _dep = m.create_dependency(wb_a, wb_b, DependencyType::FinishToStart);
@@ -1196,7 +1196,7 @@ mod tests {
     fn stale_entity_deletion_across_multiple_types() {
         let conn = open_in_memory();
         let mut m = Model::default();
-        let rb_id = m.create_resource_block("Alice", ResourceType::Person);
+        let rb_id = m.create_resource_block("Alice", ResourceType::Engineer);
         let wb_a = wb(&mut m, "A", 2);
         let wb_b = wb(&mut m, "B", 3);
         let dep = m.create_dependency(wb_a, wb_b, DependencyType::FinishToStart);
