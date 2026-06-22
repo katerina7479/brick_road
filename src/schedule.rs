@@ -22,13 +22,6 @@ pub fn calendar_span(start_day: Day, effort_days: Day, config: &CalendarConfig) 
     crate::calendar::effort_to_calendar_days(effort_days, start_date, config)
 }
 
-/// Snaps a computed start day to the start of the next whole working day.
-/// Fractional positions (mid-day) are ceiled so blocks begin at day boundaries.
-/// Whole-number positions are returned unchanged.
-fn snap_to_day_start(t: Day) -> Day {
-    t
-}
-
 /// The computed time placement of one work block.
 #[derive(Debug, Clone)]
 pub struct ScheduledBlock {
@@ -176,12 +169,12 @@ pub fn update_today_marker(model: Res<Model>, mut today: ResMut<TodayMarker>) {
 /// Successors are visited in topological order so each block is updated after
 /// all of its own predecessors. For each successor, `start_day` is set to the
 /// maximum bound imposed by ALL of its predecessors (not only those reachable
-/// from `root`), clamped to ≥ 0.0. Constraint formulas (P = predecessor,
-/// S = successor, lag in days):
-///   FS:  S.start = P.start + P.dur + lag
-///   SS:  S.start = P.start + lag
-///   FF:  S.start = P.start + P.dur + lag − S.dur
-///   SF:  S.start = P.start + lag − S.dur
+/// from `root`), clamped to ≥ 0. Constraint formulas (P = predecessor,
+/// S = successor):
+///   FS:  S.start = P.end
+///   SS:  S.start = P.start
+///   FF:  S.start = P.end − S.dur
+///   SF:  S.start = P.start − S.dur
 /// The earliest start day `block` may legally have given its predecessors'
 /// current positions — the maximum lower bound across its incoming dependencies
 /// (B depends on A: B.start ≥ bound(A)). `0` if it has no predecessors.
@@ -349,11 +342,11 @@ pub fn cascade_dependencies(model: &mut Model, root: WorkBlockId) {
 /// Planning mode, PRD §6.1). Uses each block's `duration_days`; no resource
 /// constraints are applied.
 ///
-/// Dependency semantics (P = predecessor, S = successor, lag in days):
-///   FS:  start(S) ≥ end(P)   + lag
-///   SS:  start(S) ≥ start(P) + lag
-///   FF:    end(S) ≥ end(P)   + lag
-///   SF:    end(S) ≥ start(P) + lag
+/// Dependency semantics (P = predecessor, S = successor):
+///   FS:  start(S) ≥ end(P)
+///   SS:  start(S) ≥ start(P)
+///   FF:    end(S) ≥ end(P)
+///   SF:    end(S) ≥ start(P)
 ///
 /// Returns `Err(CycleError)` if the dependency graph contains a cycle.
 pub fn forward_pass(model: &Model, graph: &DependencyGraph) -> Result<Schedule, CycleError> {
@@ -381,7 +374,7 @@ pub fn forward_pass(model: &Model, graph: &DependencyGraph) -> Result<Schedule, 
             .map(|me| me - dur)
             .unwrap_or(0);
 
-        let earliest_start = snap_to_day_start(0.max(es_from_start.max(es_from_end)));
+        let earliest_start = 0.max(es_from_start.max(es_from_end));
         let earliest_end = earliest_start + dur;
 
         // Propagate constraints to successors.
@@ -765,7 +758,7 @@ mod tests {
 
     #[test]
     fn cascade_sf_adjusts_successor_start() {
-        // SF: succ.end >= pred.start + lag  =>  succ.start = pred.start + lag - succ.dur
+        // SF: succ.end >= pred.start  =>  succ.start = pred.start - succ.dur
         let mut m = Model::default();
         let a = placed(&mut m, "A", 4, 2);
         let b = placed(&mut m, "B", 0, 5); // end=5 >= pred.start=4 — satisfies SF

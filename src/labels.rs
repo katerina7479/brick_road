@@ -50,11 +50,6 @@ fn format_day_label(day: i32, month_only: bool, model: &Model) -> String {
 #[derive(Component)]
 pub struct DayLabel;
 
-/// Stub — row labels removed by br-57 (names inside blocks), day labels
-/// handled by `spawn_day_labels`. Kept as a no-op because main.rs
-/// registrations reference it; safe to remove in a cleanup pass.
-pub fn spawn_labels() {}
-
 /// Spawns (or re-spawns) day-number labels along the top of the timeline.
 ///
 /// Respawns when:

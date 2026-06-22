@@ -929,7 +929,7 @@ mod tests {
         placed(&mut m, branch, "b", 5, 3);
 
         let kept = m.clear_all_work();
-        assert_eq!(kept, main, "main is preserved as the active plan");
+        assert_eq!(kept, main, "main plan is preserved");
         assert!(m.work_blocks.is_empty(), "all blocks wiped");
         assert!(m.dependencies.is_empty(), "all links wiped");
         assert_eq!(m.plans.len(), 1, "only main remains");
