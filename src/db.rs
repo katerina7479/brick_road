@@ -36,10 +36,8 @@ pub fn create_tables(conn: &Connection) -> Result<()> {
         "ALTER TABLE plans ADD COLUMN branch_start_day INTEGER",
         "ALTER TABLE plans ADD COLUMN row_names TEXT NOT NULL DEFAULT ''",
         "ALTER TABLE dependencies ADD COLUMN plan_id INTEGER",
-        // The block lane moved from a shared work_blocks column to per-plan
-        // storage: each plan owns each block's row, serialized into this cell
-        // (mirrors row_names). The legacy work_blocks.block_row column is kept so
-        // load_model can backfill pre-move DBs once; it is otherwise unused.
+        // The block lane is per-plan: each plan owns each block's row,
+        // serialized into this cell (mirrors row_names).
         "ALTER TABLE plans ADD COLUMN block_rows TEXT NOT NULL DEFAULT ''",
         // Resource allocations were removed (vestigial: no UI created them and no
         // running system read them). Drop the table on pre-existing DBs.
@@ -649,53 +647,6 @@ pub fn load_model(conn: &Connection) -> Result<Model> {
             let (plan_id, wb_id) = row?;
             if let Some(plan) = model.plans.get_mut(&PlanId(plan_id as u64)) {
                 plan.root_blocks.push(WorkBlockId(wb_id as u64));
-            }
-        }
-    }
-
-    // One-time lane backfill: DBs from before the lane moved per-plan still carry
-    // the old shared work_blocks.block_row column. For any plan that has no
-    // serialized block_rows yet, seed it from those legacy values — main gets
-    // every block it owns (its roots plus all child blocks, which only exist
-    // under main's hierarchy), each branch gets its root blocks. Fresh and
-    // already-migrated DBs lack the column ("no such column") and are skipped.
-    {
-        let legacy: Option<std::collections::HashMap<WorkBlockId, i32>> = conn
-            .prepare("SELECT id, block_row FROM work_blocks")
-            .and_then(|mut stmt| {
-                let rows = stmt.query_map([], |row| {
-                    Ok((
-                        WorkBlockId(row.get::<_, i64>(0)? as u64),
-                        row.get::<_, i64>(1)? as i32,
-                    ))
-                })?;
-                rows.collect::<Result<std::collections::HashMap<_, _>>>()
-            })
-            .ok();
-        if let Some(legacy) = legacy {
-            let main_id = model.main_plan_id();
-            let child_ids: Vec<WorkBlockId> = model
-                .work_blocks
-                .values()
-                .filter(|wb| wb.parent.is_some())
-                .map(|wb| wb.id)
-                .collect();
-            for plan in model.plans.values_mut() {
-                if !plan.block_rows.is_empty() {
-                    continue;
-                }
-                for &id in &plan.root_blocks {
-                    if let Some(&r) = legacy.get(&id) {
-                        plan.block_rows.insert(id, r);
-                    }
-                }
-                if Some(plan.id) == main_id {
-                    for &id in &child_ids {
-                        if let Some(&r) = legacy.get(&id) {
-                            plan.block_rows.insert(id, r);
-                        }
-                    }
-                }
             }
         }
     }
