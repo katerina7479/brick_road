@@ -1443,7 +1443,15 @@ fn commit_row_name(
     let merge_target = if name.is_empty() {
         None
     } else {
-        (0..64).find(|&other| {
+        // Bound the search by the actual number of allocated rows so a named
+        // resource on a high-numbered row is never silently missed.
+        let named_row_count = model
+            .plans
+            .get(&plan_id)
+            .and_then(|p| p.row_names.get(&scope))
+            .map(|v| v.len() as i32)
+            .unwrap_or(0);
+        (0..named_row_count).find(|&other| {
             other != row
                 && model
                     .resolved_row_name(plan_id, scope, other)

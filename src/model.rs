@@ -471,6 +471,10 @@ impl Model {
     /// The vertical lane `block` occupies within `plan`. Defaults to `0` when
     /// the plan has no recorded lane for the block (e.g. a block that was never
     /// placed). This is the single source of truth for a block's row.
+    ///
+    /// All render systems that call this only iterate over `VisibleBlocks`, which
+    /// are exclusively the main plan's root blocks — so a non-main block never
+    /// reaches this call and the 0-default is never triggered unexpectedly.
     pub fn block_row(&self, plan: PlanId, block: WorkBlockId) -> i32 {
         self.plans
             .get(&plan)
