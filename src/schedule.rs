@@ -226,12 +226,12 @@ fn lower_bound(model: &Model, block: WorkBlockId, plan: Option<PlanId>) -> Day {
                 .work_blocks
                 .get(&d.predecessor)
                 .map(|p| match d.dependency_type {
-                    DependencyType::FinishToStart => p.start_day + p.duration_days + d.lag,
-                    DependencyType::StartToStart => p.start_day + d.lag,
+                    DependencyType::FinishToStart => p.start_day + p.duration_days,
+                    DependencyType::StartToStart => p.start_day,
                     DependencyType::FinishToFinish => {
-                        p.start_day + p.duration_days + d.lag - succ_dur
+                        p.start_day + p.duration_days - succ_dur
                     }
-                    DependencyType::StartToFinish => p.start_day + d.lag - succ_dur,
+                    DependencyType::StartToFinish => p.start_day - succ_dur,
                 })
         })
         .fold(0, |a, b| a.max(b))
@@ -261,12 +261,12 @@ pub fn dependency_satisfied(model: &Model, dep: &crate::model::Dependency) -> bo
         return true;
     };
     let bound = match dep.dependency_type {
-        DependencyType::FinishToStart => pred.start_day + pred.duration_days + dep.lag,
-        DependencyType::StartToStart => pred.start_day + dep.lag,
+        DependencyType::FinishToStart => pred.start_day + pred.duration_days,
+        DependencyType::StartToStart => pred.start_day,
         DependencyType::FinishToFinish => {
-            pred.start_day + pred.duration_days + dep.lag - succ.duration_days
+            pred.start_day + pred.duration_days - succ.duration_days
         }
-        DependencyType::StartToFinish => pred.start_day + dep.lag - succ.duration_days,
+        DependencyType::StartToFinish => pred.start_day - succ.duration_days,
     };
     succ.start_day >= bound
 }
@@ -415,31 +415,27 @@ pub fn forward_pass(
                 let s = edge.successor;
                 match edge.dependency_type {
                     DependencyType::FinishToStart => {
-                        let new = earliest_end + edge.lag;
                         let v = min_start.entry(s).or_insert(0);
-                        if new > *v {
-                            *v = new;
+                        if earliest_end > *v {
+                            *v = earliest_end;
                         }
                     }
                     DependencyType::StartToStart => {
-                        let new = earliest_start + edge.lag;
                         let v = min_start.entry(s).or_insert(0);
-                        if new > *v {
-                            *v = new;
+                        if earliest_start > *v {
+                            *v = earliest_start;
                         }
                     }
                     DependencyType::FinishToFinish => {
-                        let new = earliest_end + edge.lag;
                         let v = min_end.entry(s).or_insert(None);
-                        if v.is_none_or(|cur| new > cur) {
-                            *v = Some(new);
+                        if v.is_none_or(|cur| earliest_end > cur) {
+                            *v = Some(earliest_end);
                         }
                     }
                     DependencyType::StartToFinish => {
-                        let new = earliest_start + edge.lag;
                         let v = min_end.entry(s).or_insert(None);
-                        if v.is_none_or(|cur| new > cur) {
-                            *v = Some(new);
+                        if v.is_none_or(|cur| earliest_start > cur) {
+                            *v = Some(earliest_start);
                         }
                     }
                 }
@@ -484,14 +480,14 @@ pub fn backward_pass(
     schedule: &Schedule,
 ) -> CriticalPathAnalysis {
     // Build reverse edge map: successor → [(predecessor, dependency_type, lag)].
-    let mut reverse: HashMap<WorkBlockId, Vec<(WorkBlockId, DependencyType, Day)>> =
+    let mut reverse: HashMap<WorkBlockId, Vec<(WorkBlockId, DependencyType)>> =
         graph.nodes.iter().map(|&id| (id, Vec::new())).collect();
     for (&pred, edges) in &graph.edges {
         for edge in edges {
             reverse
                 .entry(edge.successor)
                 .or_default()
-                .push((pred, edge.dependency_type, edge.lag));
+                .push((pred, edge.dependency_type));
         }
     }
 
@@ -512,17 +508,17 @@ pub fn backward_pass(
         let ls_s = lf_s - dur_s;
 
         if let Some(preds) = reverse.get(&s_id) {
-            for &(pred_id, dep_type, lag) in preds {
+            for &(pred_id, dep_type) in preds {
                 let dur_p = schedule
                     .blocks
                     .get(&pred_id)
                     .map(|b| b.duration_days)
                     .unwrap_or(0);
                 let bound = match dep_type {
-                    DependencyType::FinishToStart => ls_s - lag,
-                    DependencyType::StartToStart => ls_s - lag + dur_p,
-                    DependencyType::FinishToFinish => lf_s - lag,
-                    DependencyType::StartToFinish => lf_s - lag + dur_p,
+                    DependencyType::FinishToStart => ls_s,
+                    DependencyType::StartToStart => ls_s + dur_p,
+                    DependencyType::FinishToFinish => lf_s,
+                    DependencyType::StartToFinish => lf_s + dur_p,
                 };
                 let v = latest_finish.entry(pred_id).or_insert(total);
                 if bound < *v {
@@ -579,14 +575,14 @@ pub fn analyze_user_placement(
         .fold(0, |a, b| a.max(b));
 
     // Build reverse edge map: successor → [(predecessor, dep_type, lag)].
-    let mut reverse: HashMap<WorkBlockId, Vec<(WorkBlockId, DependencyType, Day)>> =
+    let mut reverse: HashMap<WorkBlockId, Vec<(WorkBlockId, DependencyType)>> =
         graph.nodes.iter().map(|&id| (id, Vec::new())).collect();
     for (&pred, edges) in &graph.edges {
         for edge in edges {
             reverse
                 .entry(edge.successor)
                 .or_default()
-                .push((pred, edge.dependency_type, edge.lag));
+                .push((pred, edge.dependency_type));
         }
     }
 
@@ -605,17 +601,17 @@ pub fn analyze_user_placement(
         let ls_s = lf_s - dur_s;
 
         if let Some(preds) = reverse.get(&s_id) {
-            for &(pred_id, dep_type, lag) in preds {
+            for &(pred_id, dep_type) in preds {
                 let dur_p = model
                     .work_blocks
                     .get(&pred_id)
                     .map(|wb| wb.duration_days)
                     .unwrap_or(0);
                 let bound = match dep_type {
-                    DependencyType::FinishToStart => ls_s - lag,
-                    DependencyType::StartToStart => ls_s - lag + dur_p,
-                    DependencyType::FinishToFinish => lf_s - lag,
-                    DependencyType::StartToFinish => lf_s - lag + dur_p,
+                    DependencyType::FinishToStart => ls_s,
+                    DependencyType::StartToStart => ls_s + dur_p,
+                    DependencyType::FinishToFinish => lf_s,
+                    DependencyType::StartToFinish => lf_s + dur_p,
                 };
                 let v = latest_finish.entry(pred_id).or_insert(total);
                 if bound < *v {
@@ -709,31 +705,6 @@ mod tests {
     }
 
     #[test]
-    fn finish_to_start_with_lag() {
-        // A(3) --FS+2--> B(2): B.start ≥ 3+2=5
-        let (mut m, _) = base();
-        let a = mk(&mut m, "A", 3);
-        let b = mk(&mut m, "B", 2);
-        let dep = m.create_dependency(a, b, DependencyType::FinishToStart);
-        m.dependencies.get_mut(&dep).unwrap().lag = 2;
-        let s = run(&m, vec![a, b]);
-        assert_eq!(s.blocks[&b].start_day, 5);
-        assert_eq!(s.blocks[&b].end_day, 7);
-    }
-
-    #[test]
-    fn negative_lag_lead() {
-        // A(3) --FS-1--> B(2): B.start ≥ 3-1=2
-        let (mut m, _) = base();
-        let a = mk(&mut m, "A", 3);
-        let b = mk(&mut m, "B", 2);
-        let dep = m.create_dependency(a, b, DependencyType::FinishToStart);
-        m.dependencies.get_mut(&dep).unwrap().lag = -1;
-        let s = run(&m, vec![a, b]);
-        assert_eq!(s.blocks[&b].start_day, 2);
-    }
-
-    #[test]
     fn start_to_start() {
         // A(3) --SS--> B(2): B.start ≥ 0 → runs in parallel
         let (mut m, _) = base();
@@ -743,18 +714,6 @@ mod tests {
         let s = run(&m, vec![a, b]);
         assert_eq!(s.blocks[&b].start_day, 0);
         assert_eq!(s.blocks[&b].end_day, 2);
-    }
-
-    #[test]
-    fn start_to_start_with_lag() {
-        // A(3) --SS+1--> B(2): B.start ≥ 1
-        let (mut m, _) = base();
-        let a = mk(&mut m, "A", 3);
-        let b = mk(&mut m, "B", 2);
-        let dep = m.create_dependency(a, b, DependencyType::StartToStart);
-        m.dependencies.get_mut(&dep).unwrap().lag = 1;
-        let s = run(&m, vec![a, b]);
-        assert_eq!(s.blocks[&b].start_day, 1);
     }
 
     #[test]
@@ -770,16 +729,15 @@ mod tests {
     }
 
     #[test]
-    fn start_to_finish_with_lag() {
-        // A(3) --SF+4--> B(2): B.end ≥ 0+4=4 → B.start=2
+    fn start_to_finish() {
+        // A(3) --SF--> B(2): B.end ≥ A.start = 0 → B unconstrained, starts at 0
         let (mut m, _) = base();
         let a = mk(&mut m, "A", 3);
         let b = mk(&mut m, "B", 2);
-        let dep = m.create_dependency(a, b, DependencyType::StartToFinish);
-        m.dependencies.get_mut(&dep).unwrap().lag = 4;
+        m.create_dependency(a, b, DependencyType::StartToFinish);
         let s = run(&m, vec![a, b]);
-        assert_eq!(s.blocks[&b].start_day, 2);
-        assert_eq!(s.blocks[&b].end_day, 4);
+        assert_eq!(s.blocks[&b].start_day, 0);
+        assert_eq!(s.blocks[&b].end_day, 2);
     }
 
     #[test]
@@ -923,21 +881,6 @@ mod tests {
         assert!(!ana.critical_path.contains(&a), "A not on critical path");
     }
 
-    #[test]
-    fn float_with_lag() {
-        // A(3) --FS+2--> B(2): EF_A=3, ES_B=5, EF_B=7, total=7
-        // Backward: LF_B=7, LS_B=5, LF_A ≤ LS_B − 2 = 3 → float_A=3−3=0
-        let (mut m, _) = base();
-        let a = mk(&mut m, "A", 3);
-        let b = mk(&mut m, "B", 2);
-        let dep = m.create_dependency(a, b, DependencyType::FinishToStart);
-        m.dependencies.get_mut(&dep).unwrap().lag = 2;
-        let (_, ana) = analyze(&m, vec![a, b]);
-        assert_eq!(*ana.float.get(&a).unwrap(), 0);
-        assert_eq!(*ana.float.get(&b).unwrap(), 0);
-        assert_eq!(ana.critical_path, vec![a, b]);
-    }
-
     // --- analyze_user_placement tests ---
 
     fn place(model: &mut Model, id: WorkBlockId, start: Day, dur: Day) {
@@ -1006,21 +949,6 @@ mod tests {
     }
 
     #[test]
-    fn user_placement_float_with_lag() {
-        // A(0→3) --FS+2--> B(5→7): LS_B=5, LF_A ≤ 5−2=3 → float_A = 3−3 = 0
-        let (mut m, _) = base();
-        let a = mk(&mut m, "A", 3);
-        let b = mk(&mut m, "B", 2);
-        let dep = m.create_dependency(a, b, DependencyType::FinishToStart);
-        m.dependencies.get_mut(&dep).unwrap().lag = 2;
-        place(&mut m, a, 0, 3);
-        place(&mut m, b, 5, 2);
-        let ana = analyze_placed(&m, vec![a, b]);
-        assert_eq!(ana.float[&a], 0);
-        assert_eq!(ana.float[&b], 0);
-    }
-
-    #[test]
     fn user_placement_ss_predecessor_has_float() {
         // A(0→3) --SS--> B(1→5): SS requires B.start ≥ A.start (slack = 1 day).
         // total = 5; backward: LS_B = 5−4 = 1; LF_A_bound = LS_B − 0 + dur_A = 1 + 3 = 4
@@ -1048,24 +976,6 @@ mod tests {
         m.create_dependency(a, b, DependencyType::FinishToFinish);
         place(&mut m, a, 0, 3);
         place(&mut m, b, 1, 2);
-        let ana = analyze_placed(&m, vec![a, b]);
-        assert_eq!(ana.float[&a], 0, "A float should be 0");
-        assert_eq!(ana.float[&b], 0, "B float should be 0");
-        assert!(ana.critical_path.contains(&a), "A is critical");
-        assert!(ana.critical_path.contains(&b), "B is critical");
-    }
-
-    #[test]
-    fn user_placement_sf_with_lag_both_critical() {
-        // A(0→3) --SF+4--> B(0→4): SF+4 requires B.end ≥ A.start+4 = 4; B.end = 4 (tight).
-        // total = 4; backward: LF_A_bound = LF_B − 4 + dur_A = 4 − 4 + 3 = 3 → float_A = 0.
-        let (mut m, _) = base();
-        let a = mk(&mut m, "A", 3);
-        let b = mk(&mut m, "B", 4);
-        let dep = m.create_dependency(a, b, DependencyType::StartToFinish);
-        m.dependencies.get_mut(&dep).unwrap().lag = 4;
-        place(&mut m, a, 0, 3);
-        place(&mut m, b, 0, 4);
         let ana = analyze_placed(&m, vec![a, b]);
         assert_eq!(ana.float[&a], 0, "A float should be 0");
         assert_eq!(ana.float[&b], 0, "B float should be 0");
@@ -1110,10 +1020,6 @@ mod tests {
         // FS: B.start >= A.end = 7.
         let dep = m.create_dependency(a, b, DependencyType::FinishToStart);
         assert_eq!(predecessor_lower_bound(&m, b), 7);
-        // lag shifts the bound.
-        m.dependencies.get_mut(&dep).unwrap().lag = 2;
-        assert_eq!(predecessor_lower_bound(&m, b), 9);
-        m.dependencies.get_mut(&dep).unwrap().lag = 0;
 
         // SS: B.start >= A.start = 2.
         m.dependencies.get_mut(&dep).unwrap().dependency_type = DependencyType::StartToStart;
