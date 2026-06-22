@@ -8,7 +8,6 @@ pub struct DependencyViolation {
     pub predecessor: WorkBlockId,
     pub successor: WorkBlockId,
     pub dependency_type: DependencyType,
-    pub lag: Day,
     /// Days by which the constraint is violated (always > 0 when present).
     pub violation_days: Day,
 }
@@ -16,11 +15,11 @@ pub struct DependencyViolation {
 /// Check every dependency in `model` against the current user-placed
 /// `start_day` / `duration_days` on each `WorkBlock`.
 ///
-/// Constraint semantics (P = predecessor, S = successor, lag in days):
-///   FS:  S.start     ≥ P.end   + lag
-///   SS:  S.start     ≥ P.start + lag
-///   FF:  S.end       ≥ P.end   + lag
-///   SF:  S.end       ≥ P.start + lag
+/// Constraint semantics (P = predecessor, S = successor):
+///   FS:  S.start ≥ P.end
+///   SS:  S.start ≥ P.start
+///   FF:  S.end   ≥ P.end
+///   SF:  S.end   ≥ P.start
 ///
 /// A violation occurs when the required bound exceeds the placed value;
 /// `violation_days` is the magnitude of the shortfall.
@@ -37,13 +36,12 @@ pub fn analyze_dependencies(model: &Model) -> Vec<DependencyViolation> {
 
         let pred_end = pred.start_day + pred.duration_days;
         let succ_end = succ.start_day + succ.duration_days;
-        let lag = dep.lag;
 
         let violation_days = match dep.dependency_type {
-            DependencyType::FinishToStart => pred_end + lag - succ.start_day,
-            DependencyType::StartToStart => pred.start_day + lag - succ.start_day,
-            DependencyType::FinishToFinish => pred_end + lag - succ_end,
-            DependencyType::StartToFinish => pred.start_day + lag - succ_end,
+            DependencyType::FinishToStart => pred_end - succ.start_day,
+            DependencyType::StartToStart => pred.start_day - succ.start_day,
+            DependencyType::FinishToFinish => pred_end - succ_end,
+            DependencyType::StartToFinish => pred.start_day - succ_end,
         };
 
         if violation_days > 0 {
@@ -52,7 +50,6 @@ pub fn analyze_dependencies(model: &Model) -> Vec<DependencyViolation> {
                 predecessor: dep.predecessor,
                 successor: dep.successor,
                 dependency_type: dep.dependency_type,
-                lag,
                 violation_days,
             });
         }
@@ -96,18 +93,6 @@ mod tests {
         assert_eq!(v[0].predecessor, a);
         assert_eq!(v[0].successor, b);
         assert_eq!(v[0].violation_days, 2);
-    }
-
-    #[test]
-    fn fs_with_lag_violation() {
-        let mut m = Model::default();
-        let a = placed(&mut m, "A", 0, 3);
-        let b = placed(&mut m, "B", 4, 2);
-        let dep_id = m.create_dependency(a, b, DependencyType::FinishToStart);
-        m.dependencies.get_mut(&dep_id).unwrap().lag = 2;
-        let v = &analyze_dependencies(&m);
-        assert_eq!(v.len(), 1);
-        assert_eq!(v[0].violation_days, 1);
     }
 
     #[test]

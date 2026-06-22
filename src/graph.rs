@@ -1,14 +1,12 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use crate::model::{Day, DependencyType, Model, Plan, WorkBlockId};
+use crate::model::{DependencyType, Model, Plan, WorkBlockId};
 
 /// One directed edge in the dependency graph.
 #[derive(Debug, Clone)]
 pub struct Edge {
     pub successor: WorkBlockId,
     pub dependency_type: DependencyType,
-    /// Lag in days (positive = delay, negative = lead).
-    pub lag: Day,
 }
 
 /// Directed acyclic graph of active work blocks for one Plan.
@@ -17,7 +15,7 @@ pub struct Edge {
 #[derive(Debug)]
 pub struct DependencyGraph {
     pub nodes: HashSet<WorkBlockId>,
-    /// predecessor → outgoing edges (successor, type, lag).
+    /// predecessor → outgoing edges.
     pub edges: HashMap<WorkBlockId, Vec<Edge>>,
     /// in-degree for each node (number of predecessor edges).
     pub in_degree: HashMap<WorkBlockId, usize>,
@@ -66,7 +64,6 @@ pub fn build_graph(model: &Model, plan: &Plan) -> DependencyGraph {
             edges.entry(dep.predecessor).or_default().push(Edge {
                 successor: dep.successor,
                 dependency_type: dep.dependency_type,
-                lag: dep.lag,
             });
             *in_degree.entry(dep.successor).or_insert(0) += 1;
         }

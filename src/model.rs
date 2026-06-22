@@ -161,8 +161,6 @@ pub struct Dependency {
     pub predecessor: WorkBlockId,
     pub successor: WorkBlockId,
     pub dependency_type: DependencyType,
-    /// Optional lag in days (positive = delay, negative = lead).
-    pub lag: Day,
 }
 
 /// A proposed future: a named scenario that selects blocks.
@@ -346,7 +344,6 @@ impl Model {
                 predecessor,
                 successor,
                 dependency_type,
-                lag: 0,
             },
         );
         id
