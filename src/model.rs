@@ -124,23 +124,6 @@ pub struct ResourceBlock {
     pub id: ResourceBlockId,
     pub name: String,
     pub resource_type: ResourceType,
-    pub availability: AvailabilityTimeline,
-}
-
-/// A contiguous span of time during which a resource is available.
-/// Start and end are in days relative to the plan origin.
-#[derive(Debug, Clone, PartialEq)]
-pub struct AvailabilitySegment {
-    pub start: Day,
-    pub end: Day,
-    /// Fraction of full capacity available in this segment (0.0–1.0).
-    pub factor: f32,
-}
-
-/// Ordered sequence of availability segments for a resource.
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct AvailabilityTimeline {
-    pub segments: Vec<AvailabilitySegment>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -306,7 +289,6 @@ impl Model {
                 id,
                 name: name.into(),
                 resource_type,
-                availability: AvailabilityTimeline::default(),
             },
         );
         id

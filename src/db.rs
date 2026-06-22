@@ -2,8 +2,8 @@ use chrono::NaiveDate;
 use rusqlite::{Connection, Result};
 
 use crate::model::{
-    AvailabilitySegment, AvailabilityTimeline, Dependency, DependencyId, DependencyType, Model,
-    Plan, PlanId, ResourceBlock, ResourceBlockId, ResourceType, TShirtSize, WorkBlock, WorkBlockId,
+    Dependency, DependencyId, DependencyType, Model, Plan, PlanId, ResourceBlock, ResourceBlockId,
+    ResourceType, TShirtSize, WorkBlock, WorkBlockId,
 };
 
 pub fn create_tables(conn: &Connection) -> Result<()> {
@@ -87,7 +87,8 @@ pub fn create_tables(conn: &Connection) -> Result<()> {
          DROP TABLE IF EXISTS confidence_factors;
          DROP TABLE IF EXISTS variants;
          DROP TABLE IF EXISTS variant_children;
-         DROP TABLE IF EXISTS variant_block_positions;",
+         DROP TABLE IF EXISTS variant_block_positions;
+         DROP TABLE IF EXISTS availability_segments;",
     )?;
     // Seed default t-shirt sizes on first use (table created above).
     let count: i64 = conn.query_row("SELECT COUNT(*) FROM t_shirt_sizes", [], |r| r.get(0))?;
@@ -133,7 +134,6 @@ pub fn save_model(conn: &Connection, model: &Model) -> Result<()> {
     // children of their own, so truncating them is always safe.
     tx.execute_batch(
         "DELETE FROM plan_blocks;
-         DELETE FROM availability_segments;
          DELETE FROM calendar_non_working_dates;
          DELETE FROM t_shirt_sizes;
          DELETE FROM quarter_colors;",
@@ -290,23 +290,6 @@ pub fn save_model(conn: &Connection, model: &Model) -> Result<()> {
     )?;
 
     // ── Phase 4: reinsert join table rows for current entities ────────────────
-
-    for rb in model.resource_blocks.values() {
-        for (order, seg) in rb.availability.segments.iter().enumerate() {
-            tx.execute(
-                "INSERT INTO availability_segments
-                     (resource_block_id, start_day, end_day, factor, sort_order)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
-                (
-                    rb.id.0 as i64,
-                    seg.start as i64,
-                    seg.end as i64,
-                    seg.factor as f64,
-                    order as i64,
-                ),
-            )?;
-        }
-    }
 
     for plan in model.plans.values() {
         for (order, &wb_id) in plan.root_blocks.iter().enumerate() {
@@ -465,39 +448,8 @@ pub fn load_model(conn: &Connection) -> Result<Model> {
                     id: ResourceBlockId(id as u64),
                     name,
                     resource_type,
-                    availability: AvailabilityTimeline::default(),
                 },
             );
-        }
-    }
-
-    // availability_segments  (ORDER BY guarantees segment ordering)
-    {
-        let mut stmt = conn.prepare(
-            "SELECT resource_block_id, start_day, end_day, factor
-             FROM availability_segments
-             ORDER BY resource_block_id, sort_order",
-        )?;
-        let rows = stmt.query_map([], |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, i64>(1)?,
-                row.get::<_, i64>(2)?,
-                row.get::<_, f64>(3)?,
-            ))
-        })?;
-        for row in rows {
-            let (rb_id, start, end, factor) = row?;
-            if let Some(rb) = model
-                .resource_blocks
-                .get_mut(&ResourceBlockId(rb_id as u64))
-            {
-                rb.availability.segments.push(AvailabilitySegment {
-                    start: start as i32,
-                    end: end as i32,
-                    factor: factor as f32,
-                });
-            }
         }
     }
 
@@ -822,7 +774,7 @@ fn dependency_type_str(dt: DependencyType) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{AvailabilitySegment, Day, DependencyType, ResourceType, WorkBlockId};
+    use crate::model::{Day, DependencyType, ResourceType, WorkBlockId};
     use rusqlite::Connection;
 
     fn open_in_memory() -> Connection {
@@ -906,27 +858,7 @@ mod tests {
         let mut m = Model::default();
 
         // Resources created in ascending ID order so ORDER BY id on reload is deterministic.
-        let rb1 = m.create_resource_block("Alice", ResourceType::Engineer);
-        m.resource_blocks
-            .get_mut(&rb1)
-            .unwrap()
-            .availability
-            .segments
-            .push(AvailabilitySegment {
-                start: 0,
-                end: 100,
-                factor: 1.0,
-            });
-        m.resource_blocks
-            .get_mut(&rb1)
-            .unwrap()
-            .availability
-            .segments
-            .push(AvailabilitySegment {
-                start: 100,
-                end: 200,
-                factor: 0.5,
-            });
+        m.create_resource_block("Alice", ResourceType::Engineer);
         m.create_resource_block("Team Alpha", ResourceType::Team);
 
         let wb_a = wb(&mut m, "Design", 3);
@@ -1195,15 +1127,6 @@ CREATE TABLE IF NOT EXISTS resource_blocks (
     id            INTEGER PRIMARY KEY,
     name          TEXT    NOT NULL,
     resource_type TEXT    NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS availability_segments (
-    id                INTEGER PRIMARY KEY,
-    resource_block_id INTEGER NOT NULL REFERENCES resource_blocks(id),
-    start_day         INTEGER NOT NULL,
-    end_day           INTEGER NOT NULL,
-    factor            REAL    NOT NULL,
-    sort_order        INTEGER NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS work_blocks (
