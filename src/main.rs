@@ -5,7 +5,6 @@ use bevy::{
 use bevy_egui::{egui, EguiContexts, EguiPlugin, EguiPrimaryContextPass};
 use chrono::Datelike;
 
-pub mod analysis;
 pub mod bands;
 pub mod blocks;
 pub mod calendar;
