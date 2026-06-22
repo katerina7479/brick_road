@@ -32,12 +32,16 @@ pub fn create_tables(conn: &Connection) -> Result<()> {
         "ALTER TABLE work_blocks ADD COLUMN description TEXT NOT NULL DEFAULT ''",
         "ALTER TABLE work_blocks ADD COLUMN priority INTEGER NOT NULL DEFAULT 1",
         "ALTER TABLE work_blocks ADD COLUMN t_shirt_size TEXT",
-        "ALTER TABLE work_blocks ADD COLUMN block_row INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE work_blocks ADD COLUMN parent_id INTEGER",
         "ALTER TABLE work_blocks ADD COLUMN rollup INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE plans ADD COLUMN branch_start_day INTEGER",
         "ALTER TABLE plans ADD COLUMN row_names TEXT NOT NULL DEFAULT ''",
         "ALTER TABLE dependencies ADD COLUMN plan_id INTEGER",
+        // The block lane moved from a shared work_blocks column to per-plan
+        // storage: each plan owns each block's row, serialized into this cell
+        // (mirrors row_names). The legacy work_blocks.block_row column is kept so
+        // load_model can backfill pre-move DBs once; it is otherwise unused.
+        "ALTER TABLE plans ADD COLUMN block_rows TEXT NOT NULL DEFAULT ''",
     ] {
         match conn.execute_batch(sql) {
             Ok(()) => {}
@@ -160,8 +164,8 @@ pub fn save_model(conn: &Connection, model: &Model) -> Result<()> {
             "INSERT INTO work_blocks
                  (id, name,
                   start_day, duration_days, color_r, color_g, color_b, description, priority,
-                  t_shirt_size, block_row, parent_id, rollup)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+                  t_shirt_size, parent_id, rollup)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
              ON CONFLICT(id) DO UPDATE SET
                  name = excluded.name,
                  start_day = excluded.start_day,
@@ -172,7 +176,6 @@ pub fn save_model(conn: &Connection, model: &Model) -> Result<()> {
                  description = excluded.description,
                  priority = excluded.priority,
                  t_shirt_size = excluded.t_shirt_size,
-                 block_row = excluded.block_row,
                  parent_id = excluded.parent_id,
                  rollup = excluded.rollup",
             (
@@ -186,7 +189,6 @@ pub fn save_model(conn: &Connection, model: &Model) -> Result<()> {
                 &wb.description,
                 wb.priority as i64,
                 &wb.t_shirt_size,
-                wb.row as i64,
                 wb.parent.map(|p| p.0 as i64),
                 wb.rollup as i64,
             ),
@@ -217,17 +219,19 @@ pub fn save_model(conn: &Connection, model: &Model) -> Result<()> {
 
     for plan in model.plans.values() {
         tx.execute(
-            "INSERT INTO plans (id, name, branch_start_day, row_names)
-             VALUES (?1, ?2, ?3, ?4)
+            "INSERT INTO plans (id, name, branch_start_day, row_names, block_rows)
+             VALUES (?1, ?2, ?3, ?4, ?5)
              ON CONFLICT(id) DO UPDATE SET
                  name = excluded.name,
                  branch_start_day = excluded.branch_start_day,
-                 row_names = excluded.row_names",
+                 row_names = excluded.row_names,
+                 block_rows = excluded.block_rows",
             (
                 plan.id.0 as i64,
                 &plan.name,
                 plan.branch_start_day,
                 encode_row_names(&plan.row_names),
+                encode_block_rows(&plan.block_rows),
             ),
         )?;
     }
@@ -372,6 +376,32 @@ fn encode_row_names(rows: &std::collections::HashMap<Option<WorkBlockId>, Vec<St
     lines.join("\n")
 }
 
+/// Serializes a plan's per-block lane assignments into one TEXT cell: one
+/// `block_id<TAB>row` pair per line. Sorted for deterministic saves.
+fn encode_block_rows(rows: &std::collections::HashMap<WorkBlockId, i32>) -> String {
+    let mut lines: Vec<String> = rows
+        .iter()
+        .map(|(id, row)| format!("{}\t{}", id.0, row))
+        .collect();
+    lines.sort();
+    lines.join("\n")
+}
+
+/// Inverse of [`encode_block_rows`]. Unknown/malformed lines are skipped.
+fn decode_block_rows(s: &str) -> std::collections::HashMap<WorkBlockId, i32> {
+    let mut map = std::collections::HashMap::new();
+    for line in s.split('\n').filter(|l| !l.is_empty()) {
+        let mut tokens = line.split('\t');
+        let (Some(id), Some(row)) = (tokens.next(), tokens.next()) else {
+            continue;
+        };
+        if let (Ok(id), Ok(row)) = (id.parse::<u64>(), row.parse::<i32>()) {
+            map.insert(WorkBlockId(id), row);
+        }
+    }
+    map
+}
+
 /// Inverse of [`encode_row_names`]. Unknown/malformed lines are skipped.
 fn decode_row_names(s: &str) -> std::collections::HashMap<Option<WorkBlockId>, Vec<String>> {
     let mut map = std::collections::HashMap::new();
@@ -491,7 +521,7 @@ pub fn load_model(conn: &Connection) -> Result<Model> {
         let mut stmt = conn.prepare(
             "SELECT id, name,
                     start_day, duration_days, color_r, color_g, color_b, description, priority,
-                    t_shirt_size, block_row, parent_id, rollup
+                    t_shirt_size, parent_id, rollup
              FROM work_blocks",
         )?;
         let rows = stmt.query_map([], |row| {
@@ -506,9 +536,8 @@ pub fn load_model(conn: &Connection) -> Result<Model> {
                 row.get::<_, String>(7)?,
                 row.get::<_, i64>(8)?,
                 row.get::<_, Option<String>>(9)?,
-                row.get::<_, i64>(10)?,
-                row.get::<_, Option<i64>>(11)?,
-                row.get::<_, i64>(12)?,
+                row.get::<_, Option<i64>>(10)?,
+                row.get::<_, i64>(11)?,
             ))
         })?;
         for row in rows {
@@ -523,7 +552,6 @@ pub fn load_model(conn: &Connection) -> Result<Model> {
                 description,
                 priority,
                 t_shirt_size,
-                block_row,
                 parent_id,
                 rollup,
             ) = row?;
@@ -540,7 +568,6 @@ pub fn load_model(conn: &Connection) -> Result<Model> {
                     parent: parent_id.map(|p| WorkBlockId(p as u64)),
                     start_day: start_day as i32,
                     duration_days: duration_days as i32,
-                    row: block_row as i32,
                     color,
                     description,
                     priority: priority.clamp(0, 3) as u8,
@@ -589,17 +616,18 @@ pub fn load_model(conn: &Connection) -> Result<Model> {
     // plans
     {
         let mut stmt =
-            conn.prepare("SELECT id, name, branch_start_day, row_names FROM plans")?;
+            conn.prepare("SELECT id, name, branch_start_day, row_names, block_rows FROM plans")?;
         let rows = stmt.query_map([], |row| {
             Ok((
                 row.get::<_, i64>(0)?,
                 row.get::<_, String>(1)?,
                 row.get::<_, Option<f64>>(2)?,
                 row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
             ))
         })?;
         for row in rows {
-            let (id, name, branch_start_day, row_names) = row?;
+            let (id, name, branch_start_day, row_names, block_rows) = row?;
             bump!(id);
             model.plans.insert(
                 PlanId(id as u64),
@@ -610,6 +638,7 @@ pub fn load_model(conn: &Connection) -> Result<Model> {
                     allocations: vec![],
                     branch_start_day: branch_start_day.map(|d| d as i32),
                     row_names: decode_row_names(&row_names),
+                    block_rows: decode_block_rows(&block_rows),
                 },
             );
         }
@@ -637,6 +666,50 @@ pub fn load_model(conn: &Connection) -> Result<Model> {
             let (plan_id, wb_id) = row?;
             if let Some(plan) = model.plans.get_mut(&PlanId(plan_id as u64)) {
                 plan.root_blocks.push(WorkBlockId(wb_id as u64));
+            }
+        }
+    }
+
+    // One-time lane backfill: DBs from before the lane moved per-plan still carry
+    // the old shared work_blocks.block_row column. For any plan that has no
+    // serialized block_rows yet, seed it from those legacy values — main gets
+    // every block it owns (its roots plus all child blocks, which only exist
+    // under main's hierarchy), each branch gets its root blocks. Fresh and
+    // already-migrated DBs lack the column ("no such column") and are skipped.
+    {
+        let legacy: Option<std::collections::HashMap<WorkBlockId, i32>> = conn
+            .prepare("SELECT id, block_row FROM work_blocks")
+            .and_then(|mut stmt| {
+                let rows = stmt.query_map([], |row| {
+                    Ok((WorkBlockId(row.get::<_, i64>(0)? as u64), row.get::<_, i64>(1)? as i32))
+                })?;
+                rows.collect::<Result<std::collections::HashMap<_, _>>>()
+            })
+            .ok();
+        if let Some(legacy) = legacy {
+            let main_id = model.main_plan_id();
+            let child_ids: Vec<WorkBlockId> = model
+                .work_blocks
+                .values()
+                .filter(|wb| wb.parent.is_some())
+                .map(|wb| wb.id)
+                .collect();
+            for plan in model.plans.values_mut() {
+                if !plan.block_rows.is_empty() {
+                    continue;
+                }
+                for &id in &plan.root_blocks {
+                    if let Some(&r) = legacy.get(&id) {
+                        plan.block_rows.insert(id, r);
+                    }
+                }
+                if Some(plan.id) == main_id {
+                    for &id in &child_ids {
+                        if let Some(&r) = legacy.get(&id) {
+                            plan.block_rows.insert(id, r);
+                        }
+                    }
+                }
             }
         }
     }
@@ -1033,11 +1106,12 @@ mod tests {
         // save_model → load_model cycle.
         let conn = open_in_memory();
         let mut m = Model::default();
+        let pl = m.create_plan("p", None);
         let id = m.create_work_block("task");
         let block = m.work_blocks.get_mut(&id).unwrap();
         block.start_day = 7;
         block.duration_days = 3;
-        block.row = -2; // negative lane (above the baseline) must survive too
+        m.set_block_row(pl, id, -2); // negative lane (above the baseline) must survive too
 
         save_model(&conn, &m).unwrap();
         let loaded = load_model(&conn).unwrap();
@@ -1045,7 +1119,7 @@ mod tests {
         let loaded_wb = loaded.work_blocks.get(&id).unwrap();
         assert_eq!(loaded_wb.start_day, 7);
         assert_eq!(loaded_wb.duration_days, 3);
-        assert_eq!(loaded_wb.row, -2);
+        assert_eq!(loaded.block_row(pl, id), -2);
         assert_eq!(m.work_blocks, loaded.work_blocks);
     }
 
@@ -1291,7 +1365,8 @@ CREATE TABLE IF NOT EXISTS dependencies (
 
 CREATE TABLE IF NOT EXISTS plans (
     id                INTEGER PRIMARY KEY,
-    name              TEXT    NOT NULL
+    name              TEXT    NOT NULL,
+    block_rows        TEXT    NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS plan_blocks (

@@ -59,11 +59,11 @@ pub const PALETTE: &[LinearRgba] = &[
     LinearRgba::new(2.40, 1.60, 0.10, 1.0), // gold
 ];
 
-/// The vertical placement of a block bar: `(center_y, height)`. Every block —
-/// leaf or rolled-up parent — occupies exactly one row on its own level's
-/// resource axis.
-pub fn block_extent(wb: &model::WorkBlock) -> (f32, f32) {
-    (-(wb.row as f32) * ROW_HEIGHT, BLOCK_HEIGHT)
+/// The vertical placement of a block bar: `(center_y, height)`, given the
+/// block's lane (`row`) within the plan being rendered. Every block — leaf or
+/// rolled-up parent — occupies exactly one row on its own level's resource axis.
+pub fn block_extent(row: i32) -> (f32, f32) {
+    (-(row as f32) * ROW_HEIGHT, BLOCK_HEIGHT)
 }
 
 /// The horizontal placement of a block bar: `(left_x, width)`, holiday-aware.
@@ -82,12 +82,13 @@ pub fn block_edges_x(wb: &model::WorkBlock, cal: &model::CalendarConfig) -> (f32
 }
 
 /// The fill color a work block renders with: its explicit `color` if set,
-/// otherwise the palette default for its row. Shared so ghosts in branch
-/// swimlanes can outline in exactly the source block's color.
-pub fn block_color(wb: &model::WorkBlock) -> LinearRgba {
+/// otherwise the palette default for its lane (`row`) within the plan being
+/// rendered. Shared so ghosts in branch swimlanes can outline in exactly the
+/// source block's color.
+pub fn block_color(wb: &model::WorkBlock, row: i32) -> LinearRgba {
     match wb.color {
         Some([r, g, b]) => LinearRgba::new(r, g, b, 1.0),
-        None => PALETTE[wb.row.rem_euclid(PALETTE.len() as i32) as usize],
+        None => PALETTE[row.rem_euclid(PALETTE.len() as i32) as usize],
     }
 }
 
@@ -189,14 +190,15 @@ pub fn reconcile_block_sprites(
         }
     }
 
-    // Reconcile each visible block at its explicit, user-assigned lane. Rows are
-    // a real persisted field now (freeform), not derived from sort order, so
-    // blocks stay exactly where the user puts them.
+    // Reconcile each visible block at its explicit, user-assigned lane. The lane
+    // is per-plan (freeform, not derived from sort order); the primary timeline
+    // always renders the main plan, so rows come from main's block_rows.
+    let main_id = model.main_plan_id();
     for &id in &visible_blocks.ids {
         let Some(wb) = model.work_blocks.get(&id) else {
             continue;
         };
-        let row = wb.row;
+        let row = main_id.map(|m| model.block_row(m, id)).unwrap_or(0);
 
         if let Some(&entity) = sprite_map.entities.get(&id) {
             // Existing entity: update row in place. Transform and color are
@@ -210,7 +212,7 @@ pub fn reconcile_block_sprites(
             let x = left_x + width * 0.5;
             let y = -(row as f32) * ROW_HEIGHT;
 
-            let color = Color::from(block_color(wb));
+            let color = Color::from(block_color(wb, row));
 
             let mut block_cmd = commands.spawn((
                 BlockSprite {
@@ -403,8 +405,10 @@ pub fn sync_block_sprites(
         .unwrap_or(1.0);
     let min_width = 8.0 * ortho_scale;
 
+    let main_id = model.main_plan_id();
     for (block_sprite, mut transform, mut sprite) in &mut query {
-        let Some(wb) = model.work_blocks.get(&block_sprite.work_block_id) else {
+        let id = block_sprite.work_block_id;
+        let Some(wb) = model.work_blocks.get(&id) else {
             continue;
         };
         let (left_x, width) = block_span_x(wb, &model.calendar);
@@ -414,15 +418,15 @@ pub fn sync_block_sprites(
         let x = left_x + visual_width * 0.5;
         // Read the live model row (not the cached BlockSprite.row, which only
         // refreshes when the visible set changes) so vertical drags track the
-        // cursor immediately — same as start_day does for x. A rolled-up parent
-        // spans its children's rows (taller bar).
-        let (y, height) = block_extent(wb);
+        // cursor immediately — same as start_day does for x. The primary timeline
+        // renders the main plan, so the lane comes from main's block_rows.
+        let row = main_id.map(|m| model.block_row(m, id)).unwrap_or(0);
+        let (y, height) = block_extent(row);
         transform.translation.x = x;
         transform.translation.y = y;
         sprite.custom_size = Some(Vec2::new(visual_width, height));
 
-        let base = PALETTE[wb.row.rem_euclid(PALETTE.len() as i32) as usize];
-        let id = block_sprite.work_block_id;
+        let base = PALETTE[row.rem_euclid(PALETTE.len() as i32) as usize];
         // Color hierarchy: user color > selected highlight > palette.
         sprite.color = if let Some([r, g, b]) = wb.color {
             Color::from(LinearRgba::new(r, g, b, 1.0))
@@ -858,25 +862,26 @@ pub fn handle_canvas_create(
     let row = (-world_pos.y / ROW_HEIGHT).round() as i32;
     let raw_start = crate::calendar::x_to_day(world_pos.x, &model.calendar).max(0);
 
+    let plan_id = active_schedule.plan_id;
     let new_id = if let Some(parent) = drill.current() {
         // Drilled in: the new block is a child of the current block. Children
         // default to 1 day (finer-grained detail than the week-default roots).
-        model.add_child_block(parent, "New Block", raw_start.max(0), 1, row)
+        model.add_child_block(plan_id, parent, "New Block", raw_start.max(0), 1, row)
     } else {
         let branch_min = model
             .plans
-            .get(&active_schedule.plan_id)
+            .get(&plan_id)
             .and_then(|p| p.branch_start_day)
             .unwrap_or(0);
         let id = model.create_work_block("New Block");
         if let Some(wb) = model.work_blocks.get_mut(&id) {
             wb.start_day = raw_start.max(branch_min);
             wb.duration_days = 5;
-            wb.row = row;
         }
-        if let Some(plan) = model.plans.get_mut(&active_schedule.plan_id) {
+        if let Some(plan) = model.plans.get_mut(&plan_id) {
             plan.root_blocks.push(id);
         }
+        model.set_block_row(plan_id, id, row);
         // Link through to existing branches as a ghost. No-op off main.
         model.link_main_block_to_branches(id);
         id
@@ -1077,11 +1082,12 @@ pub fn handle_block_drag(
                 && world_pos.y <= center.y + half.y
             {
                 let id = block_sprite.work_block_id;
-                let (start_px, block_row) = model
+                let start_px = model
                     .work_blocks
                     .get(&id)
-                    .map(|wb| (crate::calendar::day_to_x(wb.start_day, &model.calendar), wb.row))
-                    .unwrap_or((0.0, 0));
+                    .map(|wb| crate::calendar::day_to_x(wb.start_day, &model.calendar))
+                    .unwrap_or(0.0);
+                let block_row = model.block_row(active_schedule.plan_id, id);
                 let cursor_row = (-world_pos.y / ROW_HEIGHT).round() as i32;
                 // Offsets preserve where within the block the user grabbed, in x
                 // and in rows — so a click without dragging never moves it.
@@ -1123,8 +1129,8 @@ pub fn handle_block_drag(
             let new_row = cursor_row + grab_row_delta;
             if let Some(wb) = model.work_blocks.get_mut(&id) {
                 wb.start_day = new_start;
-                wb.row = new_row;
             }
+            model.set_block_row(active_schedule.plan_id, id, new_row);
         }
         return;
     }
@@ -1177,6 +1183,7 @@ pub fn sync_past_overlays(
     }
     let mut desired: Vec<Overlay> = Vec::new();
 
+    let main_id = model.main_plan_id();
     for &id in &visible_blocks.ids {
         let Some(wb) = model.work_blocks.get(&id) else {
             continue;
@@ -1188,7 +1195,7 @@ pub fn sync_past_overlays(
         let x_left = crate::calendar::day_to_x(wb.start_day, &model.calendar);
         let past_width =
             crate::calendar::day_to_x(today.day, &model.calendar) - x_left;
-        let y = -(wb.row as f32) * ROW_HEIGHT;
+        let y = -(main_id.map(|m| model.block_row(m, id)).unwrap_or(0) as f32) * ROW_HEIGHT;
         desired.push(Overlay {
             key: PastPortionOverlay(id),
             pos: Vec3::new(x_left + past_width * 0.5, y, 0.2),
@@ -1319,6 +1326,7 @@ pub fn draw_dependency_edges(
     camera: Query<(&Camera, &GlobalTransform)>,
     cam_proj: Query<&Projection, With<Camera2d>>,
 ) {
+    let main_id = model.main_plan_id();
     let geom: HashMap<WorkBlockId, BlockGeom> = visible_blocks
         .ids
         .iter()
@@ -1330,7 +1338,7 @@ pub fn draw_dependency_edges(
                 BlockGeom {
                     xl,
                     xr,
-                    y: -(wb.row as f32) * ROW_HEIGHT,
+                    y: -(main_id.map(|m| model.block_row(m, id)).unwrap_or(0) as f32) * ROW_HEIGHT,
                 },
             ))
         })
@@ -1437,9 +1445,9 @@ fn dep_endpoints(model: &model::Model, dep: &model::Dependency) -> Option<(Vec2,
         return None;
     }
     let (p_xl, p_xr) = block_edges_x(pred, &model.calendar);
-    let p_y = -(pred.row as f32) * ROW_HEIGHT;
+    let p_y = -(model.block_row(dep.plan_id, dep.predecessor) as f32) * ROW_HEIGHT;
     let (s_xl, s_xr) = block_edges_x(succ, &model.calendar);
-    let s_y = -(succ.row as f32) * ROW_HEIGHT;
+    let s_y = -(model.block_row(dep.plan_id, dep.successor) as f32) * ROW_HEIGHT;
     let (src, dst) = match dep.dependency_type {
         DependencyType::FinishToStart => (Vec2::new(p_xr, p_y), Vec2::new(s_xl, s_y)),
         DependencyType::StartToStart => (Vec2::new(p_xl, p_y), Vec2::new(s_xl, s_y)),
@@ -1520,6 +1528,7 @@ pub fn draw_block_handles(
     let dot = Color::srgba(0.55, 0.62, 0.78, 0.65);
     let dot_hi = Color::srgba(0.80, 0.86, 0.98, 0.95);
 
+    let main_id = model.main_plan_id();
     for &id in &visible_blocks.ids {
         let Some(wb) = model.work_blocks.get(&id) else {
             continue;
@@ -1527,7 +1536,7 @@ pub fn draw_block_handles(
         if wb.duration_days <= 0 {
             continue;
         }
-        let y = -(wb.row as f32) * ROW_HEIGHT;
+        let y = -(main_id.map(|m| model.block_row(m, id)).unwrap_or(0) as f32) * ROW_HEIGHT;
         let (xl, xr) = block_edges_x(wb, &model.calendar);
         let half_h = BLOCK_HEIGHT * 0.5;
 
@@ -2409,11 +2418,11 @@ pub fn draw_create_mode_overlay(
             if let Some(wb) = model.work_blocks.get_mut(&new_id) {
                 wb.start_day = branch_min;
                 wb.duration_days = 5;
-                wb.row = new_row;
             }
             if let Some(plan) = model.plans.get_mut(&plan_id) {
                 plan.root_blocks.push(new_id);
             }
+            model.set_block_row(plan_id, new_id, new_row);
             // A new block on main links through to existing branches as a ghost.
             model.link_main_block_to_branches(new_id);
             if let Err(e) = db::save_model(&conn, &model) {

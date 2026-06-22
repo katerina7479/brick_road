@@ -1138,8 +1138,7 @@ fn resource_gutter_ui(
         let mut rows: Vec<i32> = visible
             .ids
             .iter()
-            .filter_map(|id| model.work_blocks.get(id))
-            .map(|wb| wb.row)
+            .map(|id| model.block_row(main_id, *id))
             .collect::<std::collections::HashSet<_>>()
             .into_iter()
             .collect();
@@ -1155,7 +1154,7 @@ fn resource_gutter_ui(
         for band in bands::layout_bands(&model) {
             let mut rows: Vec<i32> = schedule::visible_blocks(&model, band.plan_id, None)
                 .iter()
-                .map(|wb| wb.row)
+                .map(|wb| model.block_row(band.plan_id, wb.id))
                 .collect::<std::collections::HashSet<_>>()
                 .into_iter()
                 .collect();
@@ -1469,13 +1468,11 @@ fn commit_row_name(
         let move_ids: Vec<model::WorkBlockId> =
             schedule::visible_blocks(model, plan_id, scope)
                 .iter()
-                .filter(|wb| wb.row == row)
+                .filter(|wb| model.block_row(plan_id, wb.id) == row)
                 .map(|wb| wb.id)
                 .collect();
         for id in move_ids {
-            if let Some(wb) = model.work_blocks.get_mut(&id) {
-                wb.row = target;
-            }
+            model.set_block_row(plan_id, id, target);
         }
         if let Some(plan) = model.plans.get_mut(&plan_id) {
             plan.set_row_name(scope, row, String::new());

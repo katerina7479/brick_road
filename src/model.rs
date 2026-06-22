@@ -33,10 +33,6 @@ pub struct WorkBlock {
     /// User-defined placement: duration in days.
     /// 0.0 until the user manually sizes the block.
     pub duration_days: Day,
-    /// User-defined vertical lane. World-Y = `-row * ROW_HEIGHT`, so `0` is the
-    /// baseline, negative rows sit above it and positive rows below. Freeform:
-    /// set on creation and by vertical drag, never derived from sort order.
-    pub row: i32,
     /// Optional user-defined HDR color [R, G, B] in linear space.
     /// Values > 1.0 trigger bloom. `None` falls back to the palette default.
     pub color: Option<[f32; 3]>,
@@ -196,6 +192,11 @@ pub struct Plan {
     /// block. Each scope owns an independent, per-plan ordered list (index =
     /// row number). A row with no entry falls back to a default label.
     pub row_names: HashMap<Option<WorkBlockId>, Vec<String>>,
+    /// The vertical lane (resource row) each block occupies *in this plan*.
+    /// World-Y = `-row * ROW_HEIGHT`. Per-plan because staffing is the one
+    /// dimension a branch owns independently: a fork snapshots main's rows and
+    /// then diverges, and main never writes a branch's row again. Absent = 0.
+    pub block_rows: HashMap<WorkBlockId, i32>,
 }
 
 impl Plan {
@@ -254,7 +255,6 @@ impl Model {
                 parent: None,
                 start_day: 0,
                 duration_days: 0,
-                row: 0,
                 color: None,
                 description: String::new(),
                 priority: 1,
@@ -378,6 +378,7 @@ impl Model {
                 allocations: vec![],
                 branch_start_day,
                 row_names: HashMap::new(),
+                block_rows: HashMap::new(),
             },
         );
         id
@@ -408,9 +409,12 @@ impl Model {
         self.work_blocks.values().any(|wb| wb.parent == Some(block))
     }
 
-    /// Creates a child of `parent` at the given placement and returns its id.
+    /// Creates a child of `parent` at the given placement within `plan` and
+    /// returns its id. The lane (`row`) is recorded on `plan`; timing lives on
+    /// the shared block.
     pub fn add_child_block(
         &mut self,
+        plan: PlanId,
         parent: WorkBlockId,
         name: impl Into<String>,
         start_day: Day,
@@ -422,8 +426,8 @@ impl Model {
             wb.parent = Some(parent);
             wb.start_day = start_day;
             wb.duration_days = duration_days;
-            wb.row = row;
         }
+        self.set_block_row(plan, id, row);
         self.recompute_rollup(parent);
         id
     }
@@ -493,6 +497,23 @@ impl Model {
             .map(|p| p.id)
     }
 
+    /// The vertical lane `block` occupies within `plan`. Defaults to `0` when
+    /// the plan has no recorded lane for the block (e.g. a block that was never
+    /// placed). This is the single source of truth for a block's row.
+    pub fn block_row(&self, plan: PlanId, block: WorkBlockId) -> i32 {
+        self.plans
+            .get(&plan)
+            .and_then(|p| p.block_rows.get(&block).copied())
+            .unwrap_or(0)
+    }
+
+    /// Sets `block`'s lane within `plan`. No-op if the plan is missing.
+    pub fn set_block_row(&mut self, plan: PlanId, block: WorkBlockId, row: i32) {
+        if let Some(p) = self.plans.get_mut(&plan) {
+            p.block_rows.insert(block, row);
+        }
+    }
+
     /// The resource-row name shown for `row` within `scope` in `plan_id`, with
     /// inheritance: a branch repeats main's names by default (the shared "rocks
     /// in the stream") and only diverges where it sets its own. Returns `None`
@@ -536,12 +557,19 @@ impl Model {
             })
             .cloned()
             .collect();
+        // Snapshot main's lane for each inherited block. After this the branch
+        // owns its rows independently — main never writes them again.
+        let block_rows: HashMap<WorkBlockId, i32> = forward
+            .iter()
+            .map(|id| (*id, self.block_row(main_id, *id)))
+            .collect();
         let n = self.plans.len() + 1;
         let new_id = self.create_plan(format!("Plan {n}"), Some(fork_day));
         let branch = self.plans.get_mut(&new_id).unwrap();
         branch.root_blocks = forward;
         branch.row_names = row_names;
         branch.allocations = allocations;
+        branch.block_rows = block_rows;
         Some(new_id)
     }
 
@@ -565,12 +593,16 @@ impl Model {
         let Some(start) = self.work_blocks.get(&block_id).map(|wb| wb.start_day) else {
             return;
         };
+        // The lane to snapshot into each branch is main's current lane for the
+        // block (a freshly created block defaults to row 0).
+        let main_row = self.block_row(main_id, block_id);
         for plan in self.plans.values_mut() {
             let Some(fork) = plan.branch_start_day else {
                 continue; // branches only
             };
             if start >= fork && !plan.root_blocks.contains(&block_id) {
                 plan.root_blocks.push(block_id);
+                plan.block_rows.insert(block_id, main_row);
             }
         }
     }
@@ -590,20 +622,21 @@ impl Model {
         if let Some(wb) = self.work_blocks.get_mut(&id) {
             wb.start_day = start_day;
             wb.duration_days = duration_days;
-            wb.row = row;
         }
         if let Some(plan) = self.plans.get_mut(&plan_id) {
             plan.root_blocks.push(id);
         }
+        self.set_block_row(plan_id, id, row);
         id
     }
 
-    /// Sets a block's timeline placement (start day and row). No-op if missing.
-    pub fn set_block_placement(&mut self, id: WorkBlockId, start_day: Day, row: i32) {
+    /// Sets a block's timeline placement: `start_day` on the shared block and
+    /// the lane (`row`) within `plan_id`. No-op if missing.
+    pub fn set_block_placement(&mut self, plan_id: PlanId, id: WorkBlockId, start_day: Day, row: i32) {
         if let Some(wb) = self.work_blocks.get_mut(&id) {
             wb.start_day = start_day;
-            wb.row = row;
         }
+        self.set_block_row(plan_id, id, row);
     }
 
     /// Sets a block's duration in working days, clamped to ≥ 1. No-op if missing.
@@ -621,6 +654,7 @@ impl Model {
     pub fn remove_block_from_plan(&mut self, plan_id: PlanId, block_id: WorkBlockId) {
         if let Some(plan) = self.plans.get_mut(&plan_id) {
             plan.root_blocks.retain(|&id| id != block_id);
+            plan.block_rows.remove(&block_id);
         }
         let still_rooted = self
             .plans
@@ -932,12 +966,13 @@ mod tests {
     #[test]
     fn children_are_placed_and_sorted() {
         let mut m = Model::default();
+        let pl = m.create_plan("p", None);
         let p = m.create_work_block("p");
-        let b = m.add_child_block(p, "b", 10, 3, 0);
-        let a = m.add_child_block(p, "a", 2, 3, 0);
+        let b = m.add_child_block(pl, p, "b", 10, 3, 0);
+        let a = m.add_child_block(pl, p, "a", 2, 3, 0);
         m.create_work_block("unrelated");
         // A child block with no duration is excluded (unplaced).
-        let _empty = m.add_child_block(p, "empty", 0, 0, 1);
+        let _empty = m.add_child_block(pl, p, "empty", 0, 0, 1);
         assert_eq!(m.children(p), vec![a, b], "placed children, sorted by start");
         assert!(m.has_children(p));
     }
@@ -945,10 +980,11 @@ mod tests {
     #[test]
     fn rollup_spans_children_when_enabled() {
         let mut m = Model::default();
+        let pl = m.create_plan("p", None);
         let p = m.create_work_block("p");
         m.work_blocks.get_mut(&p).unwrap().rollup = true;
-        m.add_child_block(p, "a", 5, 3, 0); // [5, 8)
-        m.add_child_block(p, "b", 10, 4, 1); // [10, 14)
+        m.add_child_block(pl, p, "a", 5, 3, 0); // [5, 8)
+        m.add_child_block(pl, p, "b", 10, 4, 1); // [10, 14)
         // add_child_block recomputes the rollup: parent spans 5 -> 14.
         assert_eq!(m.work_blocks[&p].start_day, 5);
         assert_eq!(m.work_blocks[&p].duration_days, 9);
@@ -957,12 +993,13 @@ mod tests {
     #[test]
     fn rollup_off_keeps_own_timeline() {
         let mut m = Model::default();
+        let pl = m.create_plan("p", None);
         let p = m.create_work_block("p");
         let wb = m.work_blocks.get_mut(&p).unwrap();
         wb.start_day = 0;
         wb.duration_days = 2;
         wb.rollup = false; // independent
-        m.add_child_block(p, "a", 5, 3, 0);
+        m.add_child_block(pl, p, "a", 5, 3, 0);
         // Not rolled up: the parent keeps its own placement.
         assert_eq!(m.work_blocks[&p].start_day, 0);
         assert_eq!(m.work_blocks[&p].duration_days, 2);
@@ -973,12 +1010,13 @@ mod tests {
         // Children live on a different resource axis than the parent, so rolling
         // up spans the parent in *time* but never moves it off its own row.
         let mut m = Model::default();
+        let pl = m.create_plan("p", None);
         let p = m.create_work_block("p");
         m.work_blocks.get_mut(&p).unwrap().rollup = true;
-        m.work_blocks.get_mut(&p).unwrap().row = 1;
-        m.add_child_block(p, "top", 0, 3, 0); // [0, 3)
-        m.add_child_block(p, "bottom", 4, 3, 2); // [4, 7)
-        assert_eq!(m.work_blocks[&p].row, 1); // unchanged
+        m.set_block_row(pl, p, 1);
+        m.add_child_block(pl, p, "top", 0, 3, 0); // [0, 3)
+        m.add_child_block(pl, p, "bottom", 4, 3, 2); // [4, 7)
+        assert_eq!(m.block_row(pl, p), 1); // unchanged
         assert_eq!(m.work_blocks[&p].start_day, 0);
         assert_eq!(m.work_blocks[&p].duration_days, 7);
     }
@@ -986,11 +1024,12 @@ mod tests {
     #[test]
     fn rollup_propagates_up_ancestors() {
         let mut m = Model::default();
+        let pl = m.create_plan("p", None);
         let gp = m.create_work_block("gp");
         m.work_blocks.get_mut(&gp).unwrap().rollup = true;
-        let p = m.add_child_block(gp, "p", 0, 1, 0);
+        let p = m.add_child_block(pl, gp, "p", 0, 1, 0);
         m.work_blocks.get_mut(&p).unwrap().rollup = true;
-        m.add_child_block(p, "leaf", 8, 4, 0); // [8, 12)
+        m.add_child_block(pl, p, "leaf", 8, 4, 0); // [8, 12)
         m.recompute_rollup(p);
         // p spans its leaf (8..12); gp spans p (8..12).
         assert_eq!(m.work_blocks[&p].start_day, 8);
