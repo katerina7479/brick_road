@@ -808,6 +808,7 @@ pub fn validate_model(model: &Model) -> Result<()> {
 fn parse_resource_type(s: &str) -> Result<ResourceType> {
     match s {
         "Engineer" | "Person" => Ok(ResourceType::Engineer),
+        "NewHire" => Ok(ResourceType::NewHire),
         "Team" => Ok(ResourceType::Team),
         "Equipment" => Ok(ResourceType::Equipment),
         "Budget" => Ok(ResourceType::Budget),
@@ -832,6 +833,7 @@ fn parse_dependency_type(s: &str) -> Result<DependencyType> {
 fn resource_type_str(rt: ResourceType) -> &'static str {
     match rt {
         ResourceType::Engineer => "Engineer",
+        ResourceType::NewHire => "NewHire",
         ResourceType::Team => "Team",
         ResourceType::Equipment => "Equipment",
         ResourceType::Budget => "Budget",

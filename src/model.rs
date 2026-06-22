@@ -95,6 +95,7 @@ impl Default for CalendarConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResourceType {
     Engineer,
+    NewHire,
     Team,
     Equipment,
     Budget,
@@ -102,8 +103,9 @@ pub enum ResourceType {
 
 impl ResourceType {
     /// All variants, for type pickers.
-    pub const ALL: [ResourceType; 4] = [
+    pub const ALL: [ResourceType; 5] = [
         ResourceType::Engineer,
+        ResourceType::NewHire,
         ResourceType::Team,
         ResourceType::Equipment,
         ResourceType::Budget,
@@ -112,6 +114,7 @@ impl ResourceType {
     pub fn label(self) -> &'static str {
         match self {
             ResourceType::Engineer => "Engineer",
+            ResourceType::NewHire => "New Hire",
             ResourceType::Team => "Team",
             ResourceType::Equipment => "Equipment",
             ResourceType::Budget => "Budget",

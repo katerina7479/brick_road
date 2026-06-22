@@ -1356,9 +1356,10 @@ fn default_row_label(row: i32) -> String {
 fn resource_type_rgb(kind: model::ResourceType) -> (u8, u8, u8) {
     match kind {
         model::ResourceType::Engineer => (98, 154, 224),   // blue
-        model::ResourceType::Team => (120, 196, 140),     // green
-        model::ResourceType::Equipment => (224, 176, 92), // amber
-        model::ResourceType::Budget => (180, 150, 222),   // violet
+        model::ResourceType::NewHire => (140, 200, 230),   // light cyan
+        model::ResourceType::Team => (120, 196, 140),      // green
+        model::ResourceType::Equipment => (224, 176, 92),  // amber
+        model::ResourceType::Budget => (180, 150, 222),    // violet
     }
 }
 
