@@ -2273,10 +2273,26 @@ mod tests {
         assert_eq!(r(0.0), 0);
         assert_eq!(r(-40.0), 1);   // exactly row 1
         assert_eq!(r(-80.0), 2);   // exactly row 2
-        assert_eq!(r(-20.0), 1);   // midpoint rounds up (ties-to-even → 0, but -20/-40 = 0.5 rounds to 0 for .round())
+        assert_eq!(r(-20.0), 1);   // midpoint: 0.5f32.round() == 1 (half-away-from-zero)
         assert_eq!(r(-60.0), 2);   // midpoint between row 1 and 2
         assert_eq!(r(-39.0), 1);   // just below row 1 boundary
         assert_eq!(r(-1.0), 0);    // almost row 0
+    }
+
+    #[test]
+    fn resize_day_from_world_x() {
+        // handle_block_resize snaps the right edge to the nearest day via
+        // `x_to_day(world_x + PIXELS_PER_DAY * 0.5, &cal)`. Test that
+        // clicking squarely inside a day resolves to that day (no holiday).
+        use crate::model::CalendarConfig;
+        let cal = CalendarConfig::default();
+        let snap = |x: f32| crate::calendar::x_to_day(x + PIXELS_PER_DAY * 0.5, &cal);
+        // Clicking in the middle of day 3's column → day 3.
+        assert_eq!(snap(3.0 * PIXELS_PER_DAY + PIXELS_PER_DAY * 0.5), 4);
+        // Clicking at the start of day 0's column → day 0.
+        assert_eq!(snap(0.0), 0);
+        // Clicking just before the day-5 boundary → day 4.
+        assert_eq!(snap(4.5 * PIXELS_PER_DAY - 0.1), 4);
     }
 
     #[test]
