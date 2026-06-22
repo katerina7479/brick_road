@@ -2147,4 +2147,60 @@ mod tests {
             "Feb should have 0.7× alpha"
         );
     }
+
+    #[test]
+    fn commit_row_name_merges_blocks_onto_existing_row() {
+        // Merge semantics: naming row A the same as row B moves A's placed blocks to B.
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        db::create_tables(&conn).unwrap();
+
+        let mut m = model::Model::default();
+        let plan_id = m.create_plan("main", None);
+        let scope: Option<model::WorkBlockId> = None;
+
+        m.plans.get_mut(&plan_id).unwrap().set_row_name(scope, 3, "Backend".to_string());
+        let block = m.create_work_block("Task");
+        // duration_days must be > 0 so visible_blocks includes this block.
+        m.work_blocks.get_mut(&block).unwrap().duration_days = 5;
+        m.plans.get_mut(&plan_id).unwrap().root_blocks.push(block);
+        m.set_block_row(plan_id, block, 7);
+        db::save_model(&conn, &m).unwrap();
+
+        commit_row_name(&mut m, &conn, plan_id, scope, 7, "Backend");
+
+        assert_eq!(m.block_row(plan_id, block), 3, "block should move to the target row");
+        assert_eq!(m.plans[&plan_id].row_name(scope, 7), None, "source row name cleared");
+    }
+
+    #[test]
+    fn commit_row_name_merges_onto_row_beyond_old_64_cap() {
+        // Regression: the old `0..64` scan missed named rows ≥ 64, silently
+        // creating a duplicate instead of merging. Verified by the fix that
+        // derives the bound from the actual `row_names` Vec length.
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        db::create_tables(&conn).unwrap();
+
+        let mut m = model::Model::default();
+        let plan_id = m.create_plan("main", None);
+        let scope: Option<model::WorkBlockId> = None;
+
+        // Row 100 — beyond the old 0..64 cap — is already named "Infra".
+        m.plans.get_mut(&plan_id).unwrap().set_row_name(scope, 100, "Infra".to_string());
+        let block = m.create_work_block("Deploy");
+        // duration_days must be > 0 so visible_blocks includes this block.
+        m.work_blocks.get_mut(&block).unwrap().duration_days = 3;
+        m.plans.get_mut(&plan_id).unwrap().root_blocks.push(block);
+        m.set_block_row(plan_id, block, 1);
+        db::save_model(&conn, &m).unwrap();
+
+        // Naming row 1 "Infra" must find the target at row 100.
+        commit_row_name(&mut m, &conn, plan_id, scope, 1, "Infra");
+
+        assert_eq!(
+            m.block_row(plan_id, block),
+            100,
+            "block must merge onto the high-numbered row, not duplicate"
+        );
+        assert_eq!(m.plans[&plan_id].row_name(scope, 1), None, "source row name cleared");
+    }
 }
