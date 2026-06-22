@@ -503,14 +503,7 @@ impl Model {
         scope: Option<WorkBlockId>,
         row: i32,
     ) -> Option<&str> {
-        if let Some(name) = self.plans.get(&plan_id).and_then(|p| p.row_name(scope, row)) {
-            return Some(name);
-        }
-        let main = self.main_plan_id()?;
-        if main == plan_id {
-            return None;
-        }
-        self.plans.get(&main).and_then(|p| p.row_name(scope, row))
+        self.plans.get(&plan_id).and_then(|p| p.row_name(scope, row))
     }
 
     /// Forks `main` into a new branch at `fork_day`. The branch inherits main's
