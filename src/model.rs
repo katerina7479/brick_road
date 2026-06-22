@@ -523,11 +523,25 @@ impl Model {
             })
             .collect();
         let row_names = self.plans[&main_id].row_names.clone();
+        // Copy only allocations for forward blocks (start_day >= fork_day),
+        // mirroring the root_blocks filter above. The branch starts as an
+        // editable copy of main's resource assignments from the fork day on.
+        let allocations: Vec<ResourceAllocation> = self.plans[&main_id]
+            .allocations
+            .iter()
+            .filter(|a| {
+                self.work_blocks
+                    .get(&a.work_block_id)
+                    .is_some_and(|wb| wb.start_day >= fork_day)
+            })
+            .cloned()
+            .collect();
         let n = self.plans.len() + 1;
         let new_id = self.create_plan(format!("Plan {n}"), Some(fork_day));
         let branch = self.plans.get_mut(&new_id).unwrap();
         branch.root_blocks = forward;
         branch.row_names = row_names;
+        branch.allocations = allocations;
         Some(new_id)
     }
 
