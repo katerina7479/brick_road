@@ -45,7 +45,6 @@ fn main() {
         .insert_resource(blocks::SizePickerState::default())
         .insert_resource(schedule::VisibleBlocks::default())
         .insert_resource(schedule::DrillScope::default())
-        .insert_resource(analysis::ScheduleAnalysis::default())
         .insert_resource(schedule::TodayMarker::default())
         .insert_resource(blocks::BlockSpriteMap::default())
         .insert_resource(blocks::ComparePlanState::default())
@@ -62,10 +61,6 @@ fn main() {
         .insert_resource(bands::LaneDepDrag::default())
         .add_systems(Startup, (setup_db, setup_camera))
         .add_systems(Startup, setup_demo_schedule.after(setup_db))
-        .add_systems(
-            PostStartup,
-            update_analysis.before(blocks::reconcile_block_sprites),
-        )
         .add_systems(
             PostStartup,
             schedule::update_visible_blocks.before(blocks::reconcile_block_sprites),
@@ -146,7 +141,6 @@ fn main() {
         .add_systems(Update, sync_total_duration)
         .add_systems(Update, sync_weekend_bands.after(sync_total_duration))
         .add_systems(Update, sync_period_bands.after(sync_total_duration))
-        .add_systems(Update, update_analysis)
         .add_systems(
             Update,
             schedule::update_visible_blocks
@@ -229,7 +223,7 @@ fn main() {
         )
         .add_systems(Update, blocks::draw_block_handles)
         .add_systems(Update, blocks::update_cursor_icon)
-        .add_systems(Update, blocks::draw_dependency_edges.after(update_analysis))
+        .add_systems(Update, blocks::draw_dependency_edges)
         .add_systems(
             Update,
             labels::spawn_labels
@@ -743,37 +737,6 @@ fn setup_demo_schedule(mut model: ResMut<model::Model>, mut commands: Commands) 
     }
 }
 
-fn update_analysis(model: Res<model::Model>, mut sa: ResMut<analysis::ScheduleAnalysis>) {
-    if !model.is_changed() {
-        return;
-    }
-    let dep = analysis::analyze_dependencies(&model);
-    let (critical_path, float) = model
-        .plans
-        .values()
-        .next()
-        .and_then(|plan| {
-            let graph = graph::build_graph(&model, plan);
-            schedule::analyze_user_placement(&model, &graph).ok()
-        })
-        .map(|cpa| (cpa.critical_path, cpa.float))
-        .unwrap_or_default();
-
-    let resource_conflicts = model
-        .plans
-        .values()
-        .next()
-        .map(|plan| analysis::analyze_resources(&model, plan))
-        .unwrap_or_default();
-
-    *sa = analysis::ScheduleAnalysis {
-        violations: dep.violations,
-        resource_conflicts,
-        critical_path,
-        float,
-    };
-}
-
 /// Tracks mouse position over the timeline and updates `ForkHoverState`.
 /// On left-click, creates a new plan that branches from the hovered day.
 fn handle_fork_hover(
@@ -1116,7 +1079,6 @@ const GUTTER_WIDTH: f32 = 116.0;
 fn resource_gutter_ui(
     mut contexts: EguiContexts,
     mut model: ResMut<model::Model>,
-    schedule: Res<schedule::Schedule>,
     drill: Res<schedule::DrillScope>,
     visible: Res<schedule::VisibleBlocks>,
     mut rename: ResMut<RowRename>,
@@ -1132,61 +1094,116 @@ fn resource_gutter_ui(
         return;
     };
     let Ok(window) = windows.single() else { return };
-    let plan_id = schedule.plan_id;
-    if !model.plans.contains_key(&plan_id) {
-        return;
-    }
+    let rh = constants::ROW_HEIGHT;
     let scope = drill.path.last().copied();
 
-    // Rows that carry a visible block, sorted — the gutter only labels these,
-    // so it stays empty until there's real work on a row.
-    let mut rows: Vec<i32> = visible
-        .ids
-        .iter()
-        .filter_map(|id| model.work_blocks.get(id))
-        .map(|wb| wb.row)
-        .collect::<std::collections::HashSet<_>>()
-        .into_iter()
-        .collect();
-    rows.sort_unstable();
-    if rows.is_empty() && rename.editing.is_none() {
-        return;
+    // One labelled row in the gutter. Each plan — main plus every forked band —
+    // contributes its own rows at its own world-Y, so the gutter is plan-aware
+    // rather than locked to a single "active" plan.
+    struct GutterRow {
+        plan_id: model::PlanId,
+        scope: Option<model::WorkBlockId>,
+        row: i32,
+        world_y: f32,
+        name: Option<String>,
+        kind: Option<model::ResourceType>,
+    }
+    // Resolve a row's display name (with branch→main inheritance) and resource
+    // type up front so the egui closure borrows no model state while it may
+    // mutate on commit.
+    let resolve = |model: &model::Model,
+                   plan_id: model::PlanId,
+                   scope: Option<model::WorkBlockId>,
+                   row: i32,
+                   world_y: f32| {
+        let name = model.resolved_row_name(plan_id, scope, row);
+        let kind = name.and_then(|n| model.resource_kind(n));
+        GutterRow {
+            plan_id,
+            scope,
+            row,
+            world_y,
+            name: name.map(|s| s.to_string()),
+            kind,
+        }
+    };
+
+    // The gutter only labels rows that carry a visible block, so it stays empty
+    // until there's real work on a row.
+    let mut entries: Vec<GutterRow> = Vec::new();
+
+    // Main plan occupies world rows 0,1,2… at y = -row * ROW_HEIGHT, respecting
+    // the active drill scope.
+    if let Some(main_id) = model.main_plan_id() {
+        let mut rows: Vec<i32> = visible
+            .ids
+            .iter()
+            .map(|id| model.block_row(main_id, *id))
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
+            .collect();
+        rows.sort_unstable();
+        for r in rows {
+            entries.push(resolve(&model, main_id, scope, r, -(r as f32 * rh)));
+        }
     }
 
-    // Resolve each row's display name (with branch→main inheritance) up front so
-    // the egui closure borrows no model state while we may mutate on commit.
-    let labels: Vec<(i32, Option<String>)> = rows
-        .iter()
-        .map(|&r| {
-            (
-                r,
-                model
-                    .resolved_row_name(plan_id, scope, r)
-                    .map(|s| s.to_string()),
-            )
-        })
-        .collect();
+    // Each forked-plan band labels its own rows, anchored at that lane's row0_y.
+    // Bands are hidden while drilled into a block, so skip them then.
+    if drill.path.is_empty() {
+        for band in bands::layout_bands(&model) {
+            let mut rows: Vec<i32> = schedule::visible_blocks(&model, band.plan_id, None)
+                .iter()
+                .map(|wb| model.block_row(band.plan_id, wb.id))
+                .collect::<std::collections::HashSet<_>>()
+                .into_iter()
+                .collect();
+            rows.sort_unstable();
+            for r in rows {
+                entries.push(resolve(&model, band.plan_id, None, r, band.row0_y - r as f32 * rh));
+            }
+        }
+    }
+
+    if entries.is_empty() && rename.editing.is_none() {
+        return;
+    }
 
     let scale = ortho.scale;
     let cam_y = cam_t.translation.y;
     let win_h = window.height();
-    let rh = constants::ROW_HEIGHT;
-    let row_screen_y = |r: i32| win_h * 0.5 + (r as f32 * rh + cam_y) / scale;
+    let world_to_screen_y = |wy: f32| win_h * 0.5 + (cam_y - wy) / scale;
     let editing = rename.editing;
+    let picker_open = rename.picker_open;
+
+    let known_resources = model.named_resources();
+    let resource_kinds: Vec<Option<model::ResourceType>> = known_resources
+        .iter()
+        .map(|n| model.resource_kind(n))
+        .collect();
 
     let Ok(ctx) = contexts.ctx_mut() else { return };
 
-    // Action gathered inside the closure, applied afterward (so model/rename can
-    // be mutated without conflicting with the immutable reads above).
     enum Act {
-        Start(i32, String),
-        Commit,
-        Cancel,
+        OpenPicker(model::PlanId, Option<model::WorkBlockId>, i32),
+        ClosePicker,
+        SelectResource(model::PlanId, Option<model::WorkBlockId>, i32, String),
+        StartNew(model::PlanId, Option<model::WorkBlockId>, i32),
+        CommitNew,
+        CancelNew,
     }
     let mut act: Option<Act> = if keys.just_pressed(KeyCode::Escape) {
-        Some(Act::Cancel)
-    } else if keys.just_pressed(KeyCode::Enter) || keys.just_pressed(KeyCode::NumpadEnter) {
-        Some(Act::Commit)
+        if editing.is_some() {
+            Some(Act::CancelNew)
+        } else if picker_open.is_some() {
+            Some(Act::ClosePicker)
+        } else {
+            None
+        }
+    } else if editing.is_some()
+        && (keys.just_pressed(KeyCode::Enter) || keys.just_pressed(KeyCode::NumpadEnter))
+    {
+        Some(Act::CommitNew)
     } else {
         None
     };
@@ -1203,12 +1220,18 @@ fn resource_gutter_ui(
             let rect = ui.max_rect();
             let half = (rh / scale * 0.5).clamp(9.0, 22.0);
 
-            for (r, name) in &labels {
-                let cy = row_screen_y(*r);
+            for e in &entries {
+                let cy = world_to_screen_y(e.world_y);
                 if cy < rect.top() - half || cy > rect.bottom() + half {
                     continue;
                 }
-                let editing_this = editing == Some((plan_id, scope, *r));
+
+                let key = (e.plan_id, e.scope, e.row);
+                let name = &e.name;
+                let kind = &e.kind;
+                let editing_this = editing == Some(key);
+                let picker_this = picker_open == Some(key);
+
                 if editing_this {
                     let field = egui::Rect::from_min_max(
                         egui::pos2(rect.left() + 6.0, cy - 9.0),
@@ -1227,7 +1250,7 @@ fn resource_gutter_ui(
                     );
                     resp.request_focus();
                     if resp.lost_focus() && act.is_none() {
-                        act = Some(Act::Commit);
+                        act = Some(Act::CommitNew);
                     }
                 } else {
                     let hot = egui::Rect::from_min_max(
@@ -1236,21 +1259,31 @@ fn resource_gutter_ui(
                     );
                     let resp = ui.interact(
                         hot,
-                        ui.id().with(("gutter_row", *r)),
+                        ui.id().with(("gutter_row", e.plan_id.0, e.row)),
                         egui::Sense::click(),
                     );
                     let (text, color) = match name {
                         Some(n) => (n.clone(), egui::Color32::from_rgb(206, 190, 164)),
                         None => (
-                            default_row_label(*r),
+                            default_row_label(e.row),
                             egui::Color32::from_rgb(138, 128, 114),
                         ),
                     };
+                    let mut text_x = rect.left() + 10.0;
+                    if let Some(k) = kind {
+                        let (cr, cg, cb) = resource_type_rgb(*k);
+                        ui.painter().circle_filled(
+                            egui::pos2(rect.left() + 8.0, cy),
+                            3.5,
+                            egui::Color32::from_rgb(cr, cg, cb),
+                        );
+                        text_x = rect.left() + 18.0;
+                    }
                     let hovered = resp.hovered();
                     ui.painter().text(
-                        egui::pos2(rect.left() + 10.0, cy),
+                        egui::pos2(text_x, cy),
                         egui::Align2::LEFT_CENTER,
-                        text,
+                        &text,
                         egui::FontId::proportional(13.0),
                         if hovered {
                             egui::Color32::from_rgb(236, 224, 204)
@@ -1258,27 +1291,145 @@ fn resource_gutter_ui(
                             color
                         },
                     );
-                    if resp.double_clicked() {
-                        act = Some(Act::Start(*r, name.clone().unwrap_or_default()));
+                    if resp.clicked() && act.is_none() {
+                        act = Some(Act::OpenPicker(e.plan_id, e.scope, e.row));
+                    }
+
+                    if picker_this {
+                        let popup_id = ui.id().with(("gutter_picker", e.plan_id.0, e.row));
+                        let popup_pos = egui::pos2(rect.right() + 2.0, cy - 4.0);
+                        let area_resp = egui::Area::new(popup_id)
+                            .fixed_pos(popup_pos)
+                            .order(egui::Order::Foreground)
+                            .show(ui.ctx(), |ui| {
+                                egui::Frame::new()
+                                    .fill(egui::Color32::from_rgb(38, 32, 26))
+                                    .stroke(egui::Stroke::new(
+                                        1.0,
+                                        egui::Color32::from_rgb(80, 70, 56),
+                                    ))
+                                    .corner_radius(egui::CornerRadius::same(4))
+                                    .inner_margin(egui::Margin::same(6))
+                                    .show(ui, |ui| {
+                                        ui.set_min_width(130.0);
+                                        for (i, res_name) in known_resources.iter().enumerate() {
+                                            let is_current = name
+                                                .as_ref()
+                                                .is_some_and(|n| n.eq_ignore_ascii_case(res_name));
+                                            ui.horizontal(|ui| {
+                                                if let Some(k) = resource_kinds[i] {
+                                                    let (cr, cg, cb) = resource_type_rgb(k);
+                                                    let (_, dot_rect) =
+                                                        ui.allocate_space(egui::vec2(10.0, 16.0));
+                                                    ui.painter().circle_filled(
+                                                        dot_rect.center(),
+                                                        3.5,
+                                                        egui::Color32::from_rgb(cr, cg, cb),
+                                                    );
+                                                } else {
+                                                    ui.allocate_space(egui::vec2(10.0, 16.0));
+                                                }
+                                                let label_color = if is_current {
+                                                    egui::Color32::from_rgb(255, 220, 160)
+                                                } else {
+                                                    egui::Color32::from_rgb(206, 190, 164)
+                                                };
+                                                let btn = ui.add(
+                                                    egui::Label::new(
+                                                        egui::RichText::new(res_name)
+                                                            .color(label_color)
+                                                            .size(13.0),
+                                                    )
+                                                    .selectable(false)
+                                                    .sense(egui::Sense::click()),
+                                                );
+                                                if btn.clicked() {
+                                                    act = Some(Act::SelectResource(
+                                                        e.plan_id,
+                                                        e.scope,
+                                                        e.row,
+                                                        res_name.clone(),
+                                                    ));
+                                                }
+                                            });
+                                        }
+                                        ui.add_space(4.0);
+                                        ui.separator();
+                                        ui.add_space(2.0);
+                                        let add_btn = ui.add(
+                                            egui::Label::new(
+                                                egui::RichText::new("+ Add New")
+                                                    .color(egui::Color32::from_rgb(140, 180, 220))
+                                                    .size(13.0),
+                                            )
+                                            .selectable(false)
+                                            .sense(egui::Sense::click()),
+                                        );
+                                        if add_btn.clicked() {
+                                            act = Some(Act::StartNew(e.plan_id, e.scope, e.row));
+                                        }
+                                        if name.is_some() {
+                                            ui.add_space(2.0);
+                                            let clear_btn = ui.add(
+                                                egui::Label::new(
+                                                    egui::RichText::new("Clear")
+                                                        .color(egui::Color32::from_rgb(180, 120, 100))
+                                                        .size(12.0),
+                                                )
+                                                .selectable(false)
+                                                .sense(egui::Sense::click()),
+                                            );
+                                            if clear_btn.clicked() {
+                                                act = Some(Act::SelectResource(
+                                                    e.plan_id,
+                                                    e.scope,
+                                                    e.row,
+                                                    String::new(),
+                                                ));
+                                            }
+                                        }
+                                    });
+                            });
+                        if ui.ctx().input(|i| i.pointer.any_pressed())
+                            && !area_resp.response.rect.contains(
+                                ui.ctx().input(|i| i.pointer.interact_pos().unwrap_or_default()),
+                            )
+                            && act.is_none()
+                        {
+                            act = Some(Act::ClosePicker);
+                        }
                     }
                 }
             }
         });
 
     match act {
-        Some(Act::Start(r, current)) => {
-            rename.editing = Some((plan_id, scope, r));
-            rename.buf = current;
-        }
-        Some(Act::Cancel) => {
+        Some(Act::OpenPicker(pid, sc, r)) => {
+            rename.picker_open = Some((pid, sc, r));
             rename.editing = None;
             rename.buf.clear();
         }
-        Some(Act::Commit) => {
+        Some(Act::ClosePicker) => {
+            rename.picker_open = None;
+        }
+        Some(Act::SelectResource(pid, sc, r, name)) => {
+            commit_row_name(&mut model, &conn, pid, sc, r, &name);
+            rename.picker_open = None;
+        }
+        Some(Act::StartNew(pid, sc, r)) => {
+            rename.picker_open = None;
+            rename.editing = Some((pid, sc, r));
+            rename.buf.clear();
+        }
+        Some(Act::CommitNew) => {
             if let Some((pid, sc, r)) = rename.editing {
                 let raw = rename.buf.trim().to_string();
                 commit_row_name(&mut model, &conn, pid, sc, r, &raw);
             }
+            rename.editing = None;
+            rename.buf.clear();
+        }
+        Some(Act::CancelNew) => {
             rename.editing = None;
             rename.buf.clear();
         }
@@ -1317,13 +1468,11 @@ fn commit_row_name(
         let move_ids: Vec<model::WorkBlockId> =
             schedule::visible_blocks(model, plan_id, scope)
                 .iter()
-                .filter(|wb| wb.row == row)
+                .filter(|wb| model.block_row(plan_id, wb.id) == row)
                 .map(|wb| wb.id)
                 .collect();
         for id in move_ids {
-            if let Some(wb) = model.work_blocks.get_mut(&id) {
-                wb.row = target;
-            }
+            model.set_block_row(plan_id, id, target);
         }
         if let Some(plan) = model.plans.get_mut(&plan_id) {
             plan.set_row_name(scope, row, String::new());
@@ -1341,6 +1490,17 @@ fn commit_row_name(
 /// named it.
 fn default_row_label(row: i32) -> String {
     format!("Resource {}", row + 1)
+}
+
+/// The accent colour marking a resource's type in the gutter and settings.
+fn resource_type_rgb(kind: model::ResourceType) -> (u8, u8, u8) {
+    match kind {
+        model::ResourceType::Engineer => (98, 154, 224),   // blue
+        model::ResourceType::NewHire => (140, 200, 230),   // light cyan
+        model::ResourceType::Team => (120, 196, 140),      // green
+        model::ResourceType::Equipment => (224, 176, 92),  // amber
+        model::ResourceType::Budget => (180, 150, 222),    // violet
+    }
 }
 
 /// World-space x of the start of calendar year `y` (its Jan 1, mapped to a
@@ -1559,6 +1719,59 @@ fn settings_flyout_ui(
                     }
                 }
             });
+
+            // ── Resources ──────────────────────────────────────────────────
+            ui.add_space(16.0);
+            ui.label(
+                egui::RichText::new("RESOURCES")
+                    .size(11.0)
+                    .color(egui::Color32::from_rgb(150, 130, 96)),
+            );
+            ui.separator();
+            ui.add_space(4.0);
+
+            let names = model.named_resources();
+            if names.is_empty() {
+                ui.label(
+                    egui::RichText::new("Name rows in the gutter to add resources")
+                        .italics()
+                        .color(egui::Color32::from_rgb(120, 110, 96)),
+                );
+            }
+            for name in &names {
+                ui.horizontal(|ui| {
+                    let kind = model.resource_kind(name);
+                    if let Some(k) = kind {
+                        let (r, g, b) = resource_type_rgb(k);
+                        let dot = ui.allocate_space(egui::vec2(9.0, 9.0)).1;
+                        ui.painter().circle_filled(
+                            dot.center(),
+                            3.5,
+                            egui::Color32::from_rgb(r, g, b),
+                        );
+                    }
+                    ui.label(
+                        egui::RichText::new(name)
+                            .color(egui::Color32::from_rgb(206, 190, 164)),
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        egui::ComboBox::from_id_salt(format!("restype:{name}"))
+                            .selected_text(kind.map(|k| k.label()).unwrap_or("—"))
+                            .width(96.0)
+                            .show_ui(ui, |ui| {
+                                for k in model::ResourceType::ALL {
+                                    if ui
+                                        .selectable_label(kind == Some(k), k.label())
+                                        .clicked()
+                                    {
+                                        model.set_resource_kind(name, k);
+                                        changed = true;
+                                    }
+                                }
+                            });
+                    });
+                });
+            }
         });
 
     if close {
@@ -1734,11 +1947,13 @@ fn top_bar_ui(
 pub struct SelectedPlan(pub Option<model::PlanId>);
 
 /// Inline resource-row rename state: which (plan, drill scope, row) is being
-/// edited in the gutter, plus the text buffer.
+/// State for the resource gutter: tracks which row has an open picker popup
+/// and, when "Add New" is chosen, the text buffer for the new name.
 #[derive(Resource, Default)]
 pub struct RowRename {
     pub editing: Option<(model::PlanId, Option<model::WorkBlockId>, i32)>,
     pub buf: String,
+    pub picker_open: Option<(model::PlanId, Option<model::WorkBlockId>, i32)>,
 }
 
 /// State for the right-side settings fly-out: whether it's open, plus the text

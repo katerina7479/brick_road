@@ -157,7 +157,7 @@ fn main_bottom_y(model: &Model, main: &Plan) -> f32 {
             if wb.duration_days <= 0 {
                 continue;
             }
-            let y = -(wb.row as f32) * ROW_HEIGHT - ROW_HEIGHT * 0.5;
+            let y = -(model.block_row(main.id, *id) as f32) * ROW_HEIGHT - ROW_HEIGHT * 0.5;
             if y < min_y {
                 min_y = y;
             }
@@ -200,16 +200,19 @@ pub fn layout_bands(model: &Model) -> Vec<BandLayout> {
             if wb.duration_days <= 0 {
                 continue;
             }
-            max_row = max_row.max(wb.row);
+            // Lanes are per-plan: a branch places its blocks at its own rows
+            // (snapshotted from main at fork, then diverging independently).
+            let row = model.block_row(branch.id, *id);
+            max_row = max_row.max(row);
             let (left, span_w) = crate::blocks::block_span_x(wb, &model.calendar);
             let w = span_w.max(1.0);
             blocks.push(BandBlock {
                 id: *id,
                 cx: left + w * 0.5,
-                cy: row0_y - wb.row as f32 * ROW_HEIGHT,
+                cy: row0_y - row as f32 * ROW_HEIGHT,
                 w,
                 name: wb.name.clone(),
-                color: crate::blocks::block_color(wb),
+                color: crate::blocks::block_color(wb, row),
                 owned: !main_set.contains(id),
             });
         }
@@ -937,7 +940,7 @@ pub fn handle_lane_block_edit(
                 let day = crate::calendar::x_to_day(left_x + PIXELS_PER_DAY * 0.5, &model.calendar)
                     .max(band.fork_day);
                 let row = ((band.row0_y - world.y) / ROW_HEIGHT).round().max(0.0) as i32;
-                model.set_block_placement(a.block, day, row);
+                model.set_block_placement(a.plan, a.block, day, row);
             }
             LaneDragMode::Resize => {
                 let start = model.work_blocks.get(&a.block).map(|wb| wb.start_day);

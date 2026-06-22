@@ -1,10 +1,4 @@
-use std::collections::HashMap;
-
-use bevy::prelude::Resource;
-
-use crate::model::{
-    Day, DependencyId, DependencyType, Model, Plan, ResourceBlock, ResourceBlockId, WorkBlockId,
-};
+use crate::model::{Day, DependencyId, DependencyType, Model, WorkBlockId};
 
 /// A single dependency whose constraint is not satisfied by the current
 /// `WorkBlock` placements (`start_day` / `duration_days`).
@@ -19,33 +13,6 @@ pub struct DependencyViolation {
     pub violation_days: Day,
 }
 
-/// A time window in which total resource demand exceeds available capacity.
-#[derive(Debug, Clone, PartialEq)]
-pub struct ResourceConflict {
-    pub resource_id: ResourceBlockId,
-    pub window_start: Day,
-    pub window_end: Day,
-    /// Sum of `allocation_factor` for all blocks active in this window.
-    pub demand: f32,
-    /// Available capacity at this time (from `AvailabilityTimeline`, or 1.0 if none).
-    pub capacity: f32,
-    /// `demand − capacity`, always > 0.
-    pub overload: f32,
-    /// Every block that is allocated to this resource during this window.
-    pub contributing_blocks: Vec<WorkBlockId>,
-}
-
-/// All analysis results computed from the current model/plan state.
-#[derive(Debug, Clone, Default, PartialEq, Resource)]
-pub struct ScheduleAnalysis {
-    pub violations: Vec<DependencyViolation>,
-    pub resource_conflicts: Vec<ResourceConflict>,
-    /// Zero-float blocks in topological order (from user placement backward pass).
-    pub critical_path: Vec<WorkBlockId>,
-    /// Total float per block (latest_finish − earliest_finish over user placement).
-    pub float: HashMap<WorkBlockId, Day>,
-}
-
 /// Check every dependency in `model` against the current user-placed
 /// `start_day` / `duration_days` on each `WorkBlock`.
 ///
@@ -57,7 +24,7 @@ pub struct ScheduleAnalysis {
 ///
 /// A violation occurs when the required bound exceeds the placed value;
 /// `violation_days` is the magnitude of the shortfall.
-pub fn analyze_dependencies(model: &Model) -> ScheduleAnalysis {
+pub fn analyze_dependencies(model: &Model) -> Vec<DependencyViolation> {
     let mut violations = Vec::new();
 
     for (&dep_id, dep) in &model.dependencies {
@@ -91,117 +58,13 @@ pub fn analyze_dependencies(model: &Model) -> ScheduleAnalysis {
         }
     }
 
-    ScheduleAnalysis {
-        violations,
-        resource_conflicts: vec![],
-        critical_path: vec![],
-        float: HashMap::new(),
-    }
-}
-
-/// Detect time windows where allocated resource demand exceeds capacity for
-/// the given `plan`, based on current `WorkBlock.start_day` / `duration_days`
-/// placements.
-///
-/// Uses a sweep-line over every event point where demand or capacity can
-/// change (block starts/ends and availability-segment boundaries), sampling
-/// the midpoint of each sub-interval. Sub-intervals with zero demand are
-/// skipped. Capacity defaults to 1.0 (full, unconstrained) for any instant
-/// not covered by an `AvailabilitySegment`.
-pub fn analyze_resources(model: &Model, plan: &Plan) -> Vec<ResourceConflict> {
-    // Group allocations by resource.
-    let mut by_resource: HashMap<ResourceBlockId, Vec<(WorkBlockId, f32)>> = HashMap::new();
-    for alloc in &plan.allocations {
-        by_resource
-            .entry(alloc.resource_id)
-            .or_default()
-            .push((alloc.work_block_id, alloc.allocation_factor));
-    }
-
-    let mut conflicts = Vec::new();
-
-    for (rb_id, allocs) in &by_resource {
-        let rb = model.resource_blocks.get(rb_id);
-
-        // Collect all event points: block starts/ends + availability boundaries.
-        let mut events: Vec<Day> = Vec::new();
-        for &(wb_id, _) in allocs {
-            if let Some(wb) = model.work_blocks.get(&wb_id) {
-                if wb.duration_days > 0 {
-                    events.push(wb.start_day);
-                    events.push(wb.start_day + wb.duration_days);
-                }
-            }
-        }
-        if let Some(rb) = rb {
-            for seg in &rb.availability.segments {
-                events.push(seg.start);
-                events.push(seg.end);
-            }
-        }
-
-        events.sort();
-        events.dedup();
-
-        for w in events.windows(2) {
-            let (t0, t1) = (w[0], w[1]);
-            if t1 <= t0 {
-                continue;
-            }
-            let mid = (t0 + t1) / 2;
-
-            let mut demand = 0.0_f32;
-            let mut contributing = Vec::new();
-            for &(wb_id, factor) in allocs {
-                if let Some(wb) = model.work_blocks.get(&wb_id) {
-                    let end = wb.start_day + wb.duration_days;
-                    if wb.start_day <= mid && mid < end {
-                        demand += factor;
-                        contributing.push(wb_id);
-                    }
-                }
-            }
-
-            if demand <= 0.0 {
-                continue;
-            }
-
-            let capacity = rb.map(|r| avail_at(r, mid)).unwrap_or(1.0);
-
-            if demand > capacity + 1e-6 {
-                conflicts.push(ResourceConflict {
-                    resource_id: *rb_id,
-                    window_start: t0,
-                    window_end: t1,
-                    demand,
-                    capacity,
-                    overload: demand - capacity,
-                    contributing_blocks: contributing,
-                });
-            }
-        }
-    }
-
-    conflicts
-}
-
-/// Availability factor for resource `rb` at instant `t`.
-/// Gaps in the availability timeline are treated as factor 1.0.
-fn avail_at(rb: &ResourceBlock, t: Day) -> f32 {
-    for seg in &rb.availability.segments {
-        if seg.start <= t && t < seg.end {
-            return seg.factor;
-        }
-    }
-    1.0
+    violations
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{
-        AvailabilitySegment, AvailabilityTimeline, Day, Model, ResourceAllocation, ResourceType,
-    };
+    use crate::model::{Day, Model};
 
     fn placed(model: &mut Model, name: &str, start: Day, dur: Day) -> WorkBlockId {
         let id = model.create_work_block(name);
@@ -209,12 +72,6 @@ mod tests {
         wb.start_day = start;
         wb.duration_days = dur;
         id
-    }
-
-    fn make_plan(model: &mut Model, allocs: Vec<ResourceAllocation>) -> crate::model::PlanId {
-        let pid = model.create_plan("p", None);
-        model.plans.get_mut(&pid).unwrap().allocations = allocs;
-        pid
     }
 
     // ── analyze_dependencies tests ──────────────────────────────────────────
@@ -225,7 +82,7 @@ mod tests {
         let a = placed(&mut m, "A", 0, 5);
         let b = placed(&mut m, "B", 5, 3);
         m.create_dependency(a, b, DependencyType::FinishToStart);
-        assert!(analyze_dependencies(&m).violations.is_empty());
+        assert!(analyze_dependencies(&m).is_empty());
     }
 
     #[test]
@@ -234,7 +91,7 @@ mod tests {
         let a = placed(&mut m, "A", 0, 5);
         let b = placed(&mut m, "B", 3, 3);
         m.create_dependency(a, b, DependencyType::FinishToStart);
-        let v = &analyze_dependencies(&m).violations;
+        let v = &analyze_dependencies(&m);
         assert_eq!(v.len(), 1);
         assert_eq!(v[0].predecessor, a);
         assert_eq!(v[0].successor, b);
@@ -248,7 +105,7 @@ mod tests {
         let b = placed(&mut m, "B", 4, 2);
         let dep_id = m.create_dependency(a, b, DependencyType::FinishToStart);
         m.dependencies.get_mut(&dep_id).unwrap().lag = 2;
-        let v = &analyze_dependencies(&m).violations;
+        let v = &analyze_dependencies(&m);
         assert_eq!(v.len(), 1);
         assert_eq!(v[0].violation_days, 1);
     }
@@ -259,7 +116,7 @@ mod tests {
         let a = placed(&mut m, "A", 2, 4);
         let b = placed(&mut m, "B", 2, 3);
         m.create_dependency(a, b, DependencyType::StartToStart);
-        assert!(analyze_dependencies(&m).violations.is_empty());
+        assert!(analyze_dependencies(&m).is_empty());
     }
 
     #[test]
@@ -268,7 +125,7 @@ mod tests {
         let a = placed(&mut m, "A", 3, 4);
         let b = placed(&mut m, "B", 2, 3);
         m.create_dependency(a, b, DependencyType::StartToStart);
-        let v = &analyze_dependencies(&m).violations;
+        let v = &analyze_dependencies(&m);
         assert_eq!(v.len(), 1);
         assert_eq!(v[0].violation_days, 1);
     }
@@ -279,7 +136,7 @@ mod tests {
         let a = placed(&mut m, "A", 0, 5);
         let b = placed(&mut m, "B", 1, 4);
         m.create_dependency(a, b, DependencyType::FinishToFinish);
-        assert!(analyze_dependencies(&m).violations.is_empty());
+        assert!(analyze_dependencies(&m).is_empty());
     }
 
     #[test]
@@ -288,7 +145,7 @@ mod tests {
         let a = placed(&mut m, "A", 0, 6);
         let b = placed(&mut m, "B", 1, 4);
         m.create_dependency(a, b, DependencyType::FinishToFinish);
-        let v = &analyze_dependencies(&m).violations;
+        let v = &analyze_dependencies(&m);
         assert_eq!(v.len(), 1);
         assert_eq!(v[0].violation_days, 1);
     }
@@ -299,7 +156,7 @@ mod tests {
         let a = placed(&mut m, "A", 4, 2);
         let b = placed(&mut m, "B", 0, 5);
         m.create_dependency(a, b, DependencyType::StartToFinish);
-        assert!(analyze_dependencies(&m).violations.is_empty());
+        assert!(analyze_dependencies(&m).is_empty());
     }
 
     #[test]
@@ -308,7 +165,7 @@ mod tests {
         let a = placed(&mut m, "A", 5, 2);
         let b = placed(&mut m, "B", 0, 4);
         m.create_dependency(a, b, DependencyType::StartToFinish);
-        let v = &analyze_dependencies(&m).violations;
+        let v = &analyze_dependencies(&m);
         assert_eq!(v.len(), 1);
         assert_eq!(v[0].violation_days, 1);
     }
@@ -321,7 +178,7 @@ mod tests {
         let c = placed(&mut m, "C", 13, 4);
         m.create_dependency(a, b, DependencyType::FinishToStart);
         m.create_dependency(b, c, DependencyType::FinishToStart);
-        assert!(analyze_dependencies(&m).violations.is_empty());
+        assert!(analyze_dependencies(&m).is_empty());
     }
 
     #[test]
@@ -331,146 +188,6 @@ mod tests {
         let b = placed(&mut m, "B", 5, 2);
         m.create_dependency(a, b, DependencyType::FinishToStart);
         m.work_blocks.remove(&b);
-        assert!(analyze_dependencies(&m).violations.is_empty());
-    }
-
-    // ── analyze_resources tests ─────────────────────────────────────────────
-
-    fn alloc(rb: ResourceBlockId, wb: WorkBlockId, factor: f32) -> ResourceAllocation {
-        ResourceAllocation {
-            resource_id: rb,
-            work_block_id: wb,
-            allocation_factor: factor,
-        }
-    }
-
-    #[test]
-    fn no_allocations_no_conflicts() {
-        let mut m = Model::default();
-        let pid = make_plan(&mut m, vec![]);
-        let plan = m.plans[&pid].clone();
-        assert!(analyze_resources(&m, &plan).is_empty());
-    }
-
-    #[test]
-    fn serialized_blocks_no_conflict() {
-        // A [0,3) then B [3,6) on R — no overlap, no conflict.
-        let mut m = Model::default();
-        let r = m.create_resource_block("R", ResourceType::Person);
-        let a = placed(&mut m, "A", 0, 3);
-        let b = placed(&mut m, "B", 3, 3);
-        let pid = make_plan(&mut m, vec![alloc(r, a, 1.0), alloc(r, b, 1.0)]);
-        let plan = m.plans[&pid].clone();
-        assert!(analyze_resources(&m, &plan).is_empty());
-    }
-
-    #[test]
-    fn overlapping_full_blocks_conflict() {
-        // A [0,5) and B [2,8) both at factor 1.0 → demand 2.0 in [2,5).
-        let mut m = Model::default();
-        let r = m.create_resource_block("R", ResourceType::Person);
-        let a = placed(&mut m, "A", 0, 5);
-        let b = placed(&mut m, "B", 2, 6);
-        let pid = make_plan(&mut m, vec![alloc(r, a, 1.0), alloc(r, b, 1.0)]);
-        let plan = m.plans[&pid].clone();
-        let cs = analyze_resources(&m, &plan);
-        assert!(!cs.is_empty(), "expected a conflict");
-        let c = cs.iter().find(|c| c.resource_id == r).unwrap();
-        assert!((c.demand - 2.0).abs() < 1e-5);
-        assert!((c.capacity - 1.0).abs() < 1e-5);
-        assert!((c.overload - 1.0).abs() < 1e-5);
-        assert!(c.contributing_blocks.contains(&a));
-        assert!(c.contributing_blocks.contains(&b));
-        // Non-overlapping windows should NOT appear as conflicts.
-        assert!(!cs.iter().any(|c| c.window_end <= 2));
-        assert!(!cs.iter().any(|c| c.window_start >= 5));
-    }
-
-    #[test]
-    fn partial_allocations_sum_under_capacity_no_conflict() {
-        // Two blocks at 0.5 each, fully overlapping → demand 1.0 = capacity.
-        let mut m = Model::default();
-        let r = m.create_resource_block("R", ResourceType::Person);
-        let a = placed(&mut m, "A", 0, 4);
-        let b = placed(&mut m, "B", 0, 4);
-        let pid = make_plan(&mut m, vec![alloc(r, a, 0.5), alloc(r, b, 0.5)]);
-        let plan = m.plans[&pid].clone();
-        assert!(analyze_resources(&m, &plan).is_empty());
-    }
-
-    #[test]
-    fn partial_allocations_exceed_capacity_conflict() {
-        // Two blocks at 0.6 each, overlapping → demand 1.2 > 1.0.
-        let mut m = Model::default();
-        let r = m.create_resource_block("R", ResourceType::Person);
-        let a = placed(&mut m, "A", 0, 4);
-        let b = placed(&mut m, "B", 0, 4);
-        let pid = make_plan(&mut m, vec![alloc(r, a, 0.6), alloc(r, b, 0.6)]);
-        let plan = m.plans[&pid].clone();
-        let cs = analyze_resources(&m, &plan);
-        assert!(!cs.is_empty());
-        assert!((cs[0].demand - 1.2).abs() < 1e-5);
-    }
-
-    #[test]
-    fn reduced_availability_causes_conflict() {
-        // R available at factor 0.5; one block allocated at 1.0 → overload.
-        let mut m = Model::default();
-        let r = m.create_resource_block("R", ResourceType::Person);
-        m.resource_blocks.get_mut(&r).unwrap().availability = AvailabilityTimeline {
-            segments: vec![AvailabilitySegment {
-                start: 0,
-                end: 10,
-                factor: 0.5,
-            }],
-        };
-        let a = placed(&mut m, "A", 0, 5);
-        let pid = make_plan(&mut m, vec![alloc(r, a, 1.0)]);
-        let plan = m.plans[&pid].clone();
-        let cs = analyze_resources(&m, &plan);
-        assert!(!cs.is_empty());
-        assert!((cs[0].capacity - 0.5).abs() < 1e-5);
-        assert!((cs[0].overload - 0.5).abs() < 1e-5);
-    }
-
-    #[test]
-    fn gap_between_segments_defaults_to_full_capacity() {
-        // R has segments [0,5) and [8,12) both at factor 0.5, leaving a gap [5,8).
-        // A block placed entirely in that gap at factor 1.2 exceeds capacity 1.0
-        // (the gap-is-full-capacity rule), producing a conflict with capacity=1.0.
-        let mut m = Model::default();
-        let r = m.create_resource_block("R", ResourceType::Person);
-        m.resource_blocks.get_mut(&r).unwrap().availability = AvailabilityTimeline {
-            segments: vec![
-                AvailabilitySegment {
-                    start: 0,
-                    end: 5,
-                    factor: 0.5,
-                },
-                AvailabilitySegment {
-                    start: 8,
-                    end: 12,
-                    factor: 0.5,
-                },
-            ],
-        };
-        let a = placed(&mut m, "A", 5, 3); // [5, 8) — entirely in the gap
-        let pid = make_plan(&mut m, vec![alloc(r, a, 1.2)]);
-        let plan = m.plans[&pid].clone();
-        let cs = analyze_resources(&m, &plan);
-        assert_eq!(
-            cs.len(),
-            1,
-            "expected exactly one conflict window in the gap"
-        );
-        let c = &cs[0];
-        assert!(
-            (c.capacity - 1.0).abs() < 1e-5,
-            "gap capacity must default to 1.0"
-        );
-        assert!((c.demand - 1.2).abs() < 1e-5);
-        assert!((c.overload - 0.2).abs() < 1e-5);
-        assert_eq!(c.window_start, 5);
-        assert_eq!(c.window_end, 8);
+        assert!(analyze_dependencies(&m).is_empty());
     }
 }

@@ -212,8 +212,16 @@ pub fn fit_to_blocks(
         .map(|wb| crate::calendar::day_to_x(wb.start_day + wb.duration_days, &model.calendar))
         .fold(f32::NEG_INFINITY, f32::max);
     // Rows are explicit and can be sparse/negative, so frame the real lane range.
-    let min_row = visible.iter().map(|wb| wb.row).min().unwrap_or(0) as f32;
-    let max_row = visible.iter().map(|wb| wb.row).max().unwrap_or(0) as f32;
+    let min_row = visible
+        .iter()
+        .map(|wb| model.block_row(plan_id, wb.id))
+        .min()
+        .unwrap_or(0) as f32;
+    let max_row = visible
+        .iter()
+        .map(|wb| model.block_row(plan_id, wb.id))
+        .max()
+        .unwrap_or(0) as f32;
     let y_max = -min_row * ROW_HEIGHT + ROW_HEIGHT * 0.5;
     let y_min = -max_row * ROW_HEIGHT - ROW_HEIGHT * 0.5;
 

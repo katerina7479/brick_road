@@ -3,8 +3,7 @@ use rusqlite::{Connection, Result};
 
 use crate::model::{
     AvailabilitySegment, AvailabilityTimeline, Dependency, DependencyId, DependencyType, Model,
-    Plan, PlanId, ResourceAllocation, ResourceBlock, ResourceBlockId, ResourceType, TShirtSize,
-    WorkBlock, WorkBlockId,
+    Plan, PlanId, ResourceBlock, ResourceBlockId, ResourceType, TShirtSize, WorkBlock, WorkBlockId,
 };
 
 pub fn create_tables(conn: &Connection) -> Result<()> {
@@ -32,12 +31,19 @@ pub fn create_tables(conn: &Connection) -> Result<()> {
         "ALTER TABLE work_blocks ADD COLUMN description TEXT NOT NULL DEFAULT ''",
         "ALTER TABLE work_blocks ADD COLUMN priority INTEGER NOT NULL DEFAULT 1",
         "ALTER TABLE work_blocks ADD COLUMN t_shirt_size TEXT",
-        "ALTER TABLE work_blocks ADD COLUMN block_row INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE work_blocks ADD COLUMN parent_id INTEGER",
         "ALTER TABLE work_blocks ADD COLUMN rollup INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE plans ADD COLUMN branch_start_day INTEGER",
         "ALTER TABLE plans ADD COLUMN row_names TEXT NOT NULL DEFAULT ''",
         "ALTER TABLE dependencies ADD COLUMN plan_id INTEGER",
+        // The block lane moved from a shared work_blocks column to per-plan
+        // storage: each plan owns each block's row, serialized into this cell
+        // (mirrors row_names). The legacy work_blocks.block_row column is kept so
+        // load_model can backfill pre-move DBs once; it is otherwise unused.
+        "ALTER TABLE plans ADD COLUMN block_rows TEXT NOT NULL DEFAULT ''",
+        // Resource allocations were removed (vestigial: no UI created them and no
+        // running system read them). Drop the table on pre-existing DBs.
+        "DROP TABLE IF EXISTS resource_allocations",
     ] {
         match conn.execute_batch(sql) {
             Ok(()) => {}
@@ -127,8 +133,7 @@ pub fn save_model(conn: &Connection, model: &Model) -> Result<()> {
     // These tables are fully owned by their parent entity and have no FK
     // children of their own, so truncating them is always safe.
     tx.execute_batch(
-        "DELETE FROM resource_allocations;
-         DELETE FROM plan_blocks;
+        "DELETE FROM plan_blocks;
          DELETE FROM availability_segments;
          DELETE FROM calendar_non_working_dates;
          DELETE FROM t_shirt_sizes;
@@ -160,8 +165,8 @@ pub fn save_model(conn: &Connection, model: &Model) -> Result<()> {
             "INSERT INTO work_blocks
                  (id, name,
                   start_day, duration_days, color_r, color_g, color_b, description, priority,
-                  t_shirt_size, block_row, parent_id, rollup)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+                  t_shirt_size, parent_id, rollup)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
              ON CONFLICT(id) DO UPDATE SET
                  name = excluded.name,
                  start_day = excluded.start_day,
@@ -172,7 +177,6 @@ pub fn save_model(conn: &Connection, model: &Model) -> Result<()> {
                  description = excluded.description,
                  priority = excluded.priority,
                  t_shirt_size = excluded.t_shirt_size,
-                 block_row = excluded.block_row,
                  parent_id = excluded.parent_id,
                  rollup = excluded.rollup",
             (
@@ -186,7 +190,6 @@ pub fn save_model(conn: &Connection, model: &Model) -> Result<()> {
                 &wb.description,
                 wb.priority as i64,
                 &wb.t_shirt_size,
-                wb.row as i64,
                 wb.parent.map(|p| p.0 as i64),
                 wb.rollup as i64,
             ),
@@ -217,17 +220,19 @@ pub fn save_model(conn: &Connection, model: &Model) -> Result<()> {
 
     for plan in model.plans.values() {
         tx.execute(
-            "INSERT INTO plans (id, name, branch_start_day, row_names)
-             VALUES (?1, ?2, ?3, ?4)
+            "INSERT INTO plans (id, name, branch_start_day, row_names, block_rows)
+             VALUES (?1, ?2, ?3, ?4, ?5)
              ON CONFLICT(id) DO UPDATE SET
                  name = excluded.name,
                  branch_start_day = excluded.branch_start_day,
-                 row_names = excluded.row_names",
+                 row_names = excluded.row_names,
+                 block_rows = excluded.block_rows",
             (
                 plan.id.0 as i64,
                 &plan.name,
                 plan.branch_start_day,
                 encode_row_names(&plan.row_names),
+                encode_block_rows(&plan.block_rows),
             ),
         )?;
     }
@@ -314,19 +319,6 @@ pub fn save_model(conn: &Connection, model: &Model) -> Result<()> {
                 (plan.id.0 as i64, wb_id.0 as i64, order as i64),
             )?;
         }
-        for alloc in &plan.allocations {
-            tx.execute(
-                "INSERT INTO resource_allocations
-                     (plan_id, resource_block_id, work_block_id, allocation_factor)
-                 VALUES (?1, ?2, ?3, ?4)",
-                (
-                    plan.id.0 as i64,
-                    alloc.resource_id.0 as i64,
-                    alloc.work_block_id.0 as i64,
-                    alloc.allocation_factor as f64,
-                ),
-            )?;
-        }
     }
 
     for date in &model.calendar.non_working_dates {
@@ -370,6 +362,32 @@ fn encode_row_names(rows: &std::collections::HashMap<Option<WorkBlockId>, Vec<St
     // Stable order keeps saves deterministic (HashMap iteration is not).
     lines.sort();
     lines.join("\n")
+}
+
+/// Serializes a plan's per-block lane assignments into one TEXT cell: one
+/// `block_id<TAB>row` pair per line. Sorted for deterministic saves.
+fn encode_block_rows(rows: &std::collections::HashMap<WorkBlockId, i32>) -> String {
+    let mut lines: Vec<String> = rows
+        .iter()
+        .map(|(id, row)| format!("{}\t{}", id.0, row))
+        .collect();
+    lines.sort();
+    lines.join("\n")
+}
+
+/// Inverse of [`encode_block_rows`]. Unknown/malformed lines are skipped.
+fn decode_block_rows(s: &str) -> std::collections::HashMap<WorkBlockId, i32> {
+    let mut map = std::collections::HashMap::new();
+    for line in s.split('\n').filter(|l| !l.is_empty()) {
+        let mut tokens = line.split('\t');
+        let (Some(id), Some(row)) = (tokens.next(), tokens.next()) else {
+            continue;
+        };
+        if let (Ok(id), Ok(row)) = (id.parse::<u64>(), row.parse::<i32>()) {
+            map.insert(WorkBlockId(id), row);
+        }
+    }
+    map
 }
 
 /// Inverse of [`encode_row_names`]. Unknown/malformed lines are skipped.
@@ -491,7 +509,7 @@ pub fn load_model(conn: &Connection) -> Result<Model> {
         let mut stmt = conn.prepare(
             "SELECT id, name,
                     start_day, duration_days, color_r, color_g, color_b, description, priority,
-                    t_shirt_size, block_row, parent_id, rollup
+                    t_shirt_size, parent_id, rollup
              FROM work_blocks",
         )?;
         let rows = stmt.query_map([], |row| {
@@ -506,9 +524,8 @@ pub fn load_model(conn: &Connection) -> Result<Model> {
                 row.get::<_, String>(7)?,
                 row.get::<_, i64>(8)?,
                 row.get::<_, Option<String>>(9)?,
-                row.get::<_, i64>(10)?,
-                row.get::<_, Option<i64>>(11)?,
-                row.get::<_, i64>(12)?,
+                row.get::<_, Option<i64>>(10)?,
+                row.get::<_, i64>(11)?,
             ))
         })?;
         for row in rows {
@@ -523,7 +540,6 @@ pub fn load_model(conn: &Connection) -> Result<Model> {
                 description,
                 priority,
                 t_shirt_size,
-                block_row,
                 parent_id,
                 rollup,
             ) = row?;
@@ -540,7 +556,6 @@ pub fn load_model(conn: &Connection) -> Result<Model> {
                     parent: parent_id.map(|p| WorkBlockId(p as u64)),
                     start_day: start_day as i32,
                     duration_days: duration_days as i32,
-                    row: block_row as i32,
                     color,
                     description,
                     priority: priority.clamp(0, 3) as u8,
@@ -589,17 +604,18 @@ pub fn load_model(conn: &Connection) -> Result<Model> {
     // plans
     {
         let mut stmt =
-            conn.prepare("SELECT id, name, branch_start_day, row_names FROM plans")?;
+            conn.prepare("SELECT id, name, branch_start_day, row_names, block_rows FROM plans")?;
         let rows = stmt.query_map([], |row| {
             Ok((
                 row.get::<_, i64>(0)?,
                 row.get::<_, String>(1)?,
                 row.get::<_, Option<f64>>(2)?,
                 row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
             ))
         })?;
         for row in rows {
-            let (id, name, branch_start_day, row_names) = row?;
+            let (id, name, branch_start_day, row_names, block_rows) = row?;
             bump!(id);
             model.plans.insert(
                 PlanId(id as u64),
@@ -607,9 +623,9 @@ pub fn load_model(conn: &Connection) -> Result<Model> {
                     id: PlanId(id as u64),
                     name,
                     root_blocks: vec![],
-                    allocations: vec![],
                     branch_start_day: branch_start_day.map(|d| d as i32),
                     row_names: decode_row_names(&row_names),
+                    block_rows: decode_block_rows(&block_rows),
                 },
             );
         }
@@ -641,28 +657,49 @@ pub fn load_model(conn: &Connection) -> Result<Model> {
         }
     }
 
-    // resource_allocations
+    // One-time lane backfill: DBs from before the lane moved per-plan still carry
+    // the old shared work_blocks.block_row column. For any plan that has no
+    // serialized block_rows yet, seed it from those legacy values — main gets
+    // every block it owns (its roots plus all child blocks, which only exist
+    // under main's hierarchy), each branch gets its root blocks. Fresh and
+    // already-migrated DBs lack the column ("no such column") and are skipped.
     {
-        let mut stmt = conn.prepare(
-            "SELECT plan_id, resource_block_id, work_block_id, allocation_factor
-             FROM resource_allocations",
-        )?;
-        let rows = stmt.query_map([], |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, i64>(1)?,
-                row.get::<_, i64>(2)?,
-                row.get::<_, f64>(3)?,
-            ))
-        })?;
-        for row in rows {
-            let (plan_id, rb_id, wb_id, factor) = row?;
-            if let Some(plan) = model.plans.get_mut(&PlanId(plan_id as u64)) {
-                plan.allocations.push(ResourceAllocation {
-                    resource_id: ResourceBlockId(rb_id as u64),
-                    work_block_id: WorkBlockId(wb_id as u64),
-                    allocation_factor: factor as f32,
-                });
+        let legacy: Option<std::collections::HashMap<WorkBlockId, i32>> = conn
+            .prepare("SELECT id, block_row FROM work_blocks")
+            .and_then(|mut stmt| {
+                let rows = stmt.query_map([], |row| {
+                    Ok((
+                        WorkBlockId(row.get::<_, i64>(0)? as u64),
+                        row.get::<_, i64>(1)? as i32,
+                    ))
+                })?;
+                rows.collect::<Result<std::collections::HashMap<_, _>>>()
+            })
+            .ok();
+        if let Some(legacy) = legacy {
+            let main_id = model.main_plan_id();
+            let child_ids: Vec<WorkBlockId> = model
+                .work_blocks
+                .values()
+                .filter(|wb| wb.parent.is_some())
+                .map(|wb| wb.id)
+                .collect();
+            for plan in model.plans.values_mut() {
+                if !plan.block_rows.is_empty() {
+                    continue;
+                }
+                for &id in &plan.root_blocks {
+                    if let Some(&r) = legacy.get(&id) {
+                        plan.block_rows.insert(id, r);
+                    }
+                }
+                if Some(plan.id) == main_id {
+                    for &id in &child_ids {
+                        if let Some(&r) = legacy.get(&id) {
+                            plan.block_rows.insert(id, r);
+                        }
+                    }
+                }
             }
         }
     }
@@ -782,20 +819,6 @@ pub fn validate_model(model: &Model) -> Result<()> {
                 ));
             }
         }
-        for alloc in &plan.allocations {
-            if !model.resource_blocks.contains_key(&alloc.resource_id) {
-                errors.push(format!(
-                    "Plan {} allocation ResourceBlock {} does not exist",
-                    plan_id.0, alloc.resource_id.0
-                ));
-            }
-            if !model.work_blocks.contains_key(&alloc.work_block_id) {
-                errors.push(format!(
-                    "Plan {} allocation WorkBlock {} does not exist",
-                    plan_id.0, alloc.work_block_id.0
-                ));
-            }
-        }
     }
 
     if errors.is_empty() {
@@ -807,7 +830,8 @@ pub fn validate_model(model: &Model) -> Result<()> {
 
 fn parse_resource_type(s: &str) -> Result<ResourceType> {
     match s {
-        "Person" => Ok(ResourceType::Person),
+        "Engineer" | "Person" => Ok(ResourceType::Engineer),
+        "NewHire" => Ok(ResourceType::NewHire),
         "Team" => Ok(ResourceType::Team),
         "Equipment" => Ok(ResourceType::Equipment),
         "Budget" => Ok(ResourceType::Budget),
@@ -831,7 +855,8 @@ fn parse_dependency_type(s: &str) -> Result<DependencyType> {
 
 fn resource_type_str(rt: ResourceType) -> &'static str {
     match rt {
-        ResourceType::Person => "Person",
+        ResourceType::Engineer => "Engineer",
+        ResourceType::NewHire => "NewHire",
         ResourceType::Team => "Team",
         ResourceType::Equipment => "Equipment",
         ResourceType::Budget => "Budget",
@@ -850,9 +875,7 @@ fn dependency_type_str(dt: DependencyType) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{
-        AvailabilitySegment, Day, DependencyType, ResourceAllocation, ResourceType, WorkBlockId,
-    };
+    use crate::model::{AvailabilitySegment, Day, DependencyType, ResourceType, WorkBlockId};
     use rusqlite::Connection;
 
     fn open_in_memory() -> Connection {
@@ -897,7 +920,10 @@ mod tests {
         save_model(&conn, &m).unwrap();
         let loaded = load_model(&conn).unwrap();
         assert_eq!(m.plans[&plan].row_names, loaded.plans[&plan].row_names);
-        assert_eq!(loaded.plans[&plan].row_name(None, 0), Some("Backend, infra"));
+        assert_eq!(
+            loaded.plans[&plan].row_name(None, 0),
+            Some("Backend, infra")
+        );
         assert_eq!(loaded.plans[&plan].row_name(None, 1), None); // gap
         assert_eq!(loaded.plans[&plan].row_name(Some(block), 1), Some("Bob"));
     }
@@ -933,7 +959,7 @@ mod tests {
         let mut m = Model::default();
 
         // Resources created in ascending ID order so ORDER BY id on reload is deterministic.
-        let rb1 = m.create_resource_block("Alice", ResourceType::Person);
+        let rb1 = m.create_resource_block("Alice", ResourceType::Engineer);
         m.resource_blocks
             .get_mut(&rb1)
             .unwrap()
@@ -954,7 +980,7 @@ mod tests {
                 end: 200,
                 factor: 0.5,
             });
-        let rb2 = m.create_resource_block("Team Alpha", ResourceType::Team);
+        m.create_resource_block("Team Alpha", ResourceType::Team);
 
         let wb_a = wb(&mut m, "Design", 3);
         let wb_b = wb(&mut m, "Implement", 10);
@@ -970,24 +996,6 @@ mod tests {
 
         m.plans.get_mut(&plan_id).unwrap().root_blocks.push(wb_a);
         m.plans.get_mut(&plan_id).unwrap().root_blocks.push(wb_b);
-        m.plans
-            .get_mut(&plan_id)
-            .unwrap()
-            .allocations
-            .push(ResourceAllocation {
-                resource_id: rb1,
-                work_block_id: wb_a,
-                allocation_factor: 1.0,
-            });
-        m.plans
-            .get_mut(&plan_id)
-            .unwrap()
-            .allocations
-            .push(ResourceAllocation {
-                resource_id: rb2,
-                work_block_id: wb_b,
-                allocation_factor: 0.5,
-            });
 
         save_model(&conn, &m).unwrap();
         let loaded = load_model(&conn).unwrap();
@@ -996,17 +1004,11 @@ mod tests {
         assert_eq!(m.dependencies, loaded.dependencies);
         assert_eq!(m.resource_blocks, loaded.resource_blocks);
 
-        // Allocations have no sort_order column, so compare as sorted sets.
         assert_eq!(m.plans.len(), loaded.plans.len());
         for (pid, orig) in &m.plans {
             let got = loaded.plans.get(pid).expect("plan missing after load");
             assert_eq!(orig.name, got.name);
             assert_eq!(orig.root_blocks, got.root_blocks);
-            let mut a = orig.allocations.clone();
-            let mut b = got.allocations.clone();
-            a.sort_by_key(|x| (x.resource_id.0, x.work_block_id.0));
-            b.sort_by_key(|x| (x.resource_id.0, x.work_block_id.0));
-            assert_eq!(a, b, "plan allocations mismatch");
         }
     }
 
@@ -1031,11 +1033,12 @@ mod tests {
         // save_model → load_model cycle.
         let conn = open_in_memory();
         let mut m = Model::default();
+        let pl = m.create_plan("p", None);
         let id = m.create_work_block("task");
         let block = m.work_blocks.get_mut(&id).unwrap();
         block.start_day = 7;
         block.duration_days = 3;
-        block.row = -2; // negative lane (above the baseline) must survive too
+        m.set_block_row(pl, id, -2); // negative lane (above the baseline) must survive too
 
         save_model(&conn, &m).unwrap();
         let loaded = load_model(&conn).unwrap();
@@ -1043,7 +1046,7 @@ mod tests {
         let loaded_wb = loaded.work_blocks.get(&id).unwrap();
         assert_eq!(loaded_wb.start_day, 7);
         assert_eq!(loaded_wb.duration_days, 3);
-        assert_eq!(loaded_wb.row, -2);
+        assert_eq!(loaded.block_row(pl, id), -2);
         assert_eq!(m.work_blocks, loaded.work_blocks);
     }
 
@@ -1097,21 +1100,12 @@ mod tests {
     #[test]
     fn validate_accepts_valid_model() {
         let mut m = Model::default();
-        let rb = m.create_resource_block("Alice", ResourceType::Person);
+        m.create_resource_block("Alice", ResourceType::Engineer);
         let wb_a = m.create_work_block("a");
         let wb_b = m.create_work_block("b");
         let _dep = m.create_dependency(wb_a, wb_b, DependencyType::FinishToStart);
         let plan_id = m.create_plan("p", None);
         m.plans.get_mut(&plan_id).unwrap().root_blocks.push(wb_a);
-        m.plans
-            .get_mut(&plan_id)
-            .unwrap()
-            .allocations
-            .push(ResourceAllocation {
-                resource_id: rb,
-                work_block_id: wb_a,
-                allocation_factor: 1.0,
-            });
         assert!(validate_model(&m).is_ok());
     }
 
@@ -1196,7 +1190,7 @@ mod tests {
     fn stale_entity_deletion_across_multiple_types() {
         let conn = open_in_memory();
         let mut m = Model::default();
-        let rb_id = m.create_resource_block("Alice", ResourceType::Person);
+        let rb_id = m.create_resource_block("Alice", ResourceType::Engineer);
         let wb_a = wb(&mut m, "A", 2);
         let wb_b = wb(&mut m, "B", 3);
         let dep = m.create_dependency(wb_a, wb_b, DependencyType::FinishToStart);
@@ -1289,7 +1283,8 @@ CREATE TABLE IF NOT EXISTS dependencies (
 
 CREATE TABLE IF NOT EXISTS plans (
     id                INTEGER PRIMARY KEY,
-    name              TEXT    NOT NULL
+    name              TEXT    NOT NULL,
+    block_rows        TEXT    NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS plan_blocks (
@@ -1297,14 +1292,6 @@ CREATE TABLE IF NOT EXISTS plan_blocks (
     work_block_id INTEGER NOT NULL REFERENCES work_blocks(id),
     sort_order    INTEGER NOT NULL,
     PRIMARY KEY (plan_id, sort_order)
-);
-
-CREATE TABLE IF NOT EXISTS resource_allocations (
-    id                INTEGER PRIMARY KEY,
-    plan_id           INTEGER NOT NULL REFERENCES plans(id),
-    resource_block_id INTEGER NOT NULL REFERENCES resource_blocks(id),
-    work_block_id     INTEGER NOT NULL REFERENCES work_blocks(id),
-    allocation_factor REAL    NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS calendar_config (
