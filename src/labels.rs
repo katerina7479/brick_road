@@ -32,8 +32,8 @@ fn day_step_for_zoom(scale: f32) -> (i32, bool) {
 
 /// Formats a timeline day number as a human-readable date label.
 /// `month_only` → "Jun 2025";  otherwise → "Jun 16 '25".
-fn format_day_label(day: i32, month_only: bool, model: &Model) -> String {
-    let date = day_to_date(day, &model.calendar);
+fn format_day_label(day: i32, month_only: bool, config: &crate::model::CalendarConfig) -> String {
+    let date = day_to_date(day, config);
     if month_only {
         format!("{} {}", date.format("%b"), date.year())
     } else {
@@ -49,6 +49,41 @@ fn format_day_label(day: i32, month_only: bool, model: &Model) -> String {
 /// Marker for day-number `Text2d` entities.
 #[derive(Component)]
 pub struct DayLabel;
+
+/// One entry produced by [`compute_day_labels`]: a day, its world-x, its text,
+/// and an alpha (past days are dimmed to 0.3; future/today stay at 0.75).
+pub(crate) struct DayLabelEntry {
+    pub day: crate::model::Day,
+    pub x: f32,
+    pub label: String,
+    pub alpha: f32,
+}
+
+/// Pure computation: the ordered list of day labels for a timeline. Extracted
+/// from [`spawn_day_labels`] so the selection and placement logic can be unit-
+/// tested without a Bevy world, mirroring [`compute_quarter_ranges`].
+///
+/// `total_duration_days` is the timeline span (from `Schedule`).
+/// `scale` is the current orthographic zoom (from the camera projection).
+/// `today_day` is the working-day offset of "today" for alpha dimming.
+pub(crate) fn compute_day_labels(
+    config: &crate::model::CalendarConfig,
+    total_duration_days: crate::model::Day,
+    scale: f32,
+    today_day: crate::model::Day,
+) -> Vec<DayLabelEntry> {
+    let (step, month_only) = day_step_for_zoom(scale);
+    let span = total_duration_days + step;
+    (0..=span)
+        .step_by(step as usize)
+        .map(|day| DayLabelEntry {
+            day,
+            x: day_to_x(day, config),
+            label: format_day_label(day, month_only, config),
+            alpha: if day < today_day { 0.3 } else { 0.75 },
+        })
+        .collect()
+}
 
 /// Spawns (or re-spawns) day-number labels along the top of the timeline.
 ///
@@ -79,7 +114,7 @@ pub fn spawn_day_labels(
         })
         .unwrap_or(1.0);
 
-    let (step, month_only) = day_step_for_zoom(scale);
+    let (step, _) = day_step_for_zoom(scale);
     let zoom_band_changed = step != *prev_step;
 
     if !zoom_band_changed && !schedule.is_changed() && !model.is_changed() && !today.is_changed() {
@@ -91,20 +126,16 @@ pub fn spawn_day_labels(
         commands.entity(e).despawn();
     }
 
-    let span = schedule.total_duration_days + step;
-    for day in (0..=span).step_by(step as usize) {
-        let x = day_to_x(day, &model.calendar);
-        let alpha = if day < today.day { 0.3 } else { 0.75 };
-        let label = format_day_label(day, month_only, &model);
+    for entry in compute_day_labels(&model.calendar, schedule.total_duration_days, scale, today.day) {
         commands.spawn((
             DayLabel,
-            Text2d::new(label),
+            Text2d::new(entry.label),
             TextFont {
                 font_size: 13.0,
                 ..default()
             },
-            TextColor(Color::srgba(0.6, 0.6, 0.9, alpha)),
-            Transform::from_xyz(x, DAY_LABEL_Y, 1.0),
+            TextColor(Color::srgba(0.6, 0.6, 0.9, entry.alpha)),
+            Transform::from_xyz(entry.x, DAY_LABEL_Y, 1.0),
         ));
     }
 }
@@ -231,7 +262,6 @@ pub fn scale_labels_to_zoom(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::Model;
 
     fn mon_config() -> crate::model::CalendarConfig {
         crate::model::CalendarConfig {
@@ -244,24 +274,21 @@ mod tests {
 
     #[test]
     fn format_day_label_day_zero_shows_start_date() {
-        let mut model = Model::default();
-        model.calendar = mon_config();
-        assert_eq!(format_day_label(0, false, &model), "Jun 16 '25");
+        let cfg = mon_config();
+        assert_eq!(format_day_label(0, false, &cfg), "Jun 16 '25");
     }
 
     #[test]
     fn format_day_label_five_working_days_is_next_monday() {
-        let mut model = Model::default();
-        model.calendar = mon_config();
+        let cfg = mon_config();
         // 5 working days from Mon Jun 16 = Mon Jun 23
-        assert_eq!(format_day_label(5, false, &model), "Jun 23 '25");
+        assert_eq!(format_day_label(5, false, &cfg), "Jun 23 '25");
     }
 
     #[test]
     fn format_day_label_month_only_shows_abbreviated_month_and_year() {
-        let mut model = Model::default();
-        model.calendar = mon_config();
-        assert_eq!(format_day_label(0, true, &model), "Jun 2025");
+        let cfg = mon_config();
+        assert_eq!(format_day_label(0, true, &cfg), "Jun 2025");
     }
 
     #[test]
@@ -334,5 +361,144 @@ mod tests {
         let (step, month_only) = day_step_for_zoom(5.0);
         assert_eq!(step, 30);
         assert!(month_only);
+    }
+
+    // ── compute_day_labels ───────────────────────────────────────────────────
+
+    #[test]
+    fn day_labels_daily_stride_at_close_zoom() {
+        // scale=0.1 → step=1; with span=5 we expect days 0,1,2,3,4,5,6 (0..=5+1)
+        let cfg = mon_config();
+        let entries = compute_day_labels(&cfg, 5, 0.1, 100);
+        let days: Vec<i32> = entries.iter().map(|e| e.day).collect();
+        assert_eq!(days, vec![0, 1, 2, 3, 4, 5, 6]);
+    }
+
+    #[test]
+    fn day_labels_weekly_stride_at_medium_zoom() {
+        // scale=0.5 → step=5; span=20 → days 0,5,10,15,20,25
+        let cfg = mon_config();
+        let entries = compute_day_labels(&cfg, 20, 0.5, 100);
+        let days: Vec<i32> = entries.iter().map(|e| e.day).collect();
+        assert_eq!(days, vec![0, 5, 10, 15, 20, 25]);
+    }
+
+    #[test]
+    fn day_labels_biweekly_stride() {
+        // scale=2.0 → step=10; span=20 → days 0,10,20,30
+        let cfg = mon_config();
+        let entries = compute_day_labels(&cfg, 20, 2.0, 100);
+        let days: Vec<i32> = entries.iter().map(|e| e.day).collect();
+        assert_eq!(days, vec![0, 10, 20, 30]);
+    }
+
+    #[test]
+    fn day_labels_monthly_stride_at_far_zoom() {
+        // scale=4.0 → step=30, month_only=true; span=60 → days 0,30,60,90
+        let cfg = mon_config();
+        let entries = compute_day_labels(&cfg, 60, 4.0, 100);
+        let days: Vec<i32> = entries.iter().map(|e| e.day).collect();
+        assert_eq!(days, vec![0, 30, 60, 90]);
+        // All labels should be in "Mon YYYY" format (no day number).
+        for e in &entries {
+            assert!(
+                !e.label.contains(" '"),
+                "monthly label should not contain \"'YY\": {}",
+                e.label
+            );
+        }
+    }
+
+    #[test]
+    fn day_labels_span_includes_one_extra_step_beyond_duration() {
+        // span fed to compute_day_labels is total_duration_days + step, so labels
+        // extend one stride past the last block.
+        let cfg = mon_config();
+        let entries = compute_day_labels(&cfg, 10, 0.5, 100); // step=5, span=15
+        let last_day = entries.last().unwrap().day;
+        assert_eq!(last_day, 15, "last label should be at duration + step");
+    }
+
+    #[test]
+    fn day_labels_x_positions_match_day_to_x() {
+        use crate::calendar::day_to_x;
+        let cfg = mon_config();
+        let entries = compute_day_labels(&cfg, 10, 0.5, 100);
+        for e in &entries {
+            let expected_x = day_to_x(e.day, &cfg);
+            assert!(
+                (e.x - expected_x).abs() < 0.001,
+                "day {} x={} expected {}",
+                e.day,
+                e.x,
+                expected_x
+            );
+        }
+    }
+
+    #[test]
+    fn day_labels_past_days_dimmed_future_days_bright() {
+        // today=5: days 0..4 get alpha=0.3, days ≥5 get alpha=0.75
+        let cfg = mon_config();
+        let entries = compute_day_labels(&cfg, 10, 0.5, 5); // step=5, today=5
+        for e in &entries {
+            let expected_alpha = if e.day < 5 { 0.3 } else { 0.75 };
+            assert!(
+                (e.alpha - expected_alpha).abs() < 0.001,
+                "day {} alpha={} expected {}",
+                e.day,
+                e.alpha,
+                expected_alpha
+            );
+        }
+    }
+
+    #[test]
+    fn day_labels_zero_span_still_has_day_zero() {
+        // Even with total_duration_days=0, span = 0+step so day 0 always appears.
+        let cfg = mon_config();
+        let entries = compute_day_labels(&cfg, 0, 0.5, 100); // step=5, span=5
+        assert!(entries.iter().any(|e| e.day == 0), "day 0 always present");
+    }
+
+    #[test]
+    fn day_labels_holiday_shifts_x_positions() {
+        // A holiday on a weekday inserts an extra visual column, widening all
+        // x positions at or after the holiday boundary.
+        use chrono::NaiveDate;
+        let mut cfg = mon_config();
+        // 2025-06-18 is a Wednesday (working day 2 in this calendar).
+        let holiday = NaiveDate::from_ymd_opt(2025, 6, 18).unwrap();
+        cfg.non_working_dates = vec![holiday];
+
+        let cfg_no_hol = mon_config();
+
+        let entries_hol = compute_day_labels(&cfg, 10, 0.5, 100);     // step=5
+        let entries_plain = compute_day_labels(&cfg_no_hol, 10, 0.5, 100);
+
+        // Day 0 is before the holiday column (boundary is at day 3); same x.
+        let x0_hol = entries_hol.iter().find(|e| e.day == 0).unwrap().x;
+        let x0_plain = entries_plain.iter().find(|e| e.day == 0).unwrap().x;
+        assert!((x0_hol - x0_plain).abs() < 0.001, "day 0 unaffected by holiday");
+
+        // Day 5 is after the holiday column; shifted right by PIXELS_PER_DAY.
+        use crate::constants::PIXELS_PER_DAY;
+        let x5_hol = entries_hol.iter().find(|e| e.day == 5).unwrap().x;
+        let x5_plain = entries_plain.iter().find(|e| e.day == 5).unwrap().x;
+        assert!(
+            (x5_hol - x5_plain - PIXELS_PER_DAY).abs() < 0.001,
+            "day 5 shifted right by one holiday column: hol={x5_hol} plain={x5_plain}"
+        );
+    }
+
+    #[test]
+    fn day_labels_label_text_matches_format_day_label() {
+        // Spot-check that the label strings match format_day_label directly.
+        let cfg = mon_config();
+        let entries = compute_day_labels(&cfg, 5, 0.5, 100); // step=5, month_only=false
+        for e in &entries {
+            let expected = format_day_label(e.day, false, &cfg);
+            assert_eq!(e.label, expected, "label mismatch at day {}", e.day);
+        }
     }
 }
