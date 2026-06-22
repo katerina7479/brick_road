@@ -165,15 +165,6 @@ pub struct Dependency {
     pub lag: Day,
 }
 
-/// Assignment of a fraction of a resource's capacity to a work block.
-#[derive(Debug, Clone, PartialEq)]
-pub struct ResourceAllocation {
-    pub resource_id: ResourceBlockId,
-    pub work_block_id: WorkBlockId,
-    /// Fraction of the resource's capacity assigned (0.0–1.0).
-    pub allocation_factor: f32,
-}
-
 /// A proposed future: a named scenario that selects blocks.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Plan {
@@ -181,8 +172,6 @@ pub struct Plan {
     pub name: String,
     /// Top-level work blocks in this plan (roots of the hierarchy).
     pub root_blocks: Vec<WorkBlockId>,
-    /// Resource allocations for this plan.
-    pub allocations: Vec<ResourceAllocation>,
     /// When `Some(d)`, this plan is a future branch: block start_day is
     /// clamped to ≥ d (the working-day offset of "today" at branch creation).
     /// `None` for the baseline plan, which may contain historical blocks.
@@ -375,7 +364,6 @@ impl Model {
                 id,
                 name: name.into(),
                 root_blocks: vec![],
-                allocations: vec![],
                 branch_start_day,
                 row_names: HashMap::new(),
                 block_rows: HashMap::new(),
@@ -438,7 +426,11 @@ impl Model {
     pub fn recompute_rollup(&mut self, block: WorkBlockId) {
         let mut current = Some(block);
         while let Some(id) = current {
-            let rollup = self.work_blocks.get(&id).map(|wb| wb.rollup).unwrap_or(false);
+            let rollup = self
+                .work_blocks
+                .get(&id)
+                .map(|wb| wb.rollup)
+                .unwrap_or(false);
             if rollup {
                 let kids = self.children(id);
                 if !kids.is_empty() {
@@ -524,7 +516,9 @@ impl Model {
         scope: Option<WorkBlockId>,
         row: i32,
     ) -> Option<&str> {
-        self.plans.get(&plan_id).and_then(|p| p.row_name(scope, row))
+        self.plans
+            .get(&plan_id)
+            .and_then(|p| p.row_name(scope, row))
     }
 
     /// Forks `main` into a new branch at `fork_day`. The branch inherits main's
@@ -544,19 +538,6 @@ impl Model {
             })
             .collect();
         let row_names = self.plans[&main_id].row_names.clone();
-        // Copy only allocations for forward blocks (start_day >= fork_day),
-        // mirroring the root_blocks filter above. The branch starts as an
-        // editable copy of main's resource assignments from the fork day on.
-        let allocations: Vec<ResourceAllocation> = self.plans[&main_id]
-            .allocations
-            .iter()
-            .filter(|a| {
-                self.work_blocks
-                    .get(&a.work_block_id)
-                    .is_some_and(|wb| wb.start_day >= fork_day)
-            })
-            .cloned()
-            .collect();
         // Snapshot main's lane for each inherited block. After this the branch
         // owns its rows independently — main never writes them again.
         let block_rows: HashMap<WorkBlockId, i32> = forward
@@ -568,7 +549,6 @@ impl Model {
         let branch = self.plans.get_mut(&new_id).unwrap();
         branch.root_blocks = forward;
         branch.row_names = row_names;
-        branch.allocations = allocations;
         branch.block_rows = block_rows;
         Some(new_id)
     }
@@ -632,7 +612,13 @@ impl Model {
 
     /// Sets a block's timeline placement: `start_day` on the shared block and
     /// the lane (`row`) within `plan_id`. No-op if missing.
-    pub fn set_block_placement(&mut self, plan_id: PlanId, id: WorkBlockId, start_day: Day, row: i32) {
+    pub fn set_block_placement(
+        &mut self,
+        plan_id: PlanId,
+        id: WorkBlockId,
+        start_day: Day,
+        row: i32,
+    ) {
         if let Some(wb) = self.work_blocks.get_mut(&id) {
             wb.start_day = start_day;
         }
@@ -700,11 +686,12 @@ impl Model {
     pub fn clear_all_work(&mut self) -> PlanId {
         self.work_blocks.clear();
         self.dependencies.clear();
-        let main_id = self.main_plan_id().unwrap_or_else(|| self.create_plan("Main", None));
+        let main_id = self
+            .main_plan_id()
+            .unwrap_or_else(|| self.create_plan("Main", None));
         self.plans.retain(|&id, _| id == main_id);
         if let Some(main) = self.plans.get_mut(&main_id) {
             main.root_blocks.clear();
-            main.allocations.clear();
         }
         main_id
     }
@@ -749,7 +736,10 @@ mod tests {
         let branch = m.fork_main(20).unwrap();
         let roots = &m.plans[&branch].root_blocks;
         assert!(!roots.contains(&before), "pre-fork block is not inherited");
-        assert!(roots.contains(&on), "block exactly at the fork day is inherited");
+        assert!(
+            roots.contains(&on),
+            "block exactly at the fork day is inherited"
+        );
         assert!(roots.contains(&after), "post-fork block is inherited");
     }
 
@@ -818,8 +808,14 @@ mod tests {
         let late = m.fork_main(50).unwrap();
         let mid = placed(&mut m, main, "mid", 20, 3);
         m.link_main_block_to_branches(mid);
-        assert!(m.plans[&early].root_blocks.contains(&mid), "fork before the block gets it");
-        assert!(!m.plans[&late].root_blocks.contains(&mid), "fork after the block does not");
+        assert!(
+            m.plans[&early].root_blocks.contains(&mid),
+            "fork before the block gets it"
+        );
+        assert!(
+            !m.plans[&late].root_blocks.contains(&mid),
+            "fork after the block does not"
+        );
     }
 
     #[test]
@@ -846,7 +842,11 @@ mod tests {
         let blk = placed(&mut m, main, "blk", 20, 3);
         m.link_main_block_to_branches(blk);
         m.link_main_block_to_branches(blk);
-        let count = m.plans[&branch].root_blocks.iter().filter(|&&id| id == blk).count();
+        let count = m.plans[&branch]
+            .root_blocks
+            .iter()
+            .filter(|&&id| id == blk)
+            .count();
         assert_eq!(count, 1, "block appears once, not duplicated");
     }
 
@@ -858,7 +858,10 @@ mod tests {
         let owned = m.add_block_to_plan(branch, "owned", 5, 3, 0);
         m.remove_block_from_plan(branch, owned);
         assert!(!m.plans[&branch].root_blocks.contains(&owned));
-        assert!(!m.work_blocks.contains_key(&owned), "owned block fully deleted");
+        assert!(
+            !m.work_blocks.contains_key(&owned),
+            "owned block fully deleted"
+        );
     }
 
     #[test]
@@ -868,8 +871,14 @@ mod tests {
         let shared = placed(&mut m, main, "shared", 0, 3);
         let branch = m.fork_main(0).unwrap(); // branch inherits `shared`
         m.remove_block_from_plan(branch, shared);
-        assert!(!m.plans[&branch].root_blocks.contains(&shared), "ghost removed from branch");
-        assert!(m.work_blocks.contains_key(&shared), "shared block kept (still in main)");
+        assert!(
+            !m.plans[&branch].root_blocks.contains(&shared),
+            "ghost removed from branch"
+        );
+        assert!(
+            m.work_blocks.contains_key(&shared),
+            "shared block kept (still in main)"
+        );
         assert!(m.plans[&main].root_blocks.contains(&shared));
     }
 
@@ -886,9 +895,18 @@ mod tests {
         assert!(m.plans[&b].root_blocks.contains(&shared));
 
         m.remove_block_from_plan(a, shared);
-        assert!(!m.plans[&a].root_blocks.contains(&shared), "removed from branch a");
-        assert!(m.plans[&b].root_blocks.contains(&shared), "still in branch b");
-        assert!(m.plans[&main].root_blocks.contains(&shared), "still in main");
+        assert!(
+            !m.plans[&a].root_blocks.contains(&shared),
+            "removed from branch a"
+        );
+        assert!(
+            m.plans[&b].root_blocks.contains(&shared),
+            "still in branch b"
+        );
+        assert!(
+            m.plans[&main].root_blocks.contains(&shared),
+            "still in main"
+        );
         assert!(m.work_blocks.contains_key(&shared), "block kept");
     }
 
@@ -912,8 +930,14 @@ mod tests {
 
         m.delete_plan(branch);
         assert!(!m.plans.contains_key(&branch), "branch removed");
-        assert!(m.work_blocks.contains_key(&shared), "block shared with main kept");
-        assert!(!m.work_blocks.contains_key(&owned), "block only the branch owned removed");
+        assert!(
+            m.work_blocks.contains_key(&shared),
+            "block shared with main kept"
+        );
+        assert!(
+            !m.work_blocks.contains_key(&owned),
+            "block only the branch owned removed"
+        );
         assert!(m.plans[&main].root_blocks.contains(&shared));
     }
 
@@ -973,7 +997,11 @@ mod tests {
         m.create_work_block("unrelated");
         // A child block with no duration is excluded (unplaced).
         let _empty = m.add_child_block(pl, p, "empty", 0, 0, 1);
-        assert_eq!(m.children(p), vec![a, b], "placed children, sorted by start");
+        assert_eq!(
+            m.children(p),
+            vec![a, b],
+            "placed children, sorted by start"
+        );
         assert!(m.has_children(p));
     }
 
@@ -985,7 +1013,7 @@ mod tests {
         m.work_blocks.get_mut(&p).unwrap().rollup = true;
         m.add_child_block(pl, p, "a", 5, 3, 0); // [5, 8)
         m.add_child_block(pl, p, "b", 10, 4, 1); // [10, 14)
-        // add_child_block recomputes the rollup: parent spans 5 -> 14.
+                                                 // add_child_block recomputes the rollup: parent spans 5 -> 14.
         assert_eq!(m.work_blocks[&p].start_day, 5);
         assert_eq!(m.work_blocks[&p].duration_days, 9);
     }

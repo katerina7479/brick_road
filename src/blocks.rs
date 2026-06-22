@@ -991,10 +991,8 @@ pub fn handle_block_resize(
             // columns it spans don't count toward duration).
             let start = model.work_blocks.get(&id).map(|wb| wb.start_day);
             if let Some(start) = start {
-                let end_day = crate::calendar::x_to_day(
-                    world_pos.x + PIXELS_PER_DAY * 0.5,
-                    &model.calendar,
-                );
+                let end_day =
+                    crate::calendar::x_to_day(world_pos.x + PIXELS_PER_DAY * 0.5, &model.calendar);
                 if let Some(wb) = model.work_blocks.get_mut(&id) {
                     wb.duration_days = (end_day - start).max(1);
                 }
@@ -1193,8 +1191,7 @@ pub fn sync_past_overlays(
             continue;
         }
         let x_left = crate::calendar::day_to_x(wb.start_day, &model.calendar);
-        let past_width =
-            crate::calendar::day_to_x(today.day, &model.calendar) - x_left;
+        let past_width = crate::calendar::day_to_x(today.day, &model.calendar) - x_left;
         let y = -(main_id.map(|m| model.block_row(m, id)).unwrap_or(0) as f32) * ROW_HEIGHT;
         desired.push(Overlay {
             key: PastPortionOverlay(id),
@@ -1887,7 +1884,10 @@ pub fn handle_type_to_rename(
     }
     // A selected main block renames via the main overlay; a selected lane block
     // via the lane overlay. Exactly one is selected at a time.
-    let target = selected.0.map(|id| (id, false)).or_else(|| lane_selected.0.map(|(id, _)| (id, true)));
+    let target = selected
+        .0
+        .map(|id| (id, false))
+        .or_else(|| lane_selected.0.map(|(id, _)| (id, true)));
     let Some((id, is_lane)) = target else {
         key_events.clear();
         return;
@@ -2016,8 +2016,6 @@ struct DeletedBlockSnapshot {
     dependencies: Vec<model::Dependency>,
     /// (plan_id, root_block_ids that were in this plan)
     plan_roots: Vec<(model::PlanId, Vec<WorkBlockId>)>,
-    /// (plan_id, allocations for deleted blocks)
-    plan_allocs: Vec<(model::PlanId, Vec<model::ResourceAllocation>)>,
     /// Surviving blocks whose `parent` pointed at the deleted block — cleared to
     /// `None` by `delete_work_block` and restored to the deleted id on undo.
     reparented_children: Vec<WorkBlockId>,
@@ -2046,19 +2044,9 @@ fn build_deletion_snapshot(model: &model::Model, id: WorkBlockId) -> DeletedBloc
         .collect();
 
     let mut plan_roots = Vec::new();
-    let mut plan_allocs = Vec::new();
     for (&plan_id, plan) in &model.plans {
         if plan.root_blocks.contains(&id) {
             plan_roots.push((plan_id, vec![id]));
-        }
-        let allocs: Vec<model::ResourceAllocation> = plan
-            .allocations
-            .iter()
-            .filter(|a| a.work_block_id == id)
-            .cloned()
-            .collect();
-        if !allocs.is_empty() {
-            plan_allocs.push((plan_id, allocs));
         }
     }
 
@@ -2075,7 +2063,6 @@ fn build_deletion_snapshot(model: &model::Model, id: WorkBlockId) -> DeletedBloc
         blocks,
         dependencies,
         plan_roots,
-        plan_allocs,
         reparented_children,
     }
 }
@@ -2093,18 +2080,6 @@ fn restore_deletion_snapshot(model: &mut model::Model, snap: DeletedBlockSnapsho
             for bid in roots {
                 if !plan.root_blocks.contains(&bid) {
                     plan.root_blocks.push(bid);
-                }
-            }
-        }
-    }
-    for (plan_id, allocs) in snap.plan_allocs {
-        if let Some(plan) = model.plans.get_mut(&plan_id) {
-            for alloc in allocs {
-                let already = plan.allocations.iter().any(|a| {
-                    a.work_block_id == alloc.work_block_id && a.resource_id == alloc.resource_id
-                });
-                if !already {
-                    plan.allocations.push(alloc);
                 }
             }
         }
@@ -2193,7 +2168,7 @@ pub fn handle_undo(
 /// Deleted:
 /// - The work block itself
 /// - All `Dependency` edges that touch it
-/// - Entries in `plan.root_blocks` and `plan.allocations` for it
+/// - Entries in `plan.root_blocks` and `plan.block_rows` for it
 ///
 /// Any surviving block whose `parent` pointed at the deleted block has its
 /// `parent` reset to `None` to avoid a dangling reference.
@@ -2204,7 +2179,7 @@ pub fn delete_work_block(model: &mut model::Model, id: WorkBlockId) {
         .retain(|_, dep| dep.predecessor != id && dep.successor != id);
     for plan in model.plans.values_mut() {
         plan.root_blocks.retain(|&bid| bid != id);
-        plan.allocations.retain(|a| a.work_block_id != id);
+        plan.block_rows.remove(&id);
     }
     // Clear dangling parent references on surviving children.
     for wb in model.work_blocks.values_mut() {
@@ -2246,15 +2221,17 @@ mod tests {
     }
 
     #[test]
-    fn delete_block_cleans_plan_root_and_allocations() {
+    fn delete_block_cleans_plan_root_and_rows() {
         let mut m = Model::default();
         let pid = m.create_plan("p", None);
         let a = m.create_work_block("A");
         m.plans.get_mut(&pid).unwrap().root_blocks.push(a);
+        m.set_block_row(pid, a, 3);
 
         delete_work_block(&mut m, a);
 
         assert!(!m.plans[&pid].root_blocks.contains(&a));
+        assert!(!m.plans[&pid].block_rows.contains_key(&a));
     }
 
     #[test]
