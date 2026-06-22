@@ -1171,20 +1171,36 @@ fn resource_gutter_ui(
     let rh = constants::ROW_HEIGHT;
     let row_screen_y = |r: i32| win_h * 0.5 + (r as f32 * rh + cam_y) / scale;
     let editing = rename.editing;
+    let picker_open = rename.picker_open;
+
+    let known_resources = model.named_resources();
+    let resource_kinds: Vec<Option<model::ResourceType>> = known_resources
+        .iter()
+        .map(|n| model.resource_kind(n))
+        .collect();
 
     let Ok(ctx) = contexts.ctx_mut() else { return };
 
-    // Action gathered inside the closure, applied afterward (so model/rename can
-    // be mutated without conflicting with the immutable reads above).
     enum Act {
-        Start(i32, String),
-        Commit,
-        Cancel,
+        OpenPicker(i32),
+        ClosePicker,
+        SelectResource(i32, String),
+        StartNew(i32),
+        CommitNew,
+        CancelNew,
     }
     let mut act: Option<Act> = if keys.just_pressed(KeyCode::Escape) {
-        Some(Act::Cancel)
-    } else if keys.just_pressed(KeyCode::Enter) || keys.just_pressed(KeyCode::NumpadEnter) {
-        Some(Act::Commit)
+        if editing.is_some() {
+            Some(Act::CancelNew)
+        } else if picker_open.is_some() {
+            Some(Act::ClosePicker)
+        } else {
+            None
+        }
+    } else if editing.is_some()
+        && (keys.just_pressed(KeyCode::Enter) || keys.just_pressed(KeyCode::NumpadEnter))
+    {
+        Some(Act::CommitNew)
     } else {
         None
     };
@@ -1206,7 +1222,10 @@ fn resource_gutter_ui(
                 if cy < rect.top() - half || cy > rect.bottom() + half {
                     continue;
                 }
+
                 let editing_this = editing == Some((plan_id, scope, *r));
+                let picker_this = picker_open == Some((plan_id, scope, *r));
+
                 if editing_this {
                     let field = egui::Rect::from_min_max(
                         egui::pos2(rect.left() + 6.0, cy - 9.0),
@@ -1225,7 +1244,7 @@ fn resource_gutter_ui(
                     );
                     resp.request_focus();
                     if resp.lost_focus() && act.is_none() {
-                        act = Some(Act::Commit);
+                        act = Some(Act::CommitNew);
                     }
                 } else {
                     let hot = egui::Rect::from_min_max(
@@ -1244,7 +1263,6 @@ fn resource_gutter_ui(
                             egui::Color32::from_rgb(138, 128, 114),
                         ),
                     };
-                    // A small coloured dot marks the resource's type, if set.
                     let mut text_x = rect.left() + 10.0;
                     if let Some(k) = kind {
                         let (cr, cg, cb) = resource_type_rgb(*k);
@@ -1259,7 +1277,7 @@ fn resource_gutter_ui(
                     ui.painter().text(
                         egui::pos2(text_x, cy),
                         egui::Align2::LEFT_CENTER,
-                        text,
+                        &text,
                         egui::FontId::proportional(13.0),
                         if hovered {
                             egui::Color32::from_rgb(236, 224, 204)
@@ -1267,27 +1285,139 @@ fn resource_gutter_ui(
                             color
                         },
                     );
-                    if resp.double_clicked() {
-                        act = Some(Act::Start(*r, name.clone().unwrap_or_default()));
+                    if resp.clicked() && act.is_none() {
+                        act = Some(Act::OpenPicker(*r));
+                    }
+
+                    if picker_this {
+                        let popup_id = ui.id().with(("gutter_picker", *r));
+                        let popup_pos = egui::pos2(rect.right() + 2.0, cy - 4.0);
+                        let area_resp = egui::Area::new(popup_id)
+                            .fixed_pos(popup_pos)
+                            .order(egui::Order::Foreground)
+                            .show(ui.ctx(), |ui| {
+                                egui::Frame::new()
+                                    .fill(egui::Color32::from_rgb(38, 32, 26))
+                                    .stroke(egui::Stroke::new(
+                                        1.0,
+                                        egui::Color32::from_rgb(80, 70, 56),
+                                    ))
+                                    .corner_radius(egui::CornerRadius::same(4))
+                                    .inner_margin(egui::Margin::same(6))
+                                    .show(ui, |ui| {
+                                        ui.set_min_width(130.0);
+                                        for (i, res_name) in known_resources.iter().enumerate() {
+                                            let is_current = name
+                                                .as_ref()
+                                                .is_some_and(|n| n.eq_ignore_ascii_case(res_name));
+                                            ui.horizontal(|ui| {
+                                                if let Some(k) = resource_kinds[i] {
+                                                    let (cr, cg, cb) = resource_type_rgb(k);
+                                                    let (_, dot_rect) =
+                                                        ui.allocate_space(egui::vec2(10.0, 16.0));
+                                                    ui.painter().circle_filled(
+                                                        dot_rect.center(),
+                                                        3.5,
+                                                        egui::Color32::from_rgb(cr, cg, cb),
+                                                    );
+                                                } else {
+                                                    ui.allocate_space(egui::vec2(10.0, 16.0));
+                                                }
+                                                let label_color = if is_current {
+                                                    egui::Color32::from_rgb(255, 220, 160)
+                                                } else {
+                                                    egui::Color32::from_rgb(206, 190, 164)
+                                                };
+                                                let btn = ui.add(
+                                                    egui::Label::new(
+                                                        egui::RichText::new(res_name)
+                                                            .color(label_color)
+                                                            .size(13.0),
+                                                    )
+                                                    .selectable(false)
+                                                    .sense(egui::Sense::click()),
+                                                );
+                                                if btn.clicked() {
+                                                    act =
+                                                        Some(Act::SelectResource(*r, res_name.clone()));
+                                                }
+                                            });
+                                        }
+                                        ui.add_space(4.0);
+                                        ui.separator();
+                                        ui.add_space(2.0);
+                                        let add_btn = ui.add(
+                                            egui::Label::new(
+                                                egui::RichText::new("+ Add New")
+                                                    .color(egui::Color32::from_rgb(140, 180, 220))
+                                                    .size(13.0),
+                                            )
+                                            .selectable(false)
+                                            .sense(egui::Sense::click()),
+                                        );
+                                        if add_btn.clicked() {
+                                            act = Some(Act::StartNew(*r));
+                                        }
+                                        if name.is_some() {
+                                            ui.add_space(2.0);
+                                            let clear_btn = ui.add(
+                                                egui::Label::new(
+                                                    egui::RichText::new("Clear")
+                                                        .color(egui::Color32::from_rgb(180, 120, 100))
+                                                        .size(12.0),
+                                                )
+                                                .selectable(false)
+                                                .sense(egui::Sense::click()),
+                                            );
+                                            if clear_btn.clicked() {
+                                                act = Some(Act::SelectResource(
+                                                    *r,
+                                                    String::new(),
+                                                ));
+                                            }
+                                        }
+                                    });
+                            });
+                        if ui.ctx().input(|i| i.pointer.any_pressed())
+                            && !area_resp.response.rect.contains(
+                                ui.ctx().input(|i| i.pointer.interact_pos().unwrap_or_default()),
+                            )
+                            && act.is_none()
+                        {
+                            act = Some(Act::ClosePicker);
+                        }
                     }
                 }
             }
         });
 
     match act {
-        Some(Act::Start(r, current)) => {
-            rename.editing = Some((plan_id, scope, r));
-            rename.buf = current;
-        }
-        Some(Act::Cancel) => {
+        Some(Act::OpenPicker(r)) => {
+            rename.picker_open = Some((plan_id, scope, r));
             rename.editing = None;
             rename.buf.clear();
         }
-        Some(Act::Commit) => {
+        Some(Act::ClosePicker) => {
+            rename.picker_open = None;
+        }
+        Some(Act::SelectResource(r, name)) => {
+            commit_row_name(&mut model, &conn, plan_id, scope, r, &name);
+            rename.picker_open = None;
+        }
+        Some(Act::StartNew(r)) => {
+            rename.picker_open = None;
+            rename.editing = Some((plan_id, scope, r));
+            rename.buf.clear();
+        }
+        Some(Act::CommitNew) => {
             if let Some((pid, sc, r)) = rename.editing {
                 let raw = rename.buf.trim().to_string();
                 commit_row_name(&mut model, &conn, pid, sc, r, &raw);
             }
+            rename.editing = None;
+            rename.buf.clear();
+        }
+        Some(Act::CancelNew) => {
             rename.editing = None;
             rename.buf.clear();
         }
@@ -1807,11 +1937,13 @@ fn top_bar_ui(
 pub struct SelectedPlan(pub Option<model::PlanId>);
 
 /// Inline resource-row rename state: which (plan, drill scope, row) is being
-/// edited in the gutter, plus the text buffer.
+/// State for the resource gutter: tracks which row has an open picker popup
+/// and, when "Add New" is chosen, the text buffer for the new name.
 #[derive(Resource, Default)]
 pub struct RowRename {
     pub editing: Option<(model::PlanId, Option<model::WorkBlockId>, i32)>,
     pub buf: String,
+    pub picker_open: Option<(model::PlanId, Option<model::WorkBlockId>, i32)>,
 }
 
 /// State for the right-side settings fly-out: whether it's open, plus the text
