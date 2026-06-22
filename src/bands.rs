@@ -1265,4 +1265,100 @@ mod tests {
         );
         assert!(band.name_y <= band.lane_top, "name is below the divider");
     }
+
+    // ── dep_type_from_edges ──────────────────────────────────────────────────
+
+    #[test]
+    fn dep_type_finish_to_start() {
+        assert_eq!(dep_type_from_edges(true, false), DependencyType::FinishToStart);
+    }
+
+    #[test]
+    fn dep_type_finish_to_finish() {
+        assert_eq!(dep_type_from_edges(true, true), DependencyType::FinishToFinish);
+    }
+
+    #[test]
+    fn dep_type_start_to_start() {
+        assert_eq!(dep_type_from_edges(false, false), DependencyType::StartToStart);
+    }
+
+    #[test]
+    fn dep_type_start_to_finish() {
+        assert_eq!(dep_type_from_edges(false, true), DependencyType::StartToFinish);
+    }
+
+    // ── layout_bands ghost-vs-owned classification ───────────────────────────
+
+    #[test]
+    fn block_in_main_root_blocks_is_ghost_in_branch() {
+        let mut m = Model::default();
+        let main = m.create_plan("main", None);
+        // Place a block in main so fork_main includes it.
+        let a = m.create_work_block("A");
+        m.work_blocks.get_mut(&a).unwrap().start_day = 0;
+        m.work_blocks.get_mut(&a).unwrap().duration_days = 5;
+        m.plans.get_mut(&main).unwrap().root_blocks.push(a);
+
+        let branch = m.fork_main(0).unwrap();
+        let bands = layout_bands(&m);
+        let band = bands.iter().find(|b| b.plan_id == branch).unwrap();
+
+        // A is in main's root_blocks, so it's a ghost (owned=false) in the branch.
+        let block = band.blocks.iter().find(|b| b.id == a).unwrap();
+        assert!(!block.owned, "block shared with main should be a ghost");
+    }
+
+    #[test]
+    fn block_only_in_branch_is_owned() {
+        let mut m = Model::default();
+        let _main = m.create_plan("main", None);
+        let branch = m.fork_main(0).unwrap();
+
+        // Add a block directly to the branch (not main).
+        let owned_id = m.add_block_to_plan(branch, "Own", 0, 5, 0);
+
+        let bands = layout_bands(&m);
+        let band = bands.iter().find(|b| b.plan_id == branch).unwrap();
+        let block = band.blocks.iter().find(|b| b.id == owned_id).unwrap();
+        assert!(block.owned, "block only in branch should be owned (solid)");
+    }
+
+    #[test]
+    fn ghost_and_owned_coexist_in_same_lane() {
+        let mut m = Model::default();
+        let main = m.create_plan("main", None);
+        // A main block (will become a ghost).
+        let shared = m.create_work_block("Shared");
+        m.work_blocks.get_mut(&shared).unwrap().start_day = 0;
+        m.work_blocks.get_mut(&shared).unwrap().duration_days = 5;
+        m.plans.get_mut(&main).unwrap().root_blocks.push(shared);
+
+        let branch = m.fork_main(0).unwrap();
+        // Add a branch-only block.
+        let owned_id = m.add_block_to_plan(branch, "New", 5, 3, 1);
+
+        let bands = layout_bands(&m);
+        let band = bands.iter().find(|b| b.plan_id == branch).unwrap();
+
+        let ghost = band.blocks.iter().find(|b| b.id == shared).unwrap();
+        let owned = band.blocks.iter().find(|b| b.id == owned_id).unwrap();
+        assert!(!ghost.owned, "shared block is a ghost");
+        assert!(owned.owned, "branch-only block is owned");
+    }
+
+    #[test]
+    fn no_branches_returns_empty_bands() {
+        let mut m = Model::default();
+        let _main = m.create_plan("main", None);
+        assert!(layout_bands(&m).is_empty());
+    }
+
+    #[test]
+    fn no_main_plan_returns_empty_bands() {
+        // If there's no root plan (no plan with branch_start_day == None),
+        // layout_bands returns nothing.
+        let m = Model::default();
+        assert!(layout_bands(&m).is_empty());
+    }
 }

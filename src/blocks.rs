@@ -2262,6 +2262,291 @@ mod tests {
         assert!(m.work_blocks.contains_key(&child), "child not cascaded");
         assert_eq!(m.work_blocks.get(&child).unwrap().parent, None);
     }
+
+    // ── Drag / row derivation ────────────────────────────────────────────────
+
+    #[test]
+    fn row_derivation_negative_y_maps_to_correct_row() {
+        // world_y is always negative (rows go down). The formula used on drag is
+        // `(-world_y / ROW_HEIGHT).round() as i32`.
+        let r = |y: f32| (-y / ROW_HEIGHT).round() as i32;
+        assert_eq!(r(0.0), 0);
+        assert_eq!(r(-40.0), 1);   // exactly row 1
+        assert_eq!(r(-80.0), 2);   // exactly row 2
+        assert_eq!(r(-20.0), 1);   // midpoint: 0.5f32.round() == 1 (half-away-from-zero)
+        assert_eq!(r(-60.0), 2);   // midpoint between row 1 and 2
+        assert_eq!(r(-39.0), 1);   // just below row 1 boundary
+        assert_eq!(r(-1.0), 0);    // almost row 0
+    }
+
+    #[test]
+    fn resize_day_from_world_x() {
+        // handle_block_resize snaps the right edge to the nearest day via
+        // `x_to_day(world_x + PIXELS_PER_DAY * 0.5, &cal)`. Test that
+        // clicking squarely inside a day resolves to that day (no holiday).
+        use crate::model::CalendarConfig;
+        let cal = CalendarConfig::default();
+        let snap = |x: f32| crate::calendar::x_to_day(x + PIXELS_PER_DAY * 0.5, &cal);
+        // Clicking in the middle of day 3's column → day 3.
+        assert_eq!(snap(3.0 * PIXELS_PER_DAY + PIXELS_PER_DAY * 0.5), 4);
+        // Clicking at the start of day 0's column → day 0.
+        assert_eq!(snap(0.0), 0);
+        // Clicking just before the day-5 boundary → day 4.
+        assert_eq!(snap(4.5 * PIXELS_PER_DAY - 0.1), 4);
+    }
+
+    #[test]
+    fn row_derivation_never_negative_when_clamped() {
+        // handle_block_drag clamps with .max(0): a positive world_y (above the
+        // origin) must never produce a negative row.
+        let r = |y: f32| (-y / ROW_HEIGHT).round().max(0.0) as i32;
+        assert_eq!(r(40.0), 0);
+        assert_eq!(r(200.0), 0);
+    }
+
+    // ── dep_type_from_edges ──────────────────────────────────────────────────
+
+    #[test]
+    fn dep_type_finish_to_start() {
+        assert_eq!(
+            dep_type_from_edges(true, false),
+            crate::model::DependencyType::FinishToStart
+        );
+    }
+
+    #[test]
+    fn dep_type_finish_to_finish() {
+        assert_eq!(
+            dep_type_from_edges(true, true),
+            crate::model::DependencyType::FinishToFinish
+        );
+    }
+
+    #[test]
+    fn dep_type_start_to_start() {
+        assert_eq!(
+            dep_type_from_edges(false, false),
+            crate::model::DependencyType::StartToStart
+        );
+    }
+
+    #[test]
+    fn dep_type_start_to_finish() {
+        assert_eq!(
+            dep_type_from_edges(false, true),
+            crate::model::DependencyType::StartToFinish
+        );
+    }
+
+    // ── block_edges_x / block_span_x ────────────────────────────────────────
+
+    #[test]
+    fn block_edges_x_no_holidays_simple() {
+        use crate::model::CalendarConfig;
+        let mut m = Model::default();
+        let id = m.create_work_block("A");
+        let wb = m.work_blocks.get_mut(&id).unwrap();
+        wb.start_day = 0;
+        wb.duration_days = 5;
+        let cal = CalendarConfig::default(); // no holidays
+        let (left, right) = block_edges_x(wb, &cal);
+        assert!((left - 0.0).abs() < 0.001, "left at day 0");
+        assert!((right - 5.0 * PIXELS_PER_DAY).abs() < 0.001, "right at day 5");
+    }
+
+    #[test]
+    fn block_span_x_width_equals_right_minus_left() {
+        use crate::model::CalendarConfig;
+        let mut m = Model::default();
+        let id = m.create_work_block("A");
+        let wb = m.work_blocks.get_mut(&id).unwrap();
+        wb.start_day = 2;
+        wb.duration_days = 3;
+        let cal = CalendarConfig::default();
+        let (left, width) = block_span_x(wb, &cal);
+        let (l2, r2) = block_edges_x(wb, &cal);
+        assert!((left - l2).abs() < 0.001);
+        assert!((width - (r2 - l2)).abs() < 0.001);
+    }
+
+    #[test]
+    fn block_edges_x_holiday_within_span_widens_right_edge() {
+        // A holiday on 2025-01-03 (working day 2) inserts a visual column before
+        // day 3. A block from day 1 to day 4 crosses it, so right_x is wider.
+        use chrono::NaiveDate;
+        use crate::model::CalendarConfig;
+        let mut cal = CalendarConfig::default();
+        let holiday = NaiveDate::from_ymd_opt(2025, 1, 3).unwrap(); // a Friday
+        cal.non_working_dates = vec![holiday];
+
+        let mut m = Model::default();
+        let id = m.create_work_block("A");
+        let wb = m.work_blocks.get_mut(&id).unwrap();
+        wb.start_day = 1;
+        wb.duration_days = 3; // ends at day 4
+
+        let (left_h, right_h) = block_edges_x(wb, &cal);
+
+        let cal_no_hol = CalendarConfig::default();
+        let (left_n, right_n) = block_edges_x(wb, &cal_no_hol);
+
+        // Left edge is before the holiday column so it stays the same.
+        assert!((left_h - left_n).abs() < 0.001, "left unchanged");
+        // Right edge is pushed out by one holiday column.
+        assert!(
+            (right_h - right_n - PIXELS_PER_DAY).abs() < 0.001,
+            "right wider by one day: got {right_h} expected {}",
+            right_n + PIXELS_PER_DAY
+        );
+    }
+
+    #[test]
+    fn block_edges_x_holiday_before_span_shifts_both_edges() {
+        // Holiday before the block shifts both left and right by one column.
+        use chrono::NaiveDate;
+        use crate::model::CalendarConfig;
+        let mut cal = CalendarConfig::default();
+        let holiday = NaiveDate::from_ymd_opt(2025, 1, 3).unwrap(); // day 2
+        cal.non_working_dates = vec![holiday];
+
+        let mut m = Model::default();
+        let id = m.create_work_block("A");
+        let wb = m.work_blocks.get_mut(&id).unwrap();
+        wb.start_day = 4; // starts after the holiday column (boundary is at 3)
+        wb.duration_days = 2;
+
+        let (left_h, right_h) = block_edges_x(wb, &cal);
+        let (left_n, right_n) = block_edges_x(wb, &CalendarConfig::default());
+
+        assert!((left_h - left_n - PIXELS_PER_DAY).abs() < 0.001, "left shifted right by one");
+        assert!((right_h - right_n - PIXELS_PER_DAY).abs() < 0.001, "right shifted right by one");
+    }
+
+    // ── fit_label ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn fit_label_short_name_fits_unchanged() {
+        // 200 world px / 1.0 scale = 200 screen px → max_chars = (200-8)/8 = 24
+        let result = fit_label("Hello", 200.0, 1.0);
+        assert_eq!(result, Some("Hello".to_string()));
+    }
+
+    #[test]
+    fn fit_label_long_name_gets_truncated_with_ellipsis() {
+        // 80 world px / 1.0 scale = 80 screen px → max_chars = (80-8)/8 = 9
+        // 9 chars: keep 8, append "…"
+        let result = fit_label("Hello World Long", 80.0, 1.0);
+        assert_eq!(result, Some("Hello Wo…".to_string()));
+    }
+
+    #[test]
+    fn fit_label_too_narrow_returns_none() {
+        // 8 world px / 1.0 scale = 8 screen px → max_chars = (8-8)/8 = 0 < 1
+        let result = fit_label("Hi", 8.0, 1.0);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn fit_label_scale_beyond_far_lod_returns_none() {
+        // scale > LOD_FAR_MIN (6.0) → always None regardless of block width
+        let result = fit_label("Hello", 1000.0, 7.0);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn fit_label_exactly_at_far_lod_boundary_proceeds() {
+        // scale == LOD_FAR_MIN is NOT > LOD_FAR_MIN, so it falls through to the
+        // length check. Block is wide enough for the full name.
+        let result = fit_label("Hi", 200.0, LOD_FAR_MIN);
+        assert_eq!(result, Some("Hi".to_string()));
+    }
+
+    #[test]
+    fn fit_label_one_char_max_returns_ellipsis_only() {
+        // 16 world px / 1.0 = 16 screen px → max_chars = (16-8)/8 = 1
+        // Name is longer than 1 char → "…"
+        let result = fit_label("Hi", 16.0, 1.0);
+        assert_eq!(result, Some("…".to_string()));
+    }
+
+    // ── undo snapshot round-trip ─────────────────────────────────────────────
+
+    #[test]
+    fn undo_snapshot_round_trip_single_block() {
+        let mut m = Model::default();
+        let plan = m.create_plan("p", None);
+        let a = m.create_work_block("A");
+        m.plans.get_mut(&plan).unwrap().root_blocks.push(a);
+
+        let snap = build_deletion_snapshot(&m, a);
+        delete_work_block(&mut m, a);
+        assert!(!m.work_blocks.contains_key(&a), "block gone after delete");
+        assert!(!m.plans[&plan].root_blocks.contains(&a), "root cleared");
+
+        restore_deletion_snapshot(&mut m, snap);
+        assert!(m.work_blocks.contains_key(&a), "block restored");
+        assert!(m.plans[&plan].root_blocks.contains(&a), "root restored");
+    }
+
+    #[test]
+    fn undo_snapshot_restores_dependencies() {
+        use crate::model::DependencyType;
+        let mut m = Model::default();
+        let _plan = m.create_plan("p", None);
+        let a = m.create_work_block("A");
+        let b = m.create_work_block("B");
+        let dep = m.create_dependency(a, b, DependencyType::FinishToStart);
+
+        let snap = build_deletion_snapshot(&m, a);
+        delete_work_block(&mut m, a);
+        assert!(!m.dependencies.contains_key(&dep), "dep gone");
+
+        restore_deletion_snapshot(&mut m, snap);
+        assert!(m.dependencies.contains_key(&dep), "dep restored");
+        assert!(m.work_blocks.contains_key(&b), "B survived throughout");
+    }
+
+    #[test]
+    fn undo_snapshot_restores_reparented_children() {
+        let mut m = Model::default();
+        let _plan = m.create_plan("p", None);
+        let parent = m.create_work_block("P");
+        let child = m.create_work_block("C");
+        m.work_blocks.get_mut(&child).unwrap().parent = Some(parent);
+
+        let snap = build_deletion_snapshot(&m, parent);
+        delete_work_block(&mut m, parent);
+        assert_eq!(
+            m.work_blocks.get(&child).unwrap().parent,
+            None,
+            "child parent cleared by delete"
+        );
+
+        restore_deletion_snapshot(&mut m, snap);
+        assert!(m.work_blocks.contains_key(&parent), "parent restored");
+        assert_eq!(
+            m.work_blocks.get(&child).unwrap().parent,
+            Some(parent),
+            "child re-parented on restore"
+        );
+    }
+
+    #[test]
+    fn undo_snapshot_dep_only_for_deleted_block() {
+        // Snapshot of A must NOT include the B→C dep that doesn't touch A.
+        use crate::model::DependencyType;
+        let mut m = Model::default();
+        let _plan = m.create_plan("p", None);
+        let a = m.create_work_block("A");
+        let b = m.create_work_block("B");
+        let c = m.create_work_block("C");
+        let _dep_bc = m.create_dependency(b, c, DependencyType::FinishToStart);
+        let dep_ab = m.create_dependency(a, b, DependencyType::FinishToStart);
+
+        let snap = build_deletion_snapshot(&m, a);
+        assert_eq!(snap.dependencies.len(), 1);
+        assert_eq!(snap.dependencies[0].id, dep_ab);
+    }
 }
 
 /// State for rapid block creation mode (activated with `N`).
