@@ -102,6 +102,20 @@ pub(crate) fn ortho_scale(proj: &Projection) -> Option<f32> {
     }
 }
 
+/// True when `world` falls within the axis-aligned rectangle of `sprite`
+/// positioned by `transform`. Returns `false` for sprites without a custom size.
+pub(crate) fn sprite_hit(transform: &Transform, sprite: &Sprite, world: Vec2) -> bool {
+    let Some(size) = sprite.custom_size else {
+        return false;
+    };
+    let center = transform.translation.truncate();
+    let half = size * 0.5;
+    world.x >= center.x - half.x
+        && world.x <= center.x + half.x
+        && world.y >= center.y - half.y
+        && world.y <= center.y + half.y
+}
+
 /// Tracks the currently selected work block (if any).
 #[derive(Resource, Default)]
 pub struct SelectedBlock(pub Option<WorkBlockId>);
@@ -824,16 +838,7 @@ pub fn handle_block_selection(
     // Hit-test against the block sprites.
     let mut clicked: Option<WorkBlockId> = None;
     for (block_sprite, transform, sprite) in &block_query {
-        let Some(size) = sprite.custom_size else {
-            continue;
-        };
-        let center = transform.translation.truncate();
-        let half = size * 0.5;
-        if world_pos.x >= center.x - half.x
-            && world_pos.x <= center.x + half.x
-            && world_pos.y >= center.y - half.y
-            && world_pos.y <= center.y + half.y
-        {
+        if sprite_hit(&transform, &sprite, world_pos) {
             clicked = Some(block_sprite.work_block_id);
             break;
         }
@@ -913,16 +918,7 @@ pub fn handle_canvas_create(
     }
     // Only empty space — bail if a block is under the cursor.
     for (_, transform, sprite) in &block_query {
-        let Some(size) = sprite.custom_size else {
-            continue;
-        };
-        let center = transform.translation.truncate();
-        let half = size * 0.5;
-        if world_pos.x >= center.x - half.x
-            && world_pos.x <= center.x + half.x
-            && world_pos.y >= center.y - half.y
-            && world_pos.y <= center.y + half.y
-        {
+        if sprite_hit(&transform, &sprite, world_pos) {
             return;
         }
     }
@@ -1152,16 +1148,7 @@ pub fn handle_block_drag(
             return;
         }
         for (block_sprite, transform, sprite) in &block_query {
-            let Some(size) = sprite.custom_size else {
-                continue;
-            };
-            let center = transform.translation.truncate();
-            let half = size * 0.5;
-            if world_pos.x >= center.x - half.x
-                && world_pos.x <= center.x + half.x
-                && world_pos.y >= center.y - half.y
-                && world_pos.y <= center.y + half.y
-            {
+            if sprite_hit(&transform, &sprite, world_pos) {
                 let id = block_sprite.work_block_id;
                 let start_px = model
                     .work_blocks
@@ -1524,8 +1511,9 @@ pub(crate) fn dep_draw_endpoints(
     }
 }
 
-/// World-space endpoints (predecessor anchor → successor anchor) of a dependency
-/// edge, mirroring `draw_dependency_edges`. `None` if a block is missing/unplaced.
+/// World-space endpoints of a dependency edge for click hit-testing. Returns
+/// `None` if a block is missing or unplaced. Order follows `dep_draw_endpoints`
+/// (succ_anchor, pred_anchor); distance via `point_segment_dist` is direction-independent.
 fn dep_endpoints(model: &model::Model, dep: &model::Dependency) -> Option<(Vec2, Vec2)> {
     let pred = model.work_blocks.get(&dep.predecessor)?;
     let succ = model.work_blocks.get(&dep.successor)?;
@@ -1536,13 +1524,7 @@ fn dep_endpoints(model: &model::Model, dep: &model::Dependency) -> Option<(Vec2,
     let p_y = -(model.block_row(dep.plan_id, dep.predecessor) as f32) * ROW_HEIGHT;
     let (s_xl, s_xr) = block_edges_x(succ, &model.calendar);
     let s_y = -(model.block_row(dep.plan_id, dep.successor) as f32) * ROW_HEIGHT;
-    let (src, dst) = match dep.dependency_type {
-        DependencyType::FinishToStart => (Vec2::new(p_xr, p_y), Vec2::new(s_xl, s_y)),
-        DependencyType::StartToStart => (Vec2::new(p_xl, p_y), Vec2::new(s_xl, s_y)),
-        DependencyType::FinishToFinish => (Vec2::new(p_xr, p_y), Vec2::new(s_xr, s_y)),
-        DependencyType::StartToFinish => (Vec2::new(p_xl, p_y), Vec2::new(s_xr, s_y)),
-    };
-    Some((src, dst))
+    Some(dep_draw_endpoints(dep.dependency_type, p_xl, p_xr, p_y, s_xl, s_xr, s_y))
 }
 
 /// Distance from point `p` to segment `a`–`b`.
@@ -1767,15 +1749,8 @@ pub fn handle_dep_drag(
     // Returns the block under `pos` and whether `pos` is in its right (finish) half.
     let block_at = |pos: Vec2| -> Option<(WorkBlockId, bool)> {
         for (bs, tr, sp) in &block_query {
-            let Some(size) = sp.custom_size else { continue };
-            let center = tr.translation.truncate();
-            let half = size * 0.5;
-            if pos.x >= center.x - half.x
-                && pos.x <= center.x + half.x
-                && pos.y >= center.y - half.y
-                && pos.y <= center.y + half.y
-            {
-                return Some((bs.work_block_id, pos.x >= center.x));
+            if sprite_hit(tr, sp, pos) {
+                return Some((bs.work_block_id, pos.x >= tr.translation.x));
             }
         }
         None
@@ -1903,16 +1878,7 @@ pub fn handle_block_drill(
     let now = time.elapsed_secs();
 
     for (block_sprite, transform, sprite) in &block_query {
-        let Some(size) = sprite.custom_size else {
-            continue;
-        };
-        let center = transform.translation.truncate();
-        let half = size * 0.5;
-        if world_pos.x >= center.x - half.x
-            && world_pos.x <= center.x + half.x
-            && world_pos.y >= center.y - half.y
-            && world_pos.y <= center.y + half.y
-        {
+        if sprite_hit(&transform, &sprite, world_pos) {
             let id = block_sprite.work_block_id;
             if let Some((last_id, last_time)) = *last_click {
                 if last_id == id && now - last_time < 0.4 {
@@ -2957,16 +2923,7 @@ pub fn draw_block_tooltip(
     };
 
     for (block_sprite, transform, sprite) in &block_q {
-        let Some(size) = sprite.custom_size else {
-            continue;
-        };
-        let center = transform.translation.truncate();
-        let half = size * 0.5;
-        if world_pos.x >= center.x - half.x
-            && world_pos.x <= center.x + half.x
-            && world_pos.y >= center.y - half.y
-            && world_pos.y <= center.y + half.y
-        {
+        if sprite_hit(&transform, &sprite, world_pos) {
             let Some(wb) = model.work_blocks.get(&block_sprite.work_block_id) else {
                 continue;
             };

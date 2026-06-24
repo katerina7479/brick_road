@@ -2015,10 +2015,7 @@ fn handle_branch_selection(
     let scale = cam_proj
         .single()
         .ok()
-        .and_then(|p| match p {
-            Projection::Orthographic(o) => Some(o.scale),
-            _ => None,
-        })
+        .and_then(crate::blocks::ortho_scale)
         .unwrap_or(1.0);
 
     // ~6 screen pixels of grab tolerance on either side of the marker line.
