@@ -9,6 +9,14 @@ use crate::model::{
 pub fn create_tables(conn: &Connection) -> Result<()> {
     conn.execute_batch("PRAGMA foreign_keys = ON;")?;
     conn.execute_batch(CREATE_TABLES_SQL)?;
+    // Migration: calendar_non_working_dates gained a description column.
+    if let Err(e) = conn.execute_batch(
+        "ALTER TABLE calendar_non_working_dates ADD COLUMN description TEXT NOT NULL DEFAULT '';",
+    ) {
+        if !e.to_string().contains("duplicate column name") {
+            return Err(e);
+        }
+    }
     // Seed default t-shirt sizes on first use (table created above).
     let count: i64 = conn.query_row("SELECT COUNT(*) FROM t_shirt_sizes", [], |r| r.get(0))?;
     if count == 0 {
@@ -221,10 +229,10 @@ pub fn save_model(conn: &Connection, model: &Model) -> Result<()> {
         }
     }
 
-    for date in &model.calendar.non_working_dates {
+    for nwd in &model.calendar.non_working_dates {
         tx.execute(
-            "INSERT INTO calendar_non_working_dates (date) VALUES (?1)",
-            (&date.format("%Y-%m-%d").to_string(),),
+            "INSERT INTO calendar_non_working_dates (date, description) VALUES (?1, ?2)",
+            (&nwd.date.format("%Y-%m-%d").to_string(), &nwd.description),
         )?;
     }
 
@@ -404,10 +412,12 @@ pub fn load_model(conn: &Connection) -> Result<Model> {
         for row in rows {
             let (resource_id, date_str, description) = row?;
             if let Ok(date) = NaiveDate::parse_from_str(&date_str, "%Y-%m-%d") {
-                if let Some(rb) =
-                    model.resource_blocks.get_mut(&ResourceBlockId(resource_id as u64))
+                if let Some(rb) = model
+                    .resource_blocks
+                    .get_mut(&ResourceBlockId(resource_id as u64))
                 {
-                    rb.non_working_dates.push(NonWorkingDate { date, description });
+                    rb.non_working_dates
+                        .push(NonWorkingDate { date, description });
                 }
             }
         }
@@ -607,12 +617,18 @@ pub fn load_model(conn: &Connection) -> Result<Model> {
 
     // calendar_non_working_dates
     {
-        let mut stmt = conn.prepare("SELECT date FROM calendar_non_working_dates ORDER BY date")?;
-        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        let mut stmt =
+            conn.prepare("SELECT date, description FROM calendar_non_working_dates ORDER BY date")?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
         for row in rows {
-            let date_str = row?;
+            let (date_str, description) = row?;
             if let Ok(date) = NaiveDate::parse_from_str(&date_str, "%Y-%m-%d") {
-                model.calendar.non_working_dates.push(date);
+                model
+                    .calendar
+                    .non_working_dates
+                    .push(NonWorkingDate { date, description });
             }
         }
     }
@@ -1102,10 +1118,14 @@ mod tests {
         let conn = open_in_memory();
         let mut m = Model::default();
         let rb_id = m.create_resource_block("Carol", ResourceType::Engineer);
-        m.resource_blocks.get_mut(&rb_id).unwrap().non_working_dates.push(NonWorkingDate {
-            date: NaiveDate::from_ymd_opt(2025, 12, 25).unwrap(),
-            description: String::new(),
-        });
+        m.resource_blocks
+            .get_mut(&rb_id)
+            .unwrap()
+            .non_working_dates
+            .push(NonWorkingDate {
+                date: NaiveDate::from_ymd_opt(2025, 12, 25).unwrap(),
+                description: String::new(),
+            });
 
         save_model(&conn, &m).unwrap();
         let loaded = load_model(&conn).unwrap();
@@ -1121,10 +1141,14 @@ mod tests {
         let mut m = Model::default();
         let alice = m.create_resource_block("Alice", ResourceType::Engineer);
         let bob = m.create_resource_block("Bob", ResourceType::Engineer);
-        m.resource_blocks.get_mut(&alice).unwrap().non_working_dates.push(NonWorkingDate {
-            date: NaiveDate::from_ymd_opt(2025, 6, 1).unwrap(),
-            description: "Alice PTO".to_string(),
-        });
+        m.resource_blocks
+            .get_mut(&alice)
+            .unwrap()
+            .non_working_dates
+            .push(NonWorkingDate {
+                date: NaiveDate::from_ymd_opt(2025, 6, 1).unwrap(),
+                description: "Alice PTO".to_string(),
+            });
         // Bob has no non-working dates.
 
         save_model(&conn, &m).unwrap();
@@ -1132,6 +1156,62 @@ mod tests {
 
         assert_eq!(loaded.resource_blocks[&alice].non_working_dates.len(), 1);
         assert!(loaded.resource_blocks[&bob].non_working_dates.is_empty());
+    }
+
+    #[test]
+    fn calendar_non_working_dates_round_trip() {
+        let conn = open_in_memory();
+        let mut m = Model::default();
+        m.calendar.non_working_dates.push(NonWorkingDate {
+            date: chrono::NaiveDate::from_ymd_opt(2025, 7, 4).unwrap(),
+            description: "Independence Day".to_string(),
+        });
+        m.calendar.non_working_dates.push(NonWorkingDate {
+            date: chrono::NaiveDate::from_ymd_opt(2025, 12, 25).unwrap(),
+            description: "Christmas".to_string(),
+        });
+        save_model(&conn, &m).unwrap();
+        let loaded = load_model(&conn).unwrap();
+        assert_eq!(loaded.calendar.non_working_dates.len(), 2);
+        assert_eq!(
+            loaded.calendar.non_working_dates[0].date,
+            chrono::NaiveDate::from_ymd_opt(2025, 7, 4).unwrap()
+        );
+        assert_eq!(
+            loaded.calendar.non_working_dates[0].description,
+            "Independence Day"
+        );
+        assert_eq!(
+            loaded.calendar.non_working_dates[1].date,
+            chrono::NaiveDate::from_ymd_opt(2025, 12, 25).unwrap()
+        );
+        assert_eq!(
+            loaded.calendar.non_working_dates[1].description,
+            "Christmas"
+        );
+    }
+
+    #[test]
+    fn calendar_non_working_dates_empty_by_default() {
+        let conn = open_in_memory();
+        let m = Model::default();
+        save_model(&conn, &m).unwrap();
+        let loaded = load_model(&conn).unwrap();
+        assert!(loaded.calendar.non_working_dates.is_empty());
+    }
+
+    #[test]
+    fn calendar_non_working_dates_empty_description_survives() {
+        let conn = open_in_memory();
+        let mut m = Model::default();
+        m.calendar.non_working_dates.push(NonWorkingDate {
+            date: chrono::NaiveDate::from_ymd_opt(2025, 1, 1).unwrap(),
+            description: String::new(),
+        });
+        save_model(&conn, &m).unwrap();
+        let loaded = load_model(&conn).unwrap();
+        assert_eq!(loaded.calendar.non_working_dates.len(), 1);
+        assert_eq!(loaded.calendar.non_working_dates[0].description, "");
     }
 }
 

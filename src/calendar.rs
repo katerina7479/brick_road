@@ -21,8 +21,10 @@ fn holiday_boundaries(config: &CalendarConfig) -> Vec<Day> {
     let mut b: Vec<Day> = config
         .non_working_dates
         .iter()
-        .filter(|&&h| h.weekday().number_from_monday() <= config.working_days_per_week as u32)
-        .map(|&h| date_to_day(h, config) + 1)
+        .filter(|nwd| {
+            nwd.date.weekday().number_from_monday() <= config.working_days_per_week as u32
+        })
+        .map(|nwd| date_to_day(nwd.date, config) + 1)
         .collect();
     b.sort_unstable();
     b
@@ -65,24 +67,26 @@ pub fn x_to_day(x: f32, config: &CalendarConfig) -> Day {
 /// `(left_x, date)` for each holiday column whose working-day boundary falls in
 /// `0..=span_days`. Consecutive holidays that share a boundary get adjacent
 /// columns (earliest date leftmost).
-pub fn holiday_columns(config: &CalendarConfig, span_days: Day) -> Vec<(f32, NaiveDate)> {
-    let mut holidays: Vec<NaiveDate> = config
+pub fn holiday_columns(config: &CalendarConfig, span_days: Day) -> Vec<(f32, NaiveDate, String)> {
+    let mut holidays: Vec<(NaiveDate, String)> = config
         .non_working_dates
         .iter()
-        .copied()
-        .filter(|h| h.weekday().number_from_monday() <= config.working_days_per_week as u32)
+        .filter(|nwd| {
+            nwd.date.weekday().number_from_monday() <= config.working_days_per_week as u32
+        })
+        .map(|nwd| (nwd.date, nwd.description.clone()))
         .collect();
-    holidays.sort_unstable();
+    holidays.sort_unstable_by_key(|(d, _)| *d);
 
     let mut out = Vec::new();
     let mut i = 0;
     while i < holidays.len() {
-        let boundary = date_to_day(holidays[i], config) + 1;
+        let boundary = date_to_day(holidays[i].0, config) + 1;
         // Gather the run of holidays sharing this boundary (adjacent days).
-        let mut group = vec![holidays[i]];
+        let mut group = vec![holidays[i].clone()];
         let mut j = i + 1;
-        while j < holidays.len() && date_to_day(holidays[j], config) + 1 == boundary {
-            group.push(holidays[j]);
+        while j < holidays.len() && date_to_day(holidays[j].0, config) + 1 == boundary {
+            group.push(holidays[j].clone());
             j += 1;
         }
         if boundary >= 0 && boundary <= span_days + 1 {
@@ -90,9 +94,9 @@ pub fn holiday_columns(config: &CalendarConfig, span_days: Day) -> Vec<(f32, Nai
             // `boundary`; earliest holiday leftmost.
             let right = day_to_x(boundary, config);
             let n = group.len();
-            for (k, date) in group.into_iter().enumerate() {
+            for (k, (date, desc)) in group.into_iter().enumerate() {
                 let left_x = right - (n - k) as f32 * PIXELS_PER_DAY;
-                out.push((left_x, date));
+                out.push((left_x, date, desc));
             }
         }
         i = j;
@@ -125,7 +129,11 @@ fn is_working_day(
 /// `non_working_dates`) are skipped during the count.
 pub fn day_to_date(day: Day, config: &CalendarConfig) -> NaiveDate {
     let working_days = day as i64;
-    let non_working: HashSet<NaiveDate> = config.non_working_dates.iter().copied().collect();
+    let non_working: HashSet<NaiveDate> = config
+        .non_working_dates
+        .iter()
+        .map(|nwd| nwd.date)
+        .collect();
 
     if working_days == 0 {
         return config.start_date;
@@ -158,7 +166,11 @@ pub fn date_to_day(date: NaiveDate, config: &CalendarConfig) -> i32 {
         return 0;
     }
 
-    let non_working: HashSet<NaiveDate> = config.non_working_dates.iter().copied().collect();
+    let non_working: HashSet<NaiveDate> = config
+        .non_working_dates
+        .iter()
+        .map(|nwd| nwd.date)
+        .collect();
 
     let (start, end, sign) = if date > config.start_date {
         (config.start_date, date, 1i32)
@@ -186,7 +198,11 @@ pub fn date_to_day(date: NaiveDate, config: &CalendarConfig) -> i32 {
 /// the marker sits *after* the finished work week (e.g. a Saturday lands just
 /// after Friday, not on it).
 pub fn today_marker_day(date: NaiveDate, config: &CalendarConfig) -> Day {
-    let non_working: HashSet<NaiveDate> = config.non_working_dates.iter().copied().collect();
+    let non_working: HashSet<NaiveDate> = config
+        .non_working_dates
+        .iter()
+        .map(|nwd| nwd.date)
+        .collect();
     let base = date_to_day(date, config);
     if is_working_day(date, config.working_days_per_week, &non_working) {
         base
@@ -202,8 +218,11 @@ pub fn first_working_day_of_month(
     month: u32,
     config: &CalendarConfig,
 ) -> Option<NaiveDate> {
-    let non_working: std::collections::HashSet<NaiveDate> =
-        config.non_working_dates.iter().copied().collect();
+    let non_working: std::collections::HashSet<NaiveDate> = config
+        .non_working_dates
+        .iter()
+        .map(|nwd| nwd.date)
+        .collect();
     let mut day = NaiveDate::from_ymd_opt(year, month, 1)?;
     loop {
         if day.month() != month {
@@ -256,7 +275,7 @@ pub fn effort_to_calendar_days(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::CalendarConfig;
+    use crate::model::{CalendarConfig, NonWorkingDate};
 
     fn mon_fri_config() -> CalendarConfig {
         CalendarConfig {
@@ -299,7 +318,10 @@ mod tests {
         let cfg = CalendarConfig {
             start_date: NaiveDate::from_ymd_opt(2025, 1, 6).unwrap(), // Monday
             working_days_per_week: 5,
-            non_working_dates: vec![holiday],
+            non_working_dates: vec![NonWorkingDate {
+                date: holiday,
+                description: String::new(),
+            }],
             ..Default::default()
         };
         // 1 working day after Mon Jan 6, skipping Tue Jan 7 → Wed Jan 8
@@ -375,7 +397,10 @@ mod tests {
         let cfg = CalendarConfig {
             start_date: NaiveDate::from_ymd_opt(2025, 1, 6).unwrap(),
             working_days_per_week: 5,
-            non_working_dates: vec![holiday],
+            non_working_dates: vec![NonWorkingDate {
+                date: holiday,
+                description: String::new(),
+            }],
             ..Default::default()
         };
         // date_to_day(Jan 8) = 1 (Tue Jan 7 is working day 1), boundary = 2.
@@ -399,7 +424,10 @@ mod tests {
         let cfg = CalendarConfig {
             start_date: NaiveDate::from_ymd_opt(2025, 1, 6).unwrap(),
             working_days_per_week: 5,
-            non_working_dates: vec![sat],
+            non_working_dates: vec![NonWorkingDate {
+                date: sat,
+                description: String::new(),
+            }],
             ..Default::default()
         };
         assert!(holiday_columns(&cfg, 20).is_empty());

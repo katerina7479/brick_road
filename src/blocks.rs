@@ -2440,11 +2440,14 @@ mod tests {
     fn block_edges_x_holiday_within_span_widens_right_edge() {
         // A holiday on 2025-01-03 (working day 2) inserts a visual column before
         // day 3. A block from day 1 to day 4 crosses it, so right_x is wider.
-        use crate::model::CalendarConfig;
+        use crate::model::{CalendarConfig, NonWorkingDate};
         use chrono::NaiveDate;
         let mut cal = CalendarConfig::default();
         let holiday = NaiveDate::from_ymd_opt(2025, 1, 3).unwrap(); // a Friday
-        cal.non_working_dates = vec![holiday];
+        cal.non_working_dates = vec![NonWorkingDate {
+            date: holiday,
+            description: String::new(),
+        }];
 
         let mut m = Model::default();
         let id = m.create_work_block("A");
@@ -2470,11 +2473,14 @@ mod tests {
     #[test]
     fn block_edges_x_holiday_before_span_shifts_both_edges() {
         // Holiday before the block shifts both left and right by one column.
-        use crate::model::CalendarConfig;
+        use crate::model::{CalendarConfig, NonWorkingDate};
         use chrono::NaiveDate;
         let mut cal = CalendarConfig::default();
         let holiday = NaiveDate::from_ymd_opt(2025, 1, 3).unwrap(); // day 2
-        cal.non_working_dates = vec![holiday];
+        cal.non_working_dates = vec![NonWorkingDate {
+            date: holiday,
+            description: String::new(),
+        }];
 
         let mut m = Model::default();
         let id = m.create_work_block("A");
