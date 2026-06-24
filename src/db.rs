@@ -2,8 +2,8 @@ use chrono::NaiveDate;
 use rusqlite::{Connection, Result};
 
 use crate::model::{
-    Dependency, DependencyId, DependencyType, Model, Plan, PlanId, ResourceBlock, ResourceBlockId,
-    ResourceType, TShirtSize, WorkBlock, WorkBlockId,
+    Dependency, DependencyId, DependencyType, Model, NonWorkingDate, Plan, PlanId, ResourceBlock,
+    ResourceBlockId, ResourceType, TShirtSize, WorkBlock, WorkBlockId,
 };
 
 pub fn create_tables(conn: &Connection) -> Result<()> {
@@ -54,6 +54,7 @@ pub fn save_model(conn: &Connection, model: &Model) -> Result<()> {
     tx.execute_batch(
         "DELETE FROM plan_blocks;
          DELETE FROM calendar_non_working_dates;
+         DELETE FROM resource_non_working_dates;
          DELETE FROM t_shirt_sizes;
          DELETE FROM quarter_colors;",
     )?;
@@ -227,6 +228,20 @@ pub fn save_model(conn: &Connection, model: &Model) -> Result<()> {
         )?;
     }
 
+    for rb in model.resource_blocks.values() {
+        for nwd in &rb.non_working_dates {
+            tx.execute(
+                "INSERT INTO resource_non_working_dates (resource_id, date, description)
+                 VALUES (?1, ?2, ?3)",
+                (
+                    rb.id.0 as i64,
+                    &nwd.date.format("%Y-%m-%d").to_string(),
+                    &nwd.description,
+                ),
+            )?;
+        }
+    }
+
     // t_shirt_sizes
     for (order, size) in model.t_shirt_sizes.iter().enumerate() {
         tx.execute(
@@ -366,8 +381,35 @@ pub fn load_model(conn: &Connection) -> Result<Model> {
                     id: ResourceBlockId(id as u64),
                     name,
                     resource_type,
+                    non_working_dates: vec![],
                 },
             );
+        }
+    }
+
+    // resource_non_working_dates
+    {
+        let mut stmt = conn.prepare(
+            "SELECT resource_id, date, description
+             FROM resource_non_working_dates
+             ORDER BY resource_id, date",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?;
+        for row in rows {
+            let (resource_id, date_str, description) = row?;
+            if let Ok(date) = NaiveDate::parse_from_str(&date_str, "%Y-%m-%d") {
+                if let Some(rb) =
+                    model.resource_blocks.get_mut(&ResourceBlockId(resource_id as u64))
+                {
+                    rb.non_working_dates.push(NonWorkingDate { date, description });
+                }
+            }
         }
     }
 
@@ -692,7 +734,8 @@ fn dependency_type_str(dt: DependencyType) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{Day, DependencyType, ResourceType, WorkBlockId};
+    use crate::model::{Day, DependencyType, NonWorkingDate, ResourceType, WorkBlockId};
+    use chrono::NaiveDate;
     use rusqlite::Connection;
 
     fn open_in_memory() -> Connection {
@@ -1008,6 +1051,88 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn resource_non_working_dates_round_trip() {
+        let conn = open_in_memory();
+        let mut m = Model::default();
+        let rb_id = m.create_resource_block("Alice", ResourceType::Engineer);
+        let rb = m.resource_blocks.get_mut(&rb_id).unwrap();
+        rb.non_working_dates.push(NonWorkingDate {
+            date: NaiveDate::from_ymd_opt(2025, 7, 4).unwrap(),
+            description: "Independence Day".to_string(),
+        });
+        rb.non_working_dates.push(NonWorkingDate {
+            date: NaiveDate::from_ymd_opt(2025, 8, 11).unwrap(),
+            description: "PTO".to_string(),
+        });
+
+        save_model(&conn, &m).unwrap();
+        let loaded = load_model(&conn).unwrap();
+
+        let got = &loaded.resource_blocks[&rb_id];
+        assert_eq!(got.non_working_dates.len(), 2);
+        assert_eq!(
+            got.non_working_dates[0].date,
+            NaiveDate::from_ymd_opt(2025, 7, 4).unwrap()
+        );
+        assert_eq!(got.non_working_dates[0].description, "Independence Day");
+        assert_eq!(
+            got.non_working_dates[1].date,
+            NaiveDate::from_ymd_opt(2025, 8, 11).unwrap()
+        );
+        assert_eq!(got.non_working_dates[1].description, "PTO");
+    }
+
+    #[test]
+    fn resource_non_working_dates_empty_by_default() {
+        let conn = open_in_memory();
+        let mut m = Model::default();
+        m.create_resource_block("Bob", ResourceType::Team);
+
+        save_model(&conn, &m).unwrap();
+        let loaded = load_model(&conn).unwrap();
+
+        let rb = loaded.resource_blocks.values().next().unwrap();
+        assert!(rb.non_working_dates.is_empty());
+    }
+
+    #[test]
+    fn resource_non_working_dates_empty_description_survives() {
+        let conn = open_in_memory();
+        let mut m = Model::default();
+        let rb_id = m.create_resource_block("Carol", ResourceType::Engineer);
+        m.resource_blocks.get_mut(&rb_id).unwrap().non_working_dates.push(NonWorkingDate {
+            date: NaiveDate::from_ymd_opt(2025, 12, 25).unwrap(),
+            description: String::new(),
+        });
+
+        save_model(&conn, &m).unwrap();
+        let loaded = load_model(&conn).unwrap();
+
+        let nwd = &loaded.resource_blocks[&rb_id].non_working_dates[0];
+        assert_eq!(nwd.date, NaiveDate::from_ymd_opt(2025, 12, 25).unwrap());
+        assert_eq!(nwd.description, "");
+    }
+
+    #[test]
+    fn resource_non_working_dates_multiple_resources_isolated() {
+        let conn = open_in_memory();
+        let mut m = Model::default();
+        let alice = m.create_resource_block("Alice", ResourceType::Engineer);
+        let bob = m.create_resource_block("Bob", ResourceType::Engineer);
+        m.resource_blocks.get_mut(&alice).unwrap().non_working_dates.push(NonWorkingDate {
+            date: NaiveDate::from_ymd_opt(2025, 6, 1).unwrap(),
+            description: "Alice PTO".to_string(),
+        });
+        // Bob has no non-working dates.
+
+        save_model(&conn, &m).unwrap();
+        let loaded = load_model(&conn).unwrap();
+
+        assert_eq!(loaded.resource_blocks[&alice].non_working_dates.len(), 1);
+        assert!(loaded.resource_blocks[&bob].non_working_dates.is_empty());
+    }
 }
 
 const CREATE_TABLES_SQL: &str = "
@@ -1015,6 +1140,13 @@ CREATE TABLE IF NOT EXISTS resource_blocks (
     id            INTEGER PRIMARY KEY,
     name          TEXT    NOT NULL,
     resource_type TEXT    NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS resource_non_working_dates (
+    resource_id  INTEGER NOT NULL REFERENCES resource_blocks(id),
+    date         TEXT    NOT NULL,
+    description  TEXT    NOT NULL DEFAULT '',
+    PRIMARY KEY (resource_id, date)
 );
 
 CREATE TABLE IF NOT EXISTS work_blocks (
