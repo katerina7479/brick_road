@@ -18,6 +18,8 @@ cargo build        # compile without running
 
 There is no CI, rustfmt.toml, or clippy config — use `cargo fmt` and `cargo clippy` defaults.
 
+A repo-tracked **pre-commit hook** (`.githooks/pre-commit`) runs `cargo fmt --check` to keep the tree formatted. It is **not active until you enable it once per checkout/worktree**: `git config core.hooksPath .githooks`. It only checks formatting (fast); run `cargo clippy`/`cargo test` yourself before pushing (they need a full compile and are too slow per-commit). Bypass a single commit with `git commit --no-verify`.
+
 The app opens/creates `brick_road.db` (gitignored SQLite file) in the working directory on launch. Delete it to reset to a freshly seeded demo plan.
 
 ## Architecture

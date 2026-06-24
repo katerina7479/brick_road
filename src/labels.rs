@@ -474,11 +474,15 @@ mod tests {
     fn day_labels_holiday_shifts_x_positions() {
         // A holiday on a weekday inserts an extra visual column, widening all
         // x positions at or after the holiday boundary.
+        use crate::model::NonWorkingDate;
         use chrono::NaiveDate;
         let mut cfg = mon_config();
         // 2025-06-18 is a Wednesday (working day 2 in this calendar).
         let holiday = NaiveDate::from_ymd_opt(2025, 6, 18).unwrap();
-        cfg.non_working_dates = vec![holiday];
+        cfg.non_working_dates = vec![NonWorkingDate {
+            date: holiday,
+            description: String::new(),
+        }];
 
         let cfg_no_hol = mon_config();
 

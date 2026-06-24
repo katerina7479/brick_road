@@ -67,7 +67,7 @@ pub struct CalendarConfig {
     /// Number of working days per week (1–7). Default 5 (Mon–Fri).
     pub working_days_per_week: u8,
     /// Specific calendar dates excluded from working-day counting (holidays, shutdowns).
-    pub non_working_dates: Vec<NaiveDate>,
+    pub non_working_dates: Vec<NonWorkingDate>,
     /// RGBA fill colors for Q1–Q4 background bands. Low opacity — background context only.
     pub quarter_colors: [[f32; 4]; 4],
 }
