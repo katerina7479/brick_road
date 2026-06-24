@@ -1,0 +1,18 @@
+#!/bin/sh
+# brick_road pre-commit hook — enforce rustfmt before every commit.
+#
+# Only `cargo fmt --check` runs here: it is fast (no compile). `cargo clippy`
+# and `cargo test` each need a full Bevy compile (minutes) and are impractical
+# to run on every commit — run those before pushing, or wire a pre-push hook.
+#
+# Enable in a fresh checkout (one time, per clone/worktree):
+#     git config core.hooksPath .githooks
+#
+# Bypass for a specific commit (use sparingly):
+#     git commit --no-verify
+
+if ! cargo fmt --check; then
+    echo >&2
+    echo "pre-commit: rustfmt check failed — run 'cargo fmt', restage, and commit again." >&2
+    exit 1
+fi
