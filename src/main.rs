@@ -342,8 +342,9 @@ fn draw_parent_bounds(
     let y_bot = cam_t.translation.y - half_h;
     let color = Color::from(LinearRgba::new(2.4, 1.6, 0.3, 0.5)); // amber, bloomed
 
+    let off = model.calendar.global_off_days();
     for day in [wb.start_day, wb.start_day + wb.duration_days] {
-        let x = calendar::day_to_x(day, &model.calendar);
+        let x = calendar::day_to_x(day, &off, &model.calendar);
         gizmos.line_2d(Vec2::new(x, y_top), Vec2::new(x, y_bot), color);
     }
 }
@@ -414,12 +415,13 @@ fn draw_grid(
     // boundary line at each. Past/future colouring uses the working day the
     // column maps back to.
     let cal = &model.calendar;
+    let off = cal.global_off_days();
     let v_min = (x_left / PIXELS_PER_DAY).floor() as i32;
     let v_max = (x_right / PIXELS_PER_DAY).ceil() as i32;
 
     for v in v_min..=v_max {
         let x = v as f32 * PIXELS_PER_DAY;
-        let day = calendar::x_to_day(x, cal);
+        let day = calendar::x_to_day(x, &off, cal);
         let color = if day < today.day {
             past_line_color
         } else {
@@ -447,7 +449,7 @@ fn draw_grid(
     );
 
     // Prominent today marker — draw 3 lines 2px apart so it reads as a thick bar at all zooms.
-    let x_today = calendar::day_to_x(today.day, cal);
+    let x_today = calendar::day_to_x(today.day, &off, cal);
     for dx in [-2.0_f32, 0.0, 2.0] {
         gizmos.line_2d(
             Vec2::new(x_today + dx, y_bottom),
@@ -469,12 +471,13 @@ struct WeekendBand;
 fn weekend_band_positions(span_days: i32, model: &model::Model) -> Vec<f32> {
     use chrono::Datelike;
     let cal = &model.calendar;
+    let off = cal.global_off_days();
     let mut positions = Vec::new();
     for day in 0..=span_days + 1 {
         let here = calendar::day_to_date(day, cal);
         let next = calendar::day_to_date(day + 1, cal);
         if here.iso_week() != next.iso_week() {
-            positions.push(calendar::day_to_x(day + 1, cal));
+            positions.push(calendar::day_to_x(day + 1, &off, cal));
         }
     }
     positions
@@ -511,7 +514,8 @@ fn sync_weekend_bands(
 
     // Holidays occupy a full greyed day-wide column that work skips.
     let holiday_color = Color::srgba(0.48, 0.50, 0.56, 0.20);
-    for (left_x, _date) in calendar::holiday_columns(&model.calendar, span) {
+    let off = model.calendar.global_off_days();
+    for (left_x, _date) in calendar::holiday_columns(&off, &model.calendar, span) {
         commands.spawn((
             WeekendBand,
             Sprite {
@@ -548,7 +552,8 @@ const CALENDAR_HORIZON_DAYS: i32 = 780;
 /// Returns (x_center, width, rgba_color) for each month band in the plan span.
 fn period_band_spans(config: &model::CalendarConfig, span_days: i32) -> Vec<(f32, f32, [f32; 4])> {
     let mut result = Vec::new();
-    let span_px = calendar::day_to_x(span_days, config);
+    let off = config.global_off_days();
+    let span_px = calendar::day_to_x(span_days, &off, config);
 
     let start_year = config.start_date.year();
     let start_month = config.start_date.month();
@@ -558,7 +563,7 @@ fn period_band_spans(config: &model::CalendarConfig, span_days: i32) -> Vec<(f32
 
     loop {
         let x_start = match calendar::first_working_day_of_month(year, month, config) {
-            Some(d) => calendar::day_to_x(calendar::date_to_day(d, config), config).max(0.0),
+            Some(d) => calendar::day_to_x(calendar::date_to_day(d, config), &off, config).max(0.0),
             None => {
                 let (ny, nm) = next_year_month(year, month);
                 year = ny;
@@ -576,7 +581,9 @@ fn period_band_spans(config: &model::CalendarConfig, span_days: i32) -> Vec<(f32
 
         let (ny, nm) = next_year_month(year, month);
         let x_end = match calendar::first_working_day_of_month(ny, nm, config) {
-            Some(d) => calendar::day_to_x(calendar::date_to_day(d, config), config).min(span_px),
+            Some(d) => {
+                calendar::day_to_x(calendar::date_to_day(d, config), &off, config).min(span_px)
+            }
             None => span_px,
         };
 
@@ -612,7 +619,12 @@ fn next_year_month(year: i32, month: u32) -> (i32, u32) {
 
 fn x_start_of_month(year: i32, month: u32, config: &model::CalendarConfig) -> f32 {
     match calendar::first_working_day_of_month(year, month, config) {
-        Some(d) => calendar::day_to_x(calendar::date_to_day(d, config), config).max(0.0),
+        Some(d) => calendar::day_to_x(
+            calendar::date_to_day(d, config),
+            &config.global_off_days(),
+            config,
+        )
+        .max(0.0),
         None => f32::MAX,
     }
 }
@@ -762,7 +774,8 @@ fn handle_fork_hover(
         .and_then(|cursor| cam.viewport_to_world_2d(cam_gt, cursor).ok())
         .map(|wp| wp.x);
 
-    fork.hovered_day = world_x.map(|x| calendar::x_to_day(x, &model.calendar));
+    let off = model.calendar.global_off_days();
+    fork.hovered_day = world_x.map(|x| calendar::x_to_day(x, &off, &model.calendar));
 
     // Ctrl+Left-click: fork main into a new branch at the hovered day.
     let ctrl = keyboard.pressed(KeyCode::ControlLeft) || keyboard.pressed(KeyCode::ControlRight);
@@ -815,11 +828,12 @@ fn draw_branch_markers(
         .collect();
     branch_plans.sort_by_key(|p| p.id.0);
 
+    let off = model.calendar.global_off_days();
     for (idx, plan) in branch_plans.iter().enumerate() {
         let Some(branch_day) = plan.branch_start_day else {
             continue;
         };
-        let x = calendar::day_to_x(branch_day, &model.calendar);
+        let x = calendar::day_to_x(branch_day, &off, &model.calendar);
         let lc = blocks::BRANCH_PALETTE[idx % blocks::BRANCH_PALETTE.len()];
         // The selected branch is drawn brighter and fully opaque so it's clear
         // which one the Delete key will remove.
@@ -864,7 +878,7 @@ fn draw_branch_markers(
 
     // Fork-hover indicator: ghost line at hovered day.
     if let Some(hovered_day) = fork.hovered_day {
-        let x = calendar::day_to_x(hovered_day, &model.calendar);
+        let x = calendar::day_to_x(hovered_day, &off, &model.calendar);
         let ghost = Color::srgba(0.55, 0.75, 1.0, 0.25);
         gizmos.line_2d(
             Vec2::new(x, cam_t.translation.y + half_h),
@@ -920,6 +934,7 @@ fn calendar_ruler_ui(
     let x_right = cam_x + half_w;
 
     let config = &model.calendar;
+    let off = config.global_off_days();
     let wdpw = (config.working_days_per_week as i32).max(1);
     // Working-day → date helpers and the on-screen size of one day.
     let day_w = PIXELS_PER_DAY / scale; // screen px per day
@@ -927,8 +942,8 @@ fn calendar_ruler_ui(
     let show_days = day_w >= 13.0;
     let show_weeks = week_w >= 44.0;
 
-    let day_min = calendar::x_to_day(x_left, config);
-    let day_max = calendar::x_to_day(x_right, config) + 1;
+    let day_min = calendar::x_to_day(x_left, &off, config);
+    let day_max = calendar::x_to_day(x_right, &off, config) + 1;
 
     egui::TopBottomPanel::top("calendar_ruler")
         .exact_height(64.0)
@@ -968,7 +983,7 @@ fn calendar_ruler_ui(
                     color,
                 );
             };
-            let day_x = |d: i32| calendar::day_to_x(d, config);
+            let day_x = |d: i32| calendar::day_to_x(d, &off, config);
 
             let d_lo = calendar::day_to_date(day_min, config);
             let d_hi = calendar::day_to_date(day_max, config);
@@ -1050,7 +1065,7 @@ fn calendar_ruler_ui(
                 // Holiday columns carry their own greyed date number, so the
                 // date doesn't disappear from the header where work skips it.
                 let holiday_num = egui::Color32::from_rgb(120, 122, 134);
-                for (left_x, date) in calendar::holiday_columns(config, day_max) {
+                for (left_x, date) in calendar::holiday_columns(&off, config, day_max) {
                     let cx = world_to_screen_x(left_x + PIXELS_PER_DAY * 0.5);
                     if cx < rect.left() || cx > rect.right() {
                         continue;
@@ -1539,7 +1554,11 @@ fn draw_resource_dot(painter: &egui::Painter, pos: egui::Pos2, kind: model::Reso
 /// working day). Used for the year tier of the calendar ruler.
 fn year_start_x(y: i32, config: &model::CalendarConfig) -> f32 {
     let date = chrono::NaiveDate::from_ymd_opt(y, 1, 1).unwrap_or(config.start_date);
-    calendar::day_to_x(calendar::date_to_day(date, config), config)
+    calendar::day_to_x(
+        calendar::date_to_day(date, config),
+        &config.global_off_days(),
+        config,
+    )
 }
 
 /// World-space x of the start of quarter `q` (0..=4, where 4 = next year's Q1)
@@ -1551,7 +1570,11 @@ fn quarter_start_x(y: i32, q: i32, config: &model::CalendarConfig) -> f32 {
         (y, (q * 3 + 1) as u32)
     };
     let date = chrono::NaiveDate::from_ymd_opt(yy, month, 1).unwrap_or(config.start_date);
-    calendar::day_to_x(calendar::date_to_day(date, config), config)
+    calendar::day_to_x(
+        calendar::date_to_day(date, config),
+        &config.global_off_days(),
+        config,
+    )
 }
 
 /// Applies the warm-amber theme to the current `ui`'s button widget states, so
@@ -1904,7 +1927,11 @@ fn top_bar_ui(
                     }
                     ui.add_space(8.0);
                     if tool_button(ui, "→ Today", false).clicked() {
-                        target.pos.x = calendar::day_to_x(today.day, &model.calendar);
+                        target.pos.x = calendar::day_to_x(
+                            today.day,
+                            &model.calendar.global_off_days(),
+                            &model.calendar,
+                        );
                     }
                     if tool_button(ui, "⤢ Fit", false)
                         .on_hover_text("Fit to view [F]")
@@ -2002,6 +2029,7 @@ pub fn branch_plan_at_x(
     hit_world: f32,
 ) -> Option<model::PlanId> {
     let mut best: Option<(f32, model::PlanId)> = None;
+    let off = model.calendar.global_off_days();
     for plan in model.plans.values() {
         if plan.id == active_id {
             continue;
@@ -2009,7 +2037,7 @@ pub fn branch_plan_at_x(
         let Some(day) = plan.branch_start_day else {
             continue;
         };
-        let dist = (world_x - calendar::day_to_x(day, &model.calendar)).abs();
+        let dist = (world_x - calendar::day_to_x(day, &off, &model.calendar)).abs();
         if dist <= hit_world && best.is_none_or(|(bd, _)| dist < bd) {
             best = Some((dist, plan.id));
         }

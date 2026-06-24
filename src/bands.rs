@@ -162,6 +162,7 @@ pub fn layout_bands(model: &Model) -> Vec<BandLayout> {
     };
     let main_id = main.id;
     let main_set: std::collections::HashSet<_> = main.root_blocks.iter().copied().collect();
+    let off = model.calendar.global_off_days();
 
     let mut branches: Vec<&Plan> = model
         .plans
@@ -192,7 +193,7 @@ pub fn layout_bands(model: &Model) -> Vec<BandLayout> {
             // (snapshotted from main at fork, then diverging independently).
             let row = model.block_row(branch.id, *id);
             max_row = max_row.max(row);
-            let (left, span_w) = crate::blocks::block_span_x(wb, &model.calendar);
+            let (left, span_w) = crate::blocks::block_span_x(wb, &off, &model.calendar);
             let w = span_w.max(1.0);
             blocks.push(BandBlock {
                 id: *id,
@@ -215,7 +216,7 @@ pub fn layout_bands(model: &Model) -> Vec<BandLayout> {
             plan_id: branch.id,
             fork_day: fork,
             name: branch.name.clone(),
-            name_x: crate::calendar::day_to_x(fork, &model.calendar) + 4.0,
+            name_x: crate::calendar::day_to_x(fork, &off, &model.calendar) + 4.0,
             name_y: lane_top - 13.0,
             row0_y,
             lane_top,
@@ -240,9 +241,10 @@ pub fn bands_top_y(model: &Model) -> Option<f32> {
 /// the click's height, so clicking the marker line inside a lane selects *that*
 /// lane's plan. `None` if the click isn't on a marker within a lane.
 pub fn plan_marker_in_lane_at(model: &Model, world: Vec2, hit_world: f32) -> Option<PlanId> {
+    let off = model.calendar.global_off_days();
     for band in layout_bands(model) {
         if world.y <= band.lane_top && world.y > band.lane_bottom {
-            let fx = crate::calendar::day_to_x(band.fork_day, &model.calendar);
+            let fx = crate::calendar::day_to_x(band.fork_day, &off, &model.calendar);
             if (world.x - fx).abs() <= hit_world {
                 return Some(band.plan_id);
             }
@@ -287,6 +289,7 @@ pub fn draw_band_overlays(
     };
 
     let sel_accent = Color::from(LinearRgba::new(2.0, 1.5, 0.4, 0.9)); // gold, bloomed
+    let off = model.calendar.global_off_days();
     for band in layout_bands(&model) {
         gizmos.line_2d(
             Vec2::new(cam_x - half_w, band.lane_top),
@@ -297,7 +300,7 @@ pub fn draw_band_overlays(
         // fork point), spanning just this lane's height (drawn a few times for
         // thickness), so it's clear which one Delete will remove.
         if selected_plan.0 == Some(band.plan_id) {
-            let fx = crate::calendar::day_to_x(band.fork_day, &model.calendar);
+            let fx = crate::calendar::day_to_x(band.fork_day, &off, &model.calendar);
             for i in 0..3 {
                 let x = fx - i as f32 * 1.5 * ortho.scale;
                 gizmos.line_2d(
@@ -503,7 +506,8 @@ pub fn handle_band_block_create(
     *last_click = 0.0;
 
     let plan_id = band.plan_id;
-    let day = crate::calendar::x_to_day(world.x + PIXELS_PER_DAY * 0.5, &model.calendar)
+    let off = model.calendar.global_off_days();
+    let day = crate::calendar::x_to_day(world.x + PIXELS_PER_DAY * 0.5, &off, &model.calendar)
         .max(band.fork_day);
     let row = ((band.row0_y - world.y) / ROW_HEIGHT).round().max(0.0) as i32;
 
@@ -920,14 +924,16 @@ pub fn handle_lane_block_edit(
         let Some(band) = bands.iter().find(|b| b.plan_id == a.plan) else {
             return;
         };
+        let off = model.calendar.global_off_days();
         match a.mode {
             LaneDragMode::Move => {
                 let left_x = world.x - a.grab_offset;
                 // Dependencies don't constrain the drag — you can place a block
                 // into a violation; the edge just turns red. (Only the fork day
                 // is enforced.)
-                let day = crate::calendar::x_to_day(left_x + PIXELS_PER_DAY * 0.5, &model.calendar)
-                    .max(band.fork_day);
+                let day =
+                    crate::calendar::x_to_day(left_x + PIXELS_PER_DAY * 0.5, &off, &model.calendar)
+                        .max(band.fork_day);
                 let row = ((band.row0_y - world.y) / ROW_HEIGHT).round().max(0.0) as i32;
                 let cur_start = model.work_blocks.get(&a.block).map(|wb| wb.start_day);
                 let cur_row = model.block_row(a.plan, a.block);
@@ -938,8 +944,11 @@ pub fn handle_lane_block_edit(
             LaneDragMode::Resize => {
                 let start = model.work_blocks.get(&a.block).map(|wb| wb.start_day);
                 if let Some(start) = start {
-                    let end_day =
-                        crate::calendar::x_to_day(world.x + PIXELS_PER_DAY * 0.5, &model.calendar);
+                    let end_day = crate::calendar::x_to_day(
+                        world.x + PIXELS_PER_DAY * 0.5,
+                        &off,
+                        &model.calendar,
+                    );
                     model.set_block_duration(a.block, (end_day - start).max(1));
                 }
             }

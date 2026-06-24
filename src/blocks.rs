@@ -1,5 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
+use chrono::NaiveDate;
+
 use bevy::prelude::*;
 use bevy_egui::{egui, EguiContexts};
 
@@ -69,15 +71,26 @@ pub fn block_extent(row: i32) -> (f32, f32) {
 /// The horizontal placement of a block bar: `(left_x, width)`, holiday-aware.
 /// The bar runs from its start day to `start + duration` working days; any
 /// greyed holiday columns it crosses widen it so both ends stay on the grid.
-pub fn block_span_x(wb: &model::WorkBlock, cal: &model::CalendarConfig) -> (f32, f32) {
-    let (l, r) = block_edges_x(wb, cal);
+/// `non_working` is the column set to lay out against (the global holidays
+/// today; br-217 will pass the global ∪ per-row off-days for resource rows).
+pub fn block_span_x(
+    wb: &model::WorkBlock,
+    non_working: &HashSet<NaiveDate>,
+    cal: &model::CalendarConfig,
+) -> (f32, f32) {
+    let (l, r) = block_edges_x(wb, non_working, cal);
     (l, r - l)
 }
 
-/// The left and right world-x edges of a block bar, holiday-aware.
-pub fn block_edges_x(wb: &model::WorkBlock, cal: &model::CalendarConfig) -> (f32, f32) {
-    let left = crate::calendar::day_to_x(wb.start_day, cal);
-    let right = crate::calendar::day_to_x(wb.start_day + wb.duration_days, cal);
+/// The left and right world-x edges of a block bar, holiday-aware, laid out
+/// against the explicit `non_working` column set.
+pub fn block_edges_x(
+    wb: &model::WorkBlock,
+    non_working: &HashSet<NaiveDate>,
+    cal: &model::CalendarConfig,
+) -> (f32, f32) {
+    let left = crate::calendar::day_to_x(wb.start_day, non_working, cal);
+    let right = crate::calendar::day_to_x(wb.start_day + wb.duration_days, non_working, cal);
     (left, right.max(left))
 }
 
@@ -255,6 +268,7 @@ pub fn reconcile_block_sprites(
     // is per-plan (freeform, not derived from sort order); the primary timeline
     // always renders the main plan, so rows come from main's block_rows.
     let main_id = model.main_plan_id();
+    let off = model.calendar.global_off_days();
     for &id in &visible_blocks.ids {
         let Some(wb) = model.work_blocks.get(&id) else {
             continue;
@@ -269,7 +283,7 @@ pub fn reconcile_block_sprites(
             }
         } else {
             // New entity: spawn parent sprite + label and dot children.
-            let (left_x, width) = block_span_x(wb, &model.calendar);
+            let (left_x, width) = block_span_x(wb, &off, &model.calendar);
             let x = left_x + width * 0.5;
             let y = -(row as f32) * ROW_HEIGHT;
 
@@ -409,11 +423,12 @@ pub fn sync_description_dots(
         .map(|(e, dot)| (dot.work_block_id, e))
         .collect();
 
+    let off = model.calendar.global_off_days();
     for (&id, &sprite_entity) in &sprite_map.entities {
         let Some(wb) = model.work_blocks.get(&id) else {
             continue;
         };
-        let (_, width) = block_span_x(wb, &model.calendar);
+        let (_, width) = block_span_x(wb, &off, &model.calendar);
         let should_have_dot = !wb.description.is_empty() && width >= 12.0;
 
         match (should_have_dot, existing_dots.get(&id)) {
@@ -457,12 +472,13 @@ pub fn sync_block_sprites(
     let min_width = 8.0 * ortho_scale;
 
     let main_id = model.main_plan_id();
+    let off = model.calendar.global_off_days();
     for (block_sprite, mut transform, mut sprite) in &mut query {
         let id = block_sprite.work_block_id;
         let Some(wb) = model.work_blocks.get(&id) else {
             continue;
         };
-        let (left_x, width) = block_span_x(wb, &model.calendar);
+        let (left_x, width) = block_span_x(wb, &off, &model.calendar);
         // Expand to min_width before computing x so the sprite is always
         // left-anchored at start_day, not centered on the model midpoint.
         let visual_width = width.max(min_width);
@@ -617,6 +633,7 @@ pub fn sync_compare_overlays(
 
     let extra_rows = assign_compare_extra_rows(&id_to_row, cmp_sched.blocks.keys().copied());
 
+    let off = model.calendar.global_off_days();
     for (&id, cmp_block) in &cmp_sched.blocks {
         let row = id_to_row
             .get(&id)
@@ -624,9 +641,10 @@ pub fn sync_compare_overlays(
             .copied()
             .unwrap_or(0);
 
-        let lx = crate::calendar::day_to_x(cmp_block.start_day, &model.calendar);
+        let lx = crate::calendar::day_to_x(cmp_block.start_day, &off, &model.calendar);
         let rx = crate::calendar::day_to_x(
             cmp_block.start_day + cmp_block.duration_days,
+            &off,
             &model.calendar,
         );
         let width = (rx - lx).max(0.0);
@@ -712,11 +730,12 @@ pub fn sync_block_labels(
     };
     let scale = ortho.scale;
 
+    let off = model.calendar.global_off_days();
     let block_width = |id: &WorkBlockId| -> f32 {
         model
             .work_blocks
             .get(id)
-            .map(|wb| block_span_x(wb, &model.calendar).1)
+            .map(|wb| block_span_x(wb, &off, &model.calendar).1)
             .unwrap_or(0.0)
     };
 
@@ -929,7 +948,8 @@ pub fn handle_canvas_create(
     // Days are cells starting at the boundary, so floor puts the block in the
     // cell you clicked (round would jump to the next cell past a cell's midpoint).
     let row = (-world_pos.y / ROW_HEIGHT).round() as i32;
-    let raw_start = crate::calendar::x_to_day(world_pos.x, &model.calendar).max(0);
+    let off = model.calendar.global_off_days();
+    let raw_start = crate::calendar::x_to_day(world_pos.x, &off, &model.calendar).max(0);
 
     let Some(plan_id) = model.main_plan_id() else {
         return;
@@ -1065,8 +1085,12 @@ pub fn handle_block_resize(
             // middle of a holiday column lands past it, not before it.
             let start = model.work_blocks.get(&id).map(|wb| wb.start_day);
             if let Some(start) = start {
-                let end_day =
-                    crate::calendar::x_to_day(world_pos.x + PIXELS_PER_DAY * 0.5, &model.calendar);
+                let off = model.calendar.global_off_days();
+                let end_day = crate::calendar::x_to_day(
+                    world_pos.x + PIXELS_PER_DAY * 0.5,
+                    &off,
+                    &model.calendar,
+                );
                 if let Some(wb) = model.work_blocks.get_mut(&id) {
                     wb.duration_days = (end_day - start).max(1);
                 }
@@ -1141,13 +1165,14 @@ pub fn handle_block_drag(
         if resize.dragging.is_some() {
             return;
         }
+        let off = model.calendar.global_off_days();
         for (block_sprite, transform, sprite) in &block_query {
             if sprite_hit(transform, sprite, world_pos) {
                 let id = block_sprite.work_block_id;
                 let start_px = model
                     .work_blocks
                     .get(&id)
-                    .map(|wb| crate::calendar::day_to_x(wb.start_day, &model.calendar))
+                    .map(|wb| crate::calendar::day_to_x(wb.start_day, &off, &model.calendar))
                     .unwrap_or(0.0);
                 let block_row = model
                     .main_plan_id()
@@ -1179,8 +1204,10 @@ pub fn handle_block_drag(
                 .and_then(|p| model.plans.get(&p))
                 .and_then(|p| p.branch_start_day)
                 .unwrap_or(0);
+            let off = model.calendar.global_off_days();
             let new_start = crate::calendar::x_to_day(
                 world_pos.x - offset_px + PIXELS_PER_DAY * 0.5,
+                &off,
                 &model.calendar,
             )
             .max(0);
@@ -1258,6 +1285,7 @@ pub fn sync_past_overlays(
     let mut desired: Vec<Overlay> = Vec::new();
 
     let main_id = model.main_plan_id();
+    let off = model.calendar.global_off_days();
     for &id in &visible_blocks.ids {
         let Some(wb) = model.work_blocks.get(&id) else {
             continue;
@@ -1266,8 +1294,8 @@ pub fn sync_past_overlays(
         if wb.start_day >= today.day || end_day <= today.day {
             continue;
         }
-        let x_left = crate::calendar::day_to_x(wb.start_day, &model.calendar);
-        let past_width = crate::calendar::day_to_x(today.day, &model.calendar) - x_left;
+        let x_left = crate::calendar::day_to_x(wb.start_day, &off, &model.calendar);
+        let past_width = crate::calendar::day_to_x(today.day, &off, &model.calendar) - x_left;
         let y = -(main_id.map(|m| model.block_row(m, id)).unwrap_or(0) as f32) * ROW_HEIGHT;
         desired.push(Overlay {
             key: PastPortionOverlay(id),
@@ -1391,12 +1419,13 @@ pub fn draw_dependency_edges(
     cam_proj: Query<&Projection, With<Camera2d>>,
 ) {
     let main_id = model.main_plan_id();
+    let off = model.calendar.global_off_days();
     let geom: HashMap<WorkBlockId, BlockGeom> = visible_blocks
         .ids
         .iter()
         .filter_map(|&id| {
             let wb = model.work_blocks.get(&id)?;
-            let (xl, xr) = block_edges_x(wb, &model.calendar);
+            let (xl, xr) = block_edges_x(wb, &off, &model.calendar);
             Some((
                 wb.id,
                 BlockGeom {
@@ -1515,9 +1544,10 @@ fn dep_endpoints(model: &model::Model, dep: &model::Dependency) -> Option<(Vec2,
     if pred.duration_days <= 0 || succ.duration_days <= 0 {
         return None;
     }
-    let (p_xl, p_xr) = block_edges_x(pred, &model.calendar);
+    let off = model.calendar.global_off_days();
+    let (p_xl, p_xr) = block_edges_x(pred, &off, &model.calendar);
     let p_y = -(model.block_row(dep.plan_id, dep.predecessor) as f32) * ROW_HEIGHT;
-    let (s_xl, s_xr) = block_edges_x(succ, &model.calendar);
+    let (s_xl, s_xr) = block_edges_x(succ, &off, &model.calendar);
     let s_y = -(model.block_row(dep.plan_id, dep.successor) as f32) * ROW_HEIGHT;
     Some(dep_draw_endpoints(
         dep.dependency_type,
@@ -1602,6 +1632,7 @@ pub fn draw_block_handles(
     let dot_hi = Color::srgba(0.80, 0.86, 0.98, 0.95);
 
     let main_id = model.main_plan_id();
+    let off = model.calendar.global_off_days();
     for &id in &visible_blocks.ids {
         let Some(wb) = model.work_blocks.get(&id) else {
             continue;
@@ -1610,7 +1641,7 @@ pub fn draw_block_handles(
             continue;
         }
         let y = -(main_id.map(|m| model.block_row(m, id)).unwrap_or(0) as f32) * ROW_HEIGHT;
-        let (xl, xr) = block_edges_x(wb, &model.calendar);
+        let (xl, xr) = block_edges_x(wb, &off, &model.calendar);
         let half_h = BLOCK_HEIGHT * 0.5;
 
         let is_source = drag.from == Some(wb.id);
@@ -2350,7 +2381,8 @@ mod tests {
         // clicking squarely inside a day resolves to that day (no holiday).
         use crate::model::CalendarConfig;
         let cal = CalendarConfig::default();
-        let snap = |x: f32| crate::calendar::x_to_day(x + PIXELS_PER_DAY * 0.5, &cal);
+        let off = cal.global_off_days();
+        let snap = |x: f32| crate::calendar::x_to_day(x + PIXELS_PER_DAY * 0.5, &off, &cal);
         // Clicking in the middle of day 3's column → day 3.
         assert_eq!(snap(3.0 * PIXELS_PER_DAY + PIXELS_PER_DAY * 0.5), 4);
         // Clicking at the start of day 0's column → day 0.
@@ -2413,7 +2445,7 @@ mod tests {
         wb.start_day = 0;
         wb.duration_days = 5;
         let cal = CalendarConfig::default(); // no holidays
-        let (left, right) = block_edges_x(wb, &cal);
+        let (left, right) = block_edges_x(wb, &cal.global_off_days(), &cal);
         assert!((left - 0.0).abs() < 0.001, "left at day 0");
         assert!(
             (right - 5.0 * PIXELS_PER_DAY).abs() < 0.001,
@@ -2430,8 +2462,9 @@ mod tests {
         wb.start_day = 2;
         wb.duration_days = 3;
         let cal = CalendarConfig::default();
-        let (left, width) = block_span_x(wb, &cal);
-        let (l2, r2) = block_edges_x(wb, &cal);
+        let off = cal.global_off_days();
+        let (left, width) = block_span_x(wb, &off, &cal);
+        let (l2, r2) = block_edges_x(wb, &off, &cal);
         assert!((left - l2).abs() < 0.001);
         assert!((width - (r2 - l2)).abs() < 0.001);
     }
@@ -2452,10 +2485,10 @@ mod tests {
         wb.start_day = 1;
         wb.duration_days = 3; // ends at day 4
 
-        let (left_h, right_h) = block_edges_x(wb, &cal);
+        let (left_h, right_h) = block_edges_x(wb, &cal.global_off_days(), &cal);
 
         let cal_no_hol = CalendarConfig::default();
-        let (left_n, right_n) = block_edges_x(wb, &cal_no_hol);
+        let (left_n, right_n) = block_edges_x(wb, &cal_no_hol.global_off_days(), &cal_no_hol);
 
         // Left edge is before the holiday column so it stays the same.
         assert!((left_h - left_n).abs() < 0.001, "left unchanged");
@@ -2482,8 +2515,9 @@ mod tests {
         wb.start_day = 4; // starts after the holiday column (boundary is at 3)
         wb.duration_days = 2;
 
-        let (left_h, right_h) = block_edges_x(wb, &cal);
-        let (left_n, right_n) = block_edges_x(wb, &CalendarConfig::default());
+        let (left_h, right_h) = block_edges_x(wb, &cal.global_off_days(), &cal);
+        let no_hol = CalendarConfig::default();
+        let (left_n, right_n) = block_edges_x(wb, &no_hol.global_off_days(), &no_hol);
 
         assert!(
             (left_h - left_n - PIXELS_PER_DAY).abs() < 0.001,
