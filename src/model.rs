@@ -471,6 +471,11 @@ impl Model {
     /// The vertical lane `block` occupies within `plan`. Defaults to `0` when
     /// the plan has no recorded lane for the block (e.g. a block that was never
     /// placed). This is the single source of truth for a block's row.
+    ///
+    /// The 0-default is safe in practice: every caller queries blocks that are
+    /// members of the given plan and have been explicitly placed (or inherited a
+    /// row at fork). A block that has never been assigned a row genuinely belongs
+    /// at row 0 (the top of the grid).
     pub fn block_row(&self, plan: PlanId, block: WorkBlockId) -> i32 {
         self.plans
             .get(&plan)

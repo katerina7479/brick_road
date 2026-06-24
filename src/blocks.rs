@@ -499,16 +499,28 @@ pub fn sync_compare_overlays(
         .collect();
 
     let max_row = id_to_row.values().copied().max().unwrap_or(0);
-    let mut next_extra_row = max_row + 1;
+
+    // Pre-sort compare-only block IDs by their raw u64 so extra-row assignments
+    // are deterministic frame-to-frame (HashMap iteration order is not stable).
+    let mut extra_ids: Vec<WorkBlockId> = cmp_sched
+        .blocks
+        .keys()
+        .filter(|id| !id_to_row.contains_key(*id))
+        .copied()
+        .collect();
+    extra_ids.sort_by_key(|id| id.0);
+    let extra_rows: HashMap<WorkBlockId, i32> = extra_ids
+        .into_iter()
+        .enumerate()
+        .map(|(i, id)| (id, max_row + 1 + i as i32))
+        .collect();
 
     for (&id, cmp_block) in &cmp_sched.blocks {
-        let row = if let Some(&r) = id_to_row.get(&id) {
-            r
-        } else {
-            let r = next_extra_row;
-            next_extra_row += 1;
-            r
-        };
+        let row = id_to_row
+            .get(&id)
+            .or_else(|| extra_rows.get(&id))
+            .copied()
+            .unwrap_or(max_row + 1);
 
         let lx = crate::calendar::day_to_x(cmp_block.start_day, &model.calendar);
         let rx = crate::calendar::day_to_x(
@@ -982,8 +994,11 @@ pub fn handle_block_resize(
                 resize.dragging = None;
                 return;
             }
-            // End the block at the working day nearest the cursor (holiday
-            // columns it spans don't count toward duration).
+            // End the block at the working day nearest the cursor.
+            // `x_to_day` resolves any greyed holiday column to the adjacent
+            // working day. The `+0.5 * PPD` offset snaps to the *nearest*
+            // boundary rather than always flooring, so dragging into the
+            // middle of a holiday column lands past it, not before it.
             let start = model.work_blocks.get(&id).map(|wb| wb.start_day);
             if let Some(start) = start {
                 let end_day =

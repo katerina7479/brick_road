@@ -301,6 +301,10 @@ pub fn cascade_dependencies(model: &mut Model, root: WorkBlockId) {
             }
         }
     }
+    // Nodes remaining in `in_deg` with count > 0 are in a cycle. Cascade
+    // intentionally skips them: it is a push-only constraint propagator that
+    // must not panic (it fires on every drag). Cycles are surfaced separately
+    // by `forward_pass`, which returns `CycleError`.
 
     // Main blocks are "rocks in the stream": a branch's dependencies never move
     // them — only main's own deps may. So a main block is pushed by its

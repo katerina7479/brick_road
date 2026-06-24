@@ -1137,6 +1137,9 @@ CREATE TABLE IF NOT EXISTS work_blocks (
     color_r              REAL,
     color_g              REAL,
     color_b              REAL,
+    description          TEXT    NOT NULL DEFAULT '',
+    priority             INTEGER NOT NULL DEFAULT 1,
+    t_shirt_size         TEXT,
     parent_id            INTEGER,
     rollup               INTEGER NOT NULL DEFAULT 0
 );
