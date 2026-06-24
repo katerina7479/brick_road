@@ -94,6 +94,43 @@ pub fn block_edges_x(
     (left, right.max(left))
 }
 
+/// Builds the per-row off-day sets for the main plan's top-level rows.
+///
+/// Returns `(global_offs, row_offs)` where `row_offs` maps row index →
+/// `global ∪ resource off-days` for every named resource row that has its own
+/// non-working dates. Rows without a resource (or with none extra) are absent;
+/// callers fall back to `global_offs` for those rows.
+pub fn compute_row_offs(
+    model: &model::Model,
+) -> (HashSet<NaiveDate>, HashMap<i32, HashSet<NaiveDate>>) {
+    let global = model.calendar.global_off_days();
+    let mut row_offs: HashMap<i32, HashSet<NaiveDate>> = HashMap::new();
+    let Some(main_id) = model.main_plan_id() else {
+        return (global, row_offs);
+    };
+    let Some(plan) = model.plans.get(&main_id) else {
+        return (global, row_offs);
+    };
+    let Some(names) = plan.row_names.get(&None) else {
+        return (global, row_offs);
+    };
+    for (idx, name) in names.iter().enumerate() {
+        if name.is_empty() {
+            continue;
+        }
+        let Some(rb) = model.resource_by_name(name) else {
+            continue;
+        };
+        if rb.non_working_dates.is_empty() {
+            continue;
+        }
+        let mut offs = global.clone();
+        offs.extend(rb.non_working_dates.iter().map(|nwd| nwd.date));
+        row_offs.insert(idx as i32, offs);
+    }
+    (global, row_offs)
+}
+
 /// The fill color a work block renders with: its explicit `color` if set,
 /// otherwise the palette default for its lane (`row`) within the plan being
 /// rendered. Shared so ghosts in branch swimlanes can outline in exactly the
@@ -268,7 +305,7 @@ pub fn reconcile_block_sprites(
     // is per-plan (freeform, not derived from sort order); the primary timeline
     // always renders the main plan, so rows come from main's block_rows.
     let main_id = model.main_plan_id();
-    let off = model.calendar.global_off_days();
+    let (global_offs, row_offs) = compute_row_offs(&model);
     for &id in &visible_blocks.ids {
         let Some(wb) = model.work_blocks.get(&id) else {
             continue;
@@ -283,7 +320,8 @@ pub fn reconcile_block_sprites(
             }
         } else {
             // New entity: spawn parent sprite + label and dot children.
-            let (left_x, width) = block_span_x(wb, &off, &model.calendar);
+            let off = row_offs.get(&row).unwrap_or(&global_offs);
+            let (left_x, width) = block_span_x(wb, off, &model.calendar);
             let x = left_x + width * 0.5;
             let y = -(row as f32) * ROW_HEIGHT;
 
@@ -472,22 +510,23 @@ pub fn sync_block_sprites(
     let min_width = 8.0 * ortho_scale;
 
     let main_id = model.main_plan_id();
-    let off = model.calendar.global_off_days();
+    let (global_offs, row_offs) = compute_row_offs(&model);
     for (block_sprite, mut transform, mut sprite) in &mut query {
         let id = block_sprite.work_block_id;
         let Some(wb) = model.work_blocks.get(&id) else {
             continue;
         };
-        let (left_x, width) = block_span_x(wb, &off, &model.calendar);
-        // Expand to min_width before computing x so the sprite is always
-        // left-anchored at start_day, not centered on the model midpoint.
-        let visual_width = width.max(min_width);
-        let x = left_x + visual_width * 0.5;
         // Read the live model row (not the cached BlockSprite.row, which only
         // refreshes when the visible set changes) so vertical drags track the
         // cursor immediately — same as start_day does for x. The primary timeline
         // renders the main plan, so the lane comes from main's block_rows.
         let row = main_id.map(|m| model.block_row(m, id)).unwrap_or(0);
+        let off = row_offs.get(&row).unwrap_or(&global_offs);
+        let (left_x, width) = block_span_x(wb, off, &model.calendar);
+        // Expand to min_width before computing x so the sprite is always
+        // left-anchored at start_day, not centered on the model midpoint.
+        let visual_width = width.max(min_width);
+        let x = left_x + visual_width * 0.5;
         let (y, height) = block_extent(row);
         transform.translation.x = x;
         transform.translation.y = y;
@@ -2880,6 +2919,64 @@ mod tests {
         let mut wb = make_block_with_color(Some([1.0, 0.0, 0.0]));
         wb.color = None;
         assert_eq!(block_color(&wb, 1), PALETTE[1]);
+    }
+
+    // ── compute_row_offs ──────────────────────────────────────────────────────
+
+    #[test]
+    fn compute_row_offs_empty_model_returns_global_only() {
+        let m = Model::default();
+        let (global, row_offs) = compute_row_offs(&m);
+        assert!(row_offs.is_empty());
+        assert_eq!(global, m.calendar.global_off_days());
+    }
+
+    #[test]
+    fn compute_row_offs_resource_with_no_off_days_excluded() {
+        use crate::model::ResourceType;
+        let mut m = Model::default();
+        let pid = m.create_plan("main", None);
+        m.plans
+            .get_mut(&pid)
+            .unwrap()
+            .set_row_name(None, 0, "Alice".to_string());
+        m.create_resource_block("Alice", ResourceType::Engineer);
+        // Resource exists but non_working_dates is empty → not in row_offs.
+        let (_, row_offs) = compute_row_offs(&m);
+        assert!(row_offs.is_empty());
+    }
+
+    #[test]
+    fn compute_row_offs_resource_off_day_included_in_row() {
+        use crate::model::{NonWorkingDate, ResourceType};
+        use chrono::NaiveDate;
+        let mut m = Model::default();
+        let pid = m.create_plan("main", None);
+        m.plans
+            .get_mut(&pid)
+            .unwrap()
+            .set_row_name(None, 2, "Bob".to_string());
+        let rb_id = m.create_resource_block("Bob", ResourceType::Engineer);
+        let pto = NaiveDate::from_ymd_opt(2025, 7, 4).unwrap();
+        m.resource_blocks
+            .get_mut(&rb_id)
+            .unwrap()
+            .non_working_dates
+            .push(NonWorkingDate {
+                date: pto,
+                description: "PTO".to_string(),
+            });
+
+        let (global, row_offs) = compute_row_offs(&m);
+        // Row 2 should have the resource's date in its off-day set.
+        assert!(!row_offs.contains_key(&0));
+        assert!(!row_offs.contains_key(&1));
+        let row2_offs = row_offs.get(&2).expect("row 2 should be in row_offs");
+        assert!(row2_offs.contains(&pto));
+        // Global holidays are also present (unioned).
+        for d in &global {
+            assert!(row2_offs.contains(d));
+        }
     }
 }
 
