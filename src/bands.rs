@@ -940,7 +940,11 @@ pub fn handle_lane_block_edit(
                 let day = crate::calendar::x_to_day(left_x + PIXELS_PER_DAY * 0.5, &model.calendar)
                     .max(band.fork_day);
                 let row = ((band.row0_y - world.y) / ROW_HEIGHT).round().max(0.0) as i32;
-                model.set_block_placement(a.plan, a.block, day, row);
+                let cur_start = model.work_blocks.get(&a.block).map(|wb| wb.start_day);
+                let cur_row = model.block_row(a.plan, a.block);
+                if cur_start != Some(day) || cur_row != row {
+                    model.set_block_placement(a.plan, a.block, day, row);
+                }
             }
             LaneDragMode::Resize => {
                 let start = model.work_blocks.get(&a.block).map(|wb| wb.start_day);
