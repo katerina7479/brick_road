@@ -8,88 +8,7 @@ use crate::model::{
 
 pub fn create_tables(conn: &Connection) -> Result<()> {
     conn.execute_batch("PRAGMA foreign_keys = ON;")?;
-    // Rename plan_root_blocks → plan_blocks on pre-existing DBs *before* the
-    // fresh CREATE TABLEs run, so the legacy rows carry over. On a fresh DB (no
-    // plan_root_blocks) or an already-renamed DB (plan_blocks present) this
-    // fails harmlessly and is swallowed below.
-    match conn.execute_batch("ALTER TABLE plan_root_blocks RENAME TO plan_blocks") {
-        Ok(()) => {}
-        Err(e)
-            if e.to_string().contains("no such table")
-                || e.to_string().contains("already exists") => {}
-        Err(e) => return Err(e),
-    }
     conn.execute_batch(CREATE_TABLES_SQL)?;
-    // SQLite has no ADD COLUMN IF NOT EXISTS. Run each migration and ignore
-    // the "duplicate column name" error that fires when it already exists.
-    for sql in [
-        "ALTER TABLE work_blocks ADD COLUMN start_day INTEGER NOT NULL DEFAULT 0",
-        "ALTER TABLE work_blocks ADD COLUMN duration_days INTEGER NOT NULL DEFAULT 0",
-        "ALTER TABLE work_blocks ADD COLUMN color_r REAL",
-        "ALTER TABLE work_blocks ADD COLUMN color_g REAL",
-        "ALTER TABLE work_blocks ADD COLUMN color_b REAL",
-        "ALTER TABLE work_blocks ADD COLUMN description TEXT NOT NULL DEFAULT ''",
-        "ALTER TABLE work_blocks ADD COLUMN priority INTEGER NOT NULL DEFAULT 1",
-        "ALTER TABLE work_blocks ADD COLUMN t_shirt_size TEXT",
-        "ALTER TABLE work_blocks ADD COLUMN parent_id INTEGER",
-        "ALTER TABLE work_blocks ADD COLUMN rollup INTEGER NOT NULL DEFAULT 0",
-        "ALTER TABLE plans ADD COLUMN branch_start_day INTEGER",
-        "ALTER TABLE plans ADD COLUMN row_names TEXT NOT NULL DEFAULT ''",
-        "ALTER TABLE dependencies ADD COLUMN plan_id INTEGER",
-        // The block lane is per-plan: each plan owns each block's row,
-        // serialized into this cell (mirrors row_names).
-        "ALTER TABLE plans ADD COLUMN block_rows TEXT NOT NULL DEFAULT ''",
-        // Resource allocations were removed (vestigial: no UI created them and no
-        // running system read them). Drop the table on pre-existing DBs.
-        "DROP TABLE IF EXISTS resource_allocations",
-    ] {
-        match conn.execute_batch(sql) {
-            Ok(()) => {}
-            Err(e) if e.to_string().contains("duplicate column name") => {}
-            Err(e) => return Err(e),
-        }
-    }
-    // Drop columns left over from removed features on pre-existing DBs. These
-    // were NOT NULL with no default, so the current inserts (which no longer
-    // mention them) would fail a NOT NULL constraint on the first save — this is
-    // a correctness fix, not just tidiness. Already-gone columns (fresh or
-    // already-migrated DB) report "no such column" and are swallowed.
-    for sql in [
-        "ALTER TABLE plans DROP COLUMN world_id",
-        "ALTER TABLE plans DROP COLUMN parent_plan_id",
-        "ALTER TABLE plans DROP COLUMN selected_variants",
-        "ALTER TABLE resource_blocks DROP COLUMN world_id",
-        "ALTER TABLE work_blocks DROP COLUMN estimate_most_likely",
-        "ALTER TABLE work_blocks DROP COLUMN estimate_optimistic",
-        "ALTER TABLE work_blocks DROP COLUMN estimate_pessimistic",
-        "ALTER TABLE work_blocks DROP COLUMN estimate_confidence",
-        "ALTER TABLE work_blocks DROP COLUMN row_span",
-        "ALTER TABLE dependencies DROP COLUMN lag_days",
-    ] {
-        match conn.execute_batch(sql) {
-            Ok(()) => {}
-            Err(e)
-                if e.to_string().contains("no such column")
-                    || e.to_string().contains("cannot drop") => {}
-            Err(e) => return Err(e),
-        }
-    }
-    // Drop whole tables for removed features so a migrated DB matches a fresh
-    // one. IF EXISTS makes these idempotent. The world_id foreign keys that
-    // referenced `worlds` were dropped with the columns above.
-    conn.execute_batch(
-        "DROP TABLE IF EXISTS worlds;
-         DROP TABLE IF EXISTS milestones;
-         DROP TABLE IF EXISTS plan_milestone_targets;
-         DROP TABLE IF EXISTS plan_variant_selections;
-         DROP TABLE IF EXISTS plan_removed_inherited;
-         DROP TABLE IF EXISTS estimate_snapshots;
-         DROP TABLE IF EXISTS confidence_factors;
-         DROP TABLE IF EXISTS variants;
-         DROP TABLE IF EXISTS variant_children;
-         DROP TABLE IF EXISTS variant_block_positions;
-         DROP TABLE IF EXISTS availability_segments;",
-    )?;
     // Seed default t-shirt sizes on first use (table created above).
     let count: i64 = conn.query_row("SELECT COUNT(*) FROM t_shirt_sizes", [], |r| r.get(0))?;
     if count == 0 {
@@ -946,36 +865,6 @@ mod tests {
     }
 
     #[test]
-    fn migration_renames_plan_root_blocks_to_plan_blocks() {
-        // Simulate upgrading a DB that still has the legacy plan_root_blocks
-        // table with data, and verify create_tables migrates the rows into
-        // plan_blocks so they load.
-        let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch("PRAGMA foreign_keys = OFF;").unwrap();
-        conn.execute_batch(
-            "CREATE TABLE plans (id INTEGER PRIMARY KEY, name TEXT NOT NULL, world_id INTEGER);
-             CREATE TABLE work_blocks (id INTEGER PRIMARY KEY, name TEXT NOT NULL);
-             CREATE TABLE plan_root_blocks (
-                 plan_id INTEGER NOT NULL,
-                 work_block_id INTEGER NOT NULL,
-                 sort_order INTEGER NOT NULL,
-                 PRIMARY KEY (plan_id, sort_order)
-             );
-             INSERT INTO plans (id, name, world_id) VALUES (1, 'legacy plan', 0);
-             INSERT INTO work_blocks (id, name) VALUES (5, 'legacy block');
-             INSERT INTO plan_root_blocks (plan_id, work_block_id, sort_order)
-                 VALUES (1, 5, 0);",
-        )
-        .unwrap();
-
-        create_tables(&conn).unwrap();
-
-        let model = load_model(&conn).unwrap();
-        let plan = model.plans.get(&PlanId(1)).expect("legacy plan loaded");
-        assert_eq!(plan.root_blocks, vec![WorkBlockId(5)]);
-    }
-
-    #[test]
     fn validate_accepts_valid_model() {
         let mut m = Model::default();
         m.create_resource_block("Alice", ResourceType::Engineer);
@@ -1155,6 +1044,8 @@ CREATE TABLE IF NOT EXISTS dependencies (
 CREATE TABLE IF NOT EXISTS plans (
     id                INTEGER PRIMARY KEY,
     name              TEXT    NOT NULL,
+    branch_start_day  INTEGER,
+    row_names         TEXT    NOT NULL DEFAULT '',
     block_rows        TEXT    NOT NULL DEFAULT ''
 );
 
