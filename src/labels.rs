@@ -53,6 +53,7 @@ pub struct DayLabel;
 /// One entry produced by [`compute_day_labels`]: a day, its world-x, its text,
 /// and an alpha (past days are dimmed to 0.3; future/today stay at 0.75).
 pub(crate) struct DayLabelEntry {
+    #[allow(dead_code)]
     pub day: crate::model::Day,
     pub x: f32,
     pub label: String,
@@ -126,7 +127,12 @@ pub fn spawn_day_labels(
         commands.entity(e).despawn();
     }
 
-    for entry in compute_day_labels(&model.calendar, schedule.total_duration_days, scale, today.day) {
+    for entry in compute_day_labels(
+        &model.calendar,
+        schedule.total_duration_days,
+        scale,
+        today.day,
+    ) {
         commands.spawn((
             DayLabel,
             Text2d::new(entry.label),
@@ -473,13 +479,16 @@ mod tests {
 
         let cfg_no_hol = mon_config();
 
-        let entries_hol = compute_day_labels(&cfg, 10, 0.5, 100);     // step=5
+        let entries_hol = compute_day_labels(&cfg, 10, 0.5, 100); // step=5
         let entries_plain = compute_day_labels(&cfg_no_hol, 10, 0.5, 100);
 
         // Day 0 is before the holiday column (boundary is at day 3); same x.
         let x0_hol = entries_hol.iter().find(|e| e.day == 0).unwrap().x;
         let x0_plain = entries_plain.iter().find(|e| e.day == 0).unwrap().x;
-        assert!((x0_hol - x0_plain).abs() < 0.001, "day 0 unaffected by holiday");
+        assert!(
+            (x0_hol - x0_plain).abs() < 0.001,
+            "day 0 unaffected by holiday"
+        );
 
         // Day 5 is after the holiday column; shifted right by PIXELS_PER_DAY.
         use crate::constants::PIXELS_PER_DAY;

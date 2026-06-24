@@ -132,7 +132,10 @@ fn main() {
                 .run_if(at_plan_level)
                 .before(blocks::handle_block_selection),
         )
-        .add_systems(Update, handle_branch_delete.after(blocks::handle_block_drill))
+        .add_systems(
+            Update,
+            handle_branch_delete.after(blocks::handle_block_drill),
+        )
         .add_systems(Update, schedule::update_today_marker)
         .add_systems(Update, sync_total_duration)
         .add_systems(Update, sync_weekend_bands.after(sync_total_duration))
@@ -236,10 +239,7 @@ fn main() {
         )
         .add_systems(EguiPrimaryContextPass, top_bar_ui)
         .add_systems(EguiPrimaryContextPass, calendar_ruler_ui.after(top_bar_ui))
-        .add_systems(
-            EguiPrimaryContextPass,
-            settings_flyout_ui.after(top_bar_ui),
-        )
+        .add_systems(EguiPrimaryContextPass, settings_flyout_ui.after(top_bar_ui))
         .add_systems(
             EguiPrimaryContextPass,
             resource_gutter_ui.after(calendar_ruler_ui),
@@ -250,7 +250,10 @@ fn main() {
         .add_systems(EguiPrimaryContextPass, blocks::draw_size_picker_popup)
         .add_systems(EguiPrimaryContextPass, blocks::draw_size_settings_popup)
         .add_systems(EguiPrimaryContextPass, bands::draw_plan_rename_overlay)
-        .add_systems(EguiPrimaryContextPass, bands::draw_lane_block_rename_overlay)
+        .add_systems(
+            EguiPrimaryContextPass,
+            bands::draw_lane_block_rename_overlay,
+        )
         .run();
 }
 
@@ -327,8 +330,12 @@ fn draw_parent_bounds(
     let Some(wb) = drill.current().and_then(|id| model.work_blocks.get(&id)) else {
         return;
     };
-    let Ok((cam_t, proj)) = cam_q.single() else { return };
-    let Projection::Orthographic(ortho) = proj else { return };
+    let Ok((cam_t, proj)) = cam_q.single() else {
+        return;
+    };
+    let Projection::Orthographic(ortho) = proj else {
+        return;
+    };
     let Ok(window) = windows.single() else { return };
     let half_h = (window.height() * 0.5 * ortho.scale).max(800.0);
     let y_top = cam_t.translation.y + half_h;
@@ -728,6 +735,7 @@ fn setup_demo_schedule(mut model: ResMut<model::Model>, mut commands: Commands) 
 
 /// Tracks mouse position over the timeline and updates `ForkHoverState`.
 /// On left-click, creates a new plan that branches from the hovered day.
+#[allow(clippy::too_many_arguments)]
 fn handle_fork_hover(
     mut fork: ResMut<ForkHoverState>,
     mut model: ResMut<model::Model>,
@@ -977,7 +985,14 @@ fn calendar_ruler_ui(
                 for q in 0..4 {
                     let qs = quarter_start_x(y, q, config);
                     let qe = quarter_start_x(y, q + 1, config);
-                    period(qs, qe, &format!("Q{} '{:02}", q + 1, y % 100), quarter_y, 11.0, quarter_color);
+                    period(
+                        qs,
+                        qe,
+                        &format!("Q{} '{:02}", q + 1, y % 100),
+                        quarter_y,
+                        11.0,
+                        quarter_color,
+                    );
                 }
             }
 
@@ -989,11 +1004,21 @@ fn calendar_ruler_ui(
                     let ws = wi * wdpw;
                     let date = calendar::day_to_date(ws, config);
                     let label = format!("{} {}", date.format("%b"), date.day());
-                    period(day_x(ws), day_x(ws + wdpw), &label, week_y, 10.5, week_color);
+                    period(
+                        day_x(ws),
+                        day_x(ws + wdpw),
+                        &label,
+                        week_y,
+                        10.5,
+                        week_color,
+                    );
                     // Week boundary tick.
                     let sx = world_to_screen_x(day_x(ws));
                     painter.line_segment(
-                        [egui::Pos2::new(sx, week_y - 5.0), egui::Pos2::new(sx, rect.bottom())],
+                        [
+                            egui::Pos2::new(sx, week_y - 5.0),
+                            egui::Pos2::new(sx, rect.bottom()),
+                        ],
                         egui::Stroke::new(1.0, egui::Color32::from_rgb(70, 74, 92)),
                     );
                 }
@@ -1005,7 +1030,10 @@ fn calendar_ruler_ui(
                 for d in day_min..=day_max {
                     let bx = world_to_screen_x(day_x(d));
                     painter.line_segment(
-                        [egui::Pos2::new(bx, day_y - 6.0), egui::Pos2::new(bx, rect.bottom())],
+                        [
+                            egui::Pos2::new(bx, day_y - 6.0),
+                            egui::Pos2::new(bx, rect.bottom()),
+                        ],
                         tick,
                     );
                     let cx = world_to_screen_x(day_x(d) + PIXELS_PER_DAY * 0.5);
@@ -1148,7 +1176,13 @@ fn resource_gutter_ui(
                 .collect();
             rows.sort_unstable();
             for r in rows {
-                entries.push(resolve(&model, band.plan_id, None, r, band.row0_y - r as f32 * rh));
+                entries.push(resolve(
+                    &model,
+                    band.plan_id,
+                    None,
+                    r,
+                    band.row0_y - r as f32 * rh,
+                ));
             }
         }
     }
@@ -1303,7 +1337,11 @@ fn resource_gutter_ui(
                                                 if let Some(k) = resource_kinds[i] {
                                                     let (_, dot_rect) =
                                                         ui.allocate_space(egui::vec2(10.0, 16.0));
-                                                    draw_resource_dot(ui.painter(), dot_rect.center(), k);
+                                                    draw_resource_dot(
+                                                        ui.painter(),
+                                                        dot_rect.center(),
+                                                        k,
+                                                    );
                                                 } else {
                                                     ui.allocate_space(egui::vec2(10.0, 16.0));
                                                 }
@@ -1351,7 +1389,9 @@ fn resource_gutter_ui(
                                             let clear_btn = ui.add(
                                                 egui::Label::new(
                                                     egui::RichText::new("Clear")
-                                                        .color(egui::Color32::from_rgb(180, 120, 100))
+                                                        .color(egui::Color32::from_rgb(
+                                                            180, 120, 100,
+                                                        ))
                                                         .size(12.0),
                                                 )
                                                 .selectable(false)
@@ -1370,7 +1410,8 @@ fn resource_gutter_ui(
                             });
                         if ui.ctx().input(|i| i.pointer.any_pressed())
                             && !area_resp.response.rect.contains(
-                                ui.ctx().input(|i| i.pointer.interact_pos().unwrap_or_default()),
+                                ui.ctx()
+                                    .input(|i| i.pointer.interact_pos().unwrap_or_default()),
                             )
                             && act.is_none()
                         {
@@ -1451,12 +1492,11 @@ fn commit_row_name(
     };
 
     if let Some(target) = merge_target {
-        let move_ids: Vec<model::WorkBlockId> =
-            schedule::visible_blocks(model, plan_id, scope)
-                .iter()
-                .filter(|wb| model.block_row(plan_id, wb.id) == row)
-                .map(|wb| wb.id)
-                .collect();
+        let move_ids: Vec<model::WorkBlockId> = schedule::visible_blocks(model, plan_id, scope)
+            .iter()
+            .filter(|wb| model.block_row(plan_id, wb.id) == row)
+            .map(|wb| wb.id)
+            .collect();
         for id in move_ids {
             model.set_block_row(plan_id, id, target);
         }
@@ -1481,11 +1521,11 @@ fn default_row_label(row: i32) -> String {
 /// The accent colour marking a resource's type in the gutter and settings.
 fn resource_type_rgb(kind: model::ResourceType) -> (u8, u8, u8) {
     match kind {
-        model::ResourceType::Engineer => (98, 154, 224),   // blue
-        model::ResourceType::NewHire => (140, 200, 230),   // light cyan
-        model::ResourceType::Team => (120, 196, 140),      // green
-        model::ResourceType::Equipment => (224, 176, 92),  // amber
-        model::ResourceType::Budget => (180, 150, 222),    // violet
+        model::ResourceType::Engineer => (98, 154, 224), // blue
+        model::ResourceType::NewHire => (140, 200, 230), // light cyan
+        model::ResourceType::Team => (120, 196, 140),    // green
+        model::ResourceType::Equipment => (224, 176, 92), // amber
+        model::ResourceType::Budget => (180, 150, 222),  // violet
     }
 }
 
@@ -1498,17 +1538,19 @@ fn draw_resource_dot(painter: &egui::Painter, pos: egui::Pos2, kind: model::Reso
 /// World-space x of the start of calendar year `y` (its Jan 1, mapped to a
 /// working day). Used for the year tier of the calendar ruler.
 fn year_start_x(y: i32, config: &model::CalendarConfig) -> f32 {
-    let date = chrono::NaiveDate::from_ymd_opt(y, 1, 1)
-        .unwrap_or_else(|| config.start_date);
+    let date = chrono::NaiveDate::from_ymd_opt(y, 1, 1).unwrap_or(config.start_date);
     calendar::day_to_x(calendar::date_to_day(date, config), config)
 }
 
 /// World-space x of the start of quarter `q` (0..=4, where 4 = next year's Q1)
 /// in calendar year `y`.
 fn quarter_start_x(y: i32, q: i32, config: &model::CalendarConfig) -> f32 {
-    let (yy, month) = if q >= 4 { (y + 1, 1) } else { (y, (q * 3 + 1) as u32) };
-    let date = chrono::NaiveDate::from_ymd_opt(yy, month, 1)
-        .unwrap_or_else(|| config.start_date);
+    let (yy, month) = if q >= 4 {
+        (y + 1, 1)
+    } else {
+        (y, (q * 3 + 1) as u32)
+    };
+    let date = chrono::NaiveDate::from_ymd_opt(yy, month, 1).unwrap_or(config.start_date);
     calendar::day_to_x(calendar::date_to_day(date, config), config)
 }
 
@@ -1541,7 +1583,10 @@ fn tool_button(ui: &mut egui::Ui, label: &str, active: bool) -> egui::Response {
     if active {
         btn = btn
             .fill(egui::Color32::from_rgb(64, 46, 18))
-            .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(250, 165, 40)));
+            .stroke(egui::Stroke::new(
+                1.0,
+                egui::Color32::from_rgb(250, 165, 40),
+            ));
     }
     ui.add(btn)
 }
@@ -1628,10 +1673,9 @@ fn settings_flyout_ui(
                 let submit = ui.button("Set").clicked()
                     || (resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)));
                 if submit {
-                    if let Ok(d) = chrono::NaiveDate::parse_from_str(
-                        settings.start_input.trim(),
-                        "%Y-%m-%d",
-                    ) {
+                    if let Ok(d) =
+                        chrono::NaiveDate::parse_from_str(settings.start_input.trim(), "%Y-%m-%d")
+                    {
                         model.calendar.start_date = d;
                         settings.start_input.clear();
                         changed = true;
@@ -1667,9 +1711,10 @@ fn settings_flyout_ui(
                     );
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui
-                            .small_button(egui::RichText::new("✕").color(
-                                egui::Color32::from_rgb(210, 130, 124),
-                            ))
+                            .small_button(
+                                egui::RichText::new("✕")
+                                    .color(egui::Color32::from_rgb(210, 130, 124)),
+                            )
                             .clicked()
                         {
                             remove = Some(*d);
@@ -1692,10 +1737,9 @@ fn settings_flyout_ui(
                 let submit = ui.button("Add").clicked()
                     || (resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)));
                 if submit {
-                    if let Ok(d) = chrono::NaiveDate::parse_from_str(
-                        settings.holiday_input.trim(),
-                        "%Y-%m-%d",
-                    ) {
+                    if let Ok(d) =
+                        chrono::NaiveDate::parse_from_str(settings.holiday_input.trim(), "%Y-%m-%d")
+                    {
                         if !model.calendar.non_working_dates.contains(&d) {
                             model.calendar.non_working_dates.push(d);
                             changed = true;
@@ -1731,8 +1775,7 @@ fn settings_flyout_ui(
                         draw_resource_dot(ui.painter(), dot.center(), k);
                     }
                     ui.label(
-                        egui::RichText::new(name)
-                            .color(egui::Color32::from_rgb(206, 190, 164)),
+                        egui::RichText::new(name).color(egui::Color32::from_rgb(206, 190, 164)),
                     );
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         egui::ComboBox::from_id_salt(format!("restype:{name}"))
@@ -1740,10 +1783,7 @@ fn settings_flyout_ui(
                             .width(96.0)
                             .show_ui(ui, |ui| {
                                 for k in model::ResourceType::ALL {
-                                    if ui
-                                        .selectable_label(kind == Some(k), k.label())
-                                        .clicked()
-                                    {
+                                    if ui.selectable_label(kind == Some(k), k.label()).clicked() {
                                         model.set_resource_kind(name, k);
                                         changed = true;
                                     }
@@ -1811,9 +1851,11 @@ fn top_bar_ui(
                 if !drill.path.is_empty() {
                     ui.separator();
                     if ui
-                        .selectable_label(false, egui::RichText::new("Plan").color(
-                            egui::Color32::from_rgb(196, 162, 110),
-                        ))
+                        .selectable_label(
+                            false,
+                            egui::RichText::new("Plan")
+                                .color(egui::Color32::from_rgb(196, 162, 110)),
+                        )
                         .clicked()
                     {
                         jump_to = Some(0);
@@ -1978,6 +2020,7 @@ pub fn branch_plan_at_x(
 /// Left-click on (or very near) a branch marker selects that branch; the Delete
 /// key then removes it. Selecting a branch clears any block/dependency
 /// selection so Delete is unambiguous.
+#[allow(clippy::too_many_arguments)]
 fn handle_branch_selection(
     mut egui_ctx: EguiContexts,
     windows: Query<&Window>,
@@ -2147,7 +2190,10 @@ mod tests {
         let plan_id = m.create_plan("main", None);
         let scope: Option<model::WorkBlockId> = None;
 
-        m.plans.get_mut(&plan_id).unwrap().set_row_name(scope, 3, "Backend".to_string());
+        m.plans
+            .get_mut(&plan_id)
+            .unwrap()
+            .set_row_name(scope, 3, "Backend".to_string());
         let block = m.create_work_block("Task");
         // duration_days must be > 0 so visible_blocks includes this block.
         m.work_blocks.get_mut(&block).unwrap().duration_days = 5;
@@ -2157,8 +2203,16 @@ mod tests {
 
         commit_row_name(&mut m, &conn, plan_id, scope, 7, "Backend");
 
-        assert_eq!(m.block_row(plan_id, block), 3, "block should move to the target row");
-        assert_eq!(m.plans[&plan_id].row_name(scope, 7), None, "source row name cleared");
+        assert_eq!(
+            m.block_row(plan_id, block),
+            3,
+            "block should move to the target row"
+        );
+        assert_eq!(
+            m.plans[&plan_id].row_name(scope, 7),
+            None,
+            "source row name cleared"
+        );
     }
 
     #[test]
@@ -2174,7 +2228,10 @@ mod tests {
         let scope: Option<model::WorkBlockId> = None;
 
         // Row 100 — beyond the old 0..64 cap — is already named "Infra".
-        m.plans.get_mut(&plan_id).unwrap().set_row_name(scope, 100, "Infra".to_string());
+        m.plans
+            .get_mut(&plan_id)
+            .unwrap()
+            .set_row_name(scope, 100, "Infra".to_string());
         let block = m.create_work_block("Deploy");
         // duration_days must be > 0 so visible_blocks includes this block.
         m.work_blocks.get_mut(&block).unwrap().duration_days = 3;
@@ -2190,6 +2247,10 @@ mod tests {
             100,
             "block must merge onto the high-numbered row, not duplicate"
         );
-        assert_eq!(m.plans[&plan_id].row_name(scope, 1), None, "source row name cleared");
+        assert_eq!(
+            m.plans[&plan_id].row_name(scope, 1),
+            None,
+            "source row name cleared"
+        );
     }
 }

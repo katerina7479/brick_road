@@ -22,7 +22,7 @@ use bevy::window::SystemCursorIcon;
 use crate::{
     constants::{PIXELS_PER_DAY, ROW_HEIGHT},
     db,
-    model::{Day, DependencyId, DependencyType, Model, Plan, PlanId, WorkBlockId},
+    model::{Day, DependencyId, Model, Plan, PlanId, WorkBlockId},
 };
 
 /// Pixels from a lane block's right edge that count as the resize handle.
@@ -99,7 +99,6 @@ pub struct LaneDepDrag {
     from: Option<(WorkBlockId, PlanId)>,
     from_right: bool,
 }
-
 
 /// One block in a lane, world coordinates.
 struct BandBlock {
@@ -436,7 +435,7 @@ pub fn sync_band_visuals(
 
 /// Maps a world position to the band that contains it (between `lane_top` and
 /// `lane_bottom`), returning its index in the current layout.
-fn band_at<'a>(bands: &'a [BandLayout], world: Vec2) -> Option<&'a BandLayout> {
+fn band_at(bands: &[BandLayout], world: Vec2) -> Option<&BandLayout> {
     bands
         .iter()
         .find(|b| world.y <= b.lane_top && world.y > b.lane_bottom)
@@ -444,6 +443,7 @@ fn band_at<'a>(bands: &'a [BandLayout], world: Vec2) -> Option<&'a BandLayout> {
 
 /// Double-clicking empty lane space creates a real block owned by that branch,
 /// at the clicked day (clamped to ≥ the fork day) and row.
+#[allow(clippy::too_many_arguments)]
 pub fn handle_band_block_create(
     mut egui_ctx: bevy_egui::EguiContexts,
     windows: Query<&Window>,
@@ -691,7 +691,15 @@ pub fn draw_plan_rename_overlay(
         color: bevy_egui::egui::Color32::from_rgb(217, 224, 245),
         centered: false,
     };
-    match inline_rename_field(&ctx, "plan_rename", &mut rename.buf, pos, &camera, &keys, style) {
+    match inline_rename_field(
+        ctx,
+        "plan_rename",
+        &mut rename.buf,
+        pos,
+        &camera,
+        &keys,
+        style,
+    ) {
         RenameOutcome::Editing => {}
         RenameOutcome::Commit => {
             let name = rename.buf.trim().to_string();
@@ -772,10 +780,14 @@ fn lane_dep_segment(
         (geom.get(&dep.predecessor)?, geom.get(&dep.successor)?);
     Some(crate::blocks::dep_draw_endpoints(
         dep.dependency_type,
-        pxl, pxr, py, sxl, sxr, sy,
+        pxl,
+        pxr,
+        py,
+        sxl,
+        sxr,
+        sy,
     ))
 }
-
 
 /// The lane dependency edge nearest `world` within a small threshold, if any.
 fn lane_dep_at(model: &Model, world: Vec2) -> Option<DependencyId> {
@@ -926,10 +938,8 @@ pub fn handle_lane_block_edit(
             LaneDragMode::Resize => {
                 let start = model.work_blocks.get(&a.block).map(|wb| wb.start_day);
                 if let Some(start) = start {
-                    let end_day = crate::calendar::x_to_day(
-                        world.x + PIXELS_PER_DAY * 0.5,
-                        &model.calendar,
-                    );
+                    let end_day =
+                        crate::calendar::x_to_day(world.x + PIXELS_PER_DAY * 0.5, &model.calendar);
                     model.set_block_duration(a.block, (end_day - start).max(1));
                 }
             }
@@ -1058,10 +1068,8 @@ pub fn draw_lane_dependencies(
             };
             // Arrow points FROM the dependent (successor) TO what it depends on
             // (predecessor) — arrowhead on the predecessor's anchor.
-            let (src, dst) = crate::blocks::dep_draw_endpoints(
-                dep.dependency_type,
-                pxl, pxr, py, sxl, sxr, sy,
-            );
+            let (src, dst) =
+                crate::blocks::dep_draw_endpoints(dep.dependency_type, pxl, pxr, py, sxl, sxr, sy);
             let color = if selected_dep.0 == Some(dep.id) {
                 selected
             } else if !crate::schedule::dependency_satisfied(&model, dep) {
@@ -1179,7 +1187,15 @@ pub fn draw_lane_block_rename_overlay(
         color: bevy_egui::egui::Color32::from_rgb(31, 31, 38),
         centered: true,
     };
-    match inline_rename_field(&ctx, "lane_block_rename", &mut rename.buf, pos, &camera, &keys, style) {
+    match inline_rename_field(
+        ctx,
+        "lane_block_rename",
+        &mut rename.buf,
+        pos,
+        &camera,
+        &keys,
+        style,
+    ) {
         RenameOutcome::Editing => {}
         RenameOutcome::Commit => {
             let name = rename.buf.trim().to_string();
@@ -1200,6 +1216,7 @@ pub fn draw_lane_block_rename_overlay(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::DependencyType;
 
     /// A lane keeps an empty row of slack below its lowest block, so there's
     /// always space to click-add a new row to the branch.
@@ -1216,7 +1233,10 @@ mod tests {
         // The center of the empty row just below (row 3) must fall inside the
         // lane bounds, i.e. a click there lands in this band.
         let gap_row_y = band.row0_y - 3.0 * ROW_HEIGHT;
-        assert!(gap_row_y > band.lane_bottom, "gap row is above the lane bottom");
+        assert!(
+            gap_row_y > band.lane_bottom,
+            "gap row is above the lane bottom"
+        );
         assert!(gap_row_y <= band.lane_top, "gap row is below the lane top");
     }
 
@@ -1243,22 +1263,34 @@ mod tests {
 
     #[test]
     fn dep_type_finish_to_start() {
-        assert_eq!(crate::blocks::dep_type_from_edges(true, false), DependencyType::FinishToStart);
+        assert_eq!(
+            crate::blocks::dep_type_from_edges(true, false),
+            DependencyType::FinishToStart
+        );
     }
 
     #[test]
     fn dep_type_finish_to_finish() {
-        assert_eq!(crate::blocks::dep_type_from_edges(true, true), DependencyType::FinishToFinish);
+        assert_eq!(
+            crate::blocks::dep_type_from_edges(true, true),
+            DependencyType::FinishToFinish
+        );
     }
 
     #[test]
     fn dep_type_start_to_start() {
-        assert_eq!(crate::blocks::dep_type_from_edges(false, false), DependencyType::StartToStart);
+        assert_eq!(
+            crate::blocks::dep_type_from_edges(false, false),
+            DependencyType::StartToStart
+        );
     }
 
     #[test]
     fn dep_type_start_to_finish() {
-        assert_eq!(crate::blocks::dep_type_from_edges(false, true), DependencyType::StartToFinish);
+        assert_eq!(
+            crate::blocks::dep_type_from_edges(false, true),
+            DependencyType::StartToFinish
+        );
     }
 
     // ── layout_bands ghost-vs-owned classification ───────────────────────────
