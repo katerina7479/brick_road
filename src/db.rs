@@ -404,12 +404,10 @@ pub fn load_model(conn: &Connection) -> Result<Model> {
         for row in rows {
             let (resource_id, date_str, description) = row?;
             if let Ok(date) = NaiveDate::parse_from_str(&date_str, "%Y-%m-%d") {
-                if let Some(rb) = model
-                    .resource_blocks
-                    .get_mut(&ResourceBlockId(resource_id as u64))
+                if let Some(rb) =
+                    model.resource_blocks.get_mut(&ResourceBlockId(resource_id as u64))
                 {
-                    rb.non_working_dates
-                        .push(NonWorkingDate { date, description });
+                    rb.non_working_dates.push(NonWorkingDate { date, description });
                 }
             }
         }
@@ -1104,14 +1102,10 @@ mod tests {
         let conn = open_in_memory();
         let mut m = Model::default();
         let rb_id = m.create_resource_block("Carol", ResourceType::Engineer);
-        m.resource_blocks
-            .get_mut(&rb_id)
-            .unwrap()
-            .non_working_dates
-            .push(NonWorkingDate {
-                date: NaiveDate::from_ymd_opt(2025, 12, 25).unwrap(),
-                description: String::new(),
-            });
+        m.resource_blocks.get_mut(&rb_id).unwrap().non_working_dates.push(NonWorkingDate {
+            date: NaiveDate::from_ymd_opt(2025, 12, 25).unwrap(),
+            description: String::new(),
+        });
 
         save_model(&conn, &m).unwrap();
         let loaded = load_model(&conn).unwrap();
@@ -1127,14 +1121,10 @@ mod tests {
         let mut m = Model::default();
         let alice = m.create_resource_block("Alice", ResourceType::Engineer);
         let bob = m.create_resource_block("Bob", ResourceType::Engineer);
-        m.resource_blocks
-            .get_mut(&alice)
-            .unwrap()
-            .non_working_dates
-            .push(NonWorkingDate {
-                date: NaiveDate::from_ymd_opt(2025, 6, 1).unwrap(),
-                description: "Alice PTO".to_string(),
-            });
+        m.resource_blocks.get_mut(&alice).unwrap().non_working_dates.push(NonWorkingDate {
+            date: NaiveDate::from_ymd_opt(2025, 6, 1).unwrap(),
+            description: "Alice PTO".to_string(),
+        });
         // Bob has no non-working dates.
 
         save_model(&conn, &m).unwrap();

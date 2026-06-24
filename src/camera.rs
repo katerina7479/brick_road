@@ -174,9 +174,8 @@ pub fn camera_nav_keys(
         *target = home_target(window, today.day, &model.calendar);
     }
     if keyboard.just_pressed(KeyCode::KeyF) {
-        if let Some(new_target) = model
-            .main_plan_id()
-            .and_then(|p| fit_to_blocks(&model, p, &windows))
+        if let Some(new_target) =
+            model.main_plan_id().and_then(|p| fit_to_blocks(&model, p, &windows))
         {
             *target = new_target;
         }
@@ -253,9 +252,7 @@ pub fn fit_to_blocks(
     let y_max = -min_row * ROW_HEIGHT + ROW_HEIGHT * 0.5;
     let y_min = -max_row * ROW_HEIGHT - ROW_HEIGHT * 0.5;
 
-    Some(fit_zoom_and_pos(
-        window_w, window_h, x_min, x_max, y_min, y_max,
-    ))
+    Some(fit_zoom_and_pos(window_w, window_h, x_min, x_max, y_min, y_max))
 }
 
 #[cfg(test)]
@@ -264,7 +261,10 @@ mod tests {
     use bevy::window::WindowResolution;
     use chrono::NaiveDate;
 
-    use crate::{calendar::day_to_x, model::CalendarConfig};
+    use crate::{
+        calendar::day_to_x,
+        model::CalendarConfig,
+    };
 
     fn test_window(w: f32, h: f32) -> Window {
         Window {

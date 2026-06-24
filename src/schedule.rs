@@ -4,7 +4,9 @@ use bevy::prelude::{DetectChanges, Res, ResMut, Resource};
 use chrono::NaiveDate;
 
 use crate::graph::{CycleError, DependencyGraph};
-use crate::model::{CalendarConfig, Day, DependencyType, Model, PlanId, WorkBlock, WorkBlockId};
+use crate::model::{
+    CalendarConfig, Day, DependencyType, Model, PlanId, WorkBlock, WorkBlockId,
+};
 
 /// Converts a working-day position to a calendar date using the plan's calendar.
 /// Day 0 = `config.start_date`; positive values advance through working days only.
@@ -187,7 +189,9 @@ fn lower_bound(model: &Model, block: WorkBlockId, plan: Option<PlanId>) -> Day {
                 .map(|p| match d.dependency_type {
                     DependencyType::FinishToStart => p.start_day + p.duration_days,
                     DependencyType::StartToStart => p.start_day,
-                    DependencyType::FinishToFinish => p.start_day + p.duration_days - succ_dur,
+                    DependencyType::FinishToFinish => {
+                        p.start_day + p.duration_days - succ_dur
+                    }
                     DependencyType::StartToFinish => p.start_day - succ_dur,
                 })
         })
@@ -220,7 +224,9 @@ pub fn dependency_satisfied(model: &Model, dep: &crate::model::Dependency) -> bo
     let bound = match dep.dependency_type {
         DependencyType::FinishToStart => pred.start_day + pred.duration_days,
         DependencyType::StartToStart => pred.start_day,
-        DependencyType::FinishToFinish => pred.start_day + pred.duration_days - succ.duration_days,
+        DependencyType::FinishToFinish => {
+            pred.start_day + pred.duration_days - succ.duration_days
+        }
         DependencyType::StartToFinish => pred.start_day - succ.duration_days,
     };
     succ.start_day >= bound
@@ -796,7 +802,8 @@ mod tests {
         assert_eq!(m.work_blocks[&b].start_day, 10);
         assert_eq!(m.work_blocks[&c].start_day, 10);
         assert_eq!(
-            m.work_blocks[&d].start_day, 14,
+            m.work_blocks[&d].start_day,
+            14,
             "D should wait for C (ends at 14), not just B (ends at 13)"
         );
     }
