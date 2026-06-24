@@ -1849,6 +1849,98 @@ fn settings_flyout_ui(
                             });
                     });
                 });
+
+                // Per-resource non-working dates — only for typed resources.
+                let rb_id = model
+                    .resource_blocks
+                    .values()
+                    .find(|r| r.name.eq_ignore_ascii_case(name))
+                    .map(|r| r.id);
+                if let Some(rb_id) = rb_id {
+                    let mut sorted_dates: Vec<model::NonWorkingDate> =
+                        model.resource_blocks[&rb_id].non_working_dates.to_vec();
+                    sorted_dates.sort_by_key(|nwd| nwd.date);
+
+                    let mut remove_date: Option<chrono::NaiveDate> = None;
+                    for nwd in &sorted_dates {
+                        ui.horizontal(|ui| {
+                            ui.add_space(12.0);
+                            ui.label(
+                                egui::RichText::new(nwd.date.format("%Y-%m-%d  %a").to_string())
+                                    .size(11.0)
+                                    .color(egui::Color32::from_rgb(180, 168, 148)),
+                            );
+                            if !nwd.description.is_empty() {
+                                ui.label(
+                                    egui::RichText::new(&nwd.description)
+                                        .size(11.0)
+                                        .color(egui::Color32::from_rgb(140, 128, 108))
+                                        .italics(),
+                                );
+                            }
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if ui
+                                        .small_button(
+                                            egui::RichText::new("✕")
+                                                .color(egui::Color32::from_rgb(210, 130, 124)),
+                                        )
+                                        .clicked()
+                                    {
+                                        remove_date = Some(nwd.date);
+                                    }
+                                },
+                            );
+                        });
+                    }
+                    if let Some(d) = remove_date {
+                        if let Some(rb) = model.resource_blocks.get_mut(&rb_id) {
+                            rb.non_working_dates.retain(|x| x.date != d);
+                            changed = true;
+                        }
+                    }
+
+                    // Add-row: date + optional label.
+                    let (date_in, desc_in) = settings
+                        .resource_date_inputs
+                        .entry(name.clone())
+                        .or_default();
+                    ui.horizontal(|ui| {
+                        ui.add_space(12.0);
+                        let resp = ui.add(
+                            egui::TextEdit::singleline(date_in)
+                                .hint_text("YYYY-MM-DD")
+                                .desired_width(100.0),
+                        );
+                        let resp_desc = ui.add(
+                            egui::TextEdit::singleline(desc_in)
+                                .hint_text("Reason")
+                                .desired_width(70.0),
+                        );
+                        let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
+                        let submit = ui.button("Add").clicked()
+                            || ((resp.lost_focus() || resp_desc.lost_focus()) && enter);
+                        if submit {
+                            if let Ok(date) =
+                                chrono::NaiveDate::parse_from_str(date_in.trim(), "%Y-%m-%d")
+                            {
+                                if let Some(rb) = model.resource_blocks.get_mut(&rb_id) {
+                                    if !rb.non_working_dates.iter().any(|x| x.date == date) {
+                                        rb.non_working_dates.push(model::NonWorkingDate {
+                                            date,
+                                            description: desc_in.trim().to_string(),
+                                        });
+                                        changed = true;
+                                    }
+                                }
+                                date_in.clear();
+                                desc_in.clear();
+                            }
+                        }
+                    });
+                }
+                ui.add_space(4.0);
             }
         });
 
@@ -2053,6 +2145,8 @@ pub struct SettingsState {
     pub holiday_input: String,
     pub holiday_desc_input: String,
     pub start_input: String,
+    /// Per-resource add-row buffers: resource name → (date_input, desc_input).
+    pub resource_date_inputs: std::collections::HashMap<String, (String, String)>,
 }
 
 /// Returns the non-active forked plan whose branch marker is within `hit_world`
