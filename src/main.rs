@@ -513,7 +513,7 @@ fn sync_weekend_bands(
 
     // Holidays occupy a full greyed day-wide column that work skips.
     let holiday_color = Color::srgba(0.48, 0.50, 0.56, 0.20);
-    for (left_x, _date) in calendar::holiday_columns(&model.calendar, span) {
+    for (left_x, _date, _desc) in calendar::holiday_columns(&model.calendar, span) {
         commands.spawn((
             WeekendBand,
             Sprite {
@@ -1052,8 +1052,9 @@ fn calendar_ruler_ui(
                 // Holiday columns carry their own greyed date number, so the
                 // date doesn't disappear from the header where work skips it.
                 let holiday_num = egui::Color32::from_rgb(120, 122, 134);
-                for (left_x, date) in calendar::holiday_columns(config, day_max) {
-                    let cx = world_to_screen_x(left_x + PIXELS_PER_DAY * 0.5);
+                for (left_x, date, desc) in calendar::holiday_columns(config, day_max) {
+                    let sx = world_to_screen_x(left_x);
+                    let cx = sx + day_w * 0.5;
                     if cx < rect.left() || cx > rect.right() {
                         continue;
                     }
@@ -1064,6 +1065,14 @@ fn calendar_ruler_ui(
                         egui::FontId::proportional(10.5),
                         holiday_num,
                     );
+                    if !desc.is_empty() {
+                        let col_rect = egui::Rect::from_min_max(
+                            egui::Pos2::new(sx, rect.top()),
+                            egui::Pos2::new(sx + day_w, rect.bottom()),
+                        );
+                        ui.allocate_rect(col_rect, egui::Sense::hover())
+                            .on_hover_text(&desc);
+                    }
                 }
             }
 
@@ -1696,7 +1705,7 @@ fn settings_flyout_ui(
             ui.add_space(4.0);
 
             let mut dates = model.calendar.non_working_dates.clone();
-            dates.sort();
+            dates.sort_by_key(|nwd| nwd.date);
             if dates.is_empty() {
                 ui.label(
                     egui::RichText::new("None set")
@@ -1705,12 +1714,19 @@ fn settings_flyout_ui(
                 );
             }
             let mut remove: Option<chrono::NaiveDate> = None;
-            for d in &dates {
+            for nwd in &dates {
                 ui.horizontal(|ui| {
                     ui.label(
-                        egui::RichText::new(d.format("%Y-%m-%d  %a").to_string())
+                        egui::RichText::new(nwd.date.format("%Y-%m-%d  %a").to_string())
                             .color(egui::Color32::from_rgb(206, 190, 164)),
                     );
+                    if !nwd.description.is_empty() {
+                        ui.label(
+                            egui::RichText::new(&nwd.description)
+                                .color(egui::Color32::from_rgb(160, 148, 128))
+                                .italics(),
+                        );
+                    }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui
                             .small_button(
@@ -1719,13 +1735,13 @@ fn settings_flyout_ui(
                             )
                             .clicked()
                         {
-                            remove = Some(*d);
+                            remove = Some(nwd.date);
                         }
                     });
                 });
             }
             if let Some(d) = remove {
-                model.calendar.non_working_dates.retain(|x| *x != d);
+                model.calendar.non_working_dates.retain(|x| x.date != d);
                 changed = true;
             }
 
@@ -1736,17 +1752,35 @@ fn settings_flyout_ui(
                         .hint_text("YYYY-MM-DD")
                         .desired_width(110.0),
                 );
+                let resp_desc = ui.add(
+                    egui::TextEdit::singleline(&mut settings.holiday_desc_input)
+                        .hint_text("Label (optional)")
+                        .desired_width(120.0),
+                );
+                let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
                 let submit = ui.button("Add").clicked()
-                    || (resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)));
+                    || ((resp.lost_focus() || resp_desc.lost_focus()) && enter);
                 if submit {
-                    if let Ok(d) =
+                    if let Ok(date) =
                         chrono::NaiveDate::parse_from_str(settings.holiday_input.trim(), "%Y-%m-%d")
                     {
-                        if !model.calendar.non_working_dates.contains(&d) {
-                            model.calendar.non_working_dates.push(d);
+                        if !model
+                            .calendar
+                            .non_working_dates
+                            .iter()
+                            .any(|x| x.date == date)
+                        {
+                            model
+                                .calendar
+                                .non_working_dates
+                                .push(model::NonWorkingDate {
+                                    date,
+                                    description: settings.holiday_desc_input.trim().to_string(),
+                                });
                             changed = true;
                         }
                         settings.holiday_input.clear();
+                        settings.holiday_desc_input.clear();
                     }
                 }
             });
@@ -1991,6 +2025,7 @@ pub struct RowRename {
 pub struct SettingsState {
     pub open: bool,
     pub holiday_input: String,
+    pub holiday_desc_input: String,
     pub start_input: String,
 }
 

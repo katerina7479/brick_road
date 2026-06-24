@@ -221,10 +221,10 @@ pub fn save_model(conn: &Connection, model: &Model) -> Result<()> {
         }
     }
 
-    for date in &model.calendar.non_working_dates {
+    for nwd in &model.calendar.non_working_dates {
         tx.execute(
-            "INSERT INTO calendar_non_working_dates (date) VALUES (?1)",
-            (&date.format("%Y-%m-%d").to_string(),),
+            "INSERT INTO calendar_non_working_dates (date, description) VALUES (?1, ?2)",
+            (&nwd.date.format("%Y-%m-%d").to_string(), &nwd.description),
         )?;
     }
 
@@ -609,12 +609,18 @@ pub fn load_model(conn: &Connection) -> Result<Model> {
 
     // calendar_non_working_dates
     {
-        let mut stmt = conn.prepare("SELECT date FROM calendar_non_working_dates ORDER BY date")?;
-        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        let mut stmt =
+            conn.prepare("SELECT date, description FROM calendar_non_working_dates ORDER BY date")?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
         for row in rows {
-            let date_str = row?;
+            let (date_str, description) = row?;
             if let Ok(date) = NaiveDate::parse_from_str(&date_str, "%Y-%m-%d") {
-                model.calendar.non_working_dates.push(date);
+                model
+                    .calendar
+                    .non_working_dates
+                    .push(NonWorkingDate { date, description });
             }
         }
     }
@@ -1143,6 +1149,62 @@ mod tests {
         assert_eq!(loaded.resource_blocks[&alice].non_working_dates.len(), 1);
         assert!(loaded.resource_blocks[&bob].non_working_dates.is_empty());
     }
+
+    #[test]
+    fn calendar_non_working_dates_round_trip() {
+        let conn = open_in_memory();
+        let mut m = Model::default();
+        m.calendar.non_working_dates.push(NonWorkingDate {
+            date: chrono::NaiveDate::from_ymd_opt(2025, 7, 4).unwrap(),
+            description: "Independence Day".to_string(),
+        });
+        m.calendar.non_working_dates.push(NonWorkingDate {
+            date: chrono::NaiveDate::from_ymd_opt(2025, 12, 25).unwrap(),
+            description: "Christmas".to_string(),
+        });
+        save_model(&conn, &m).unwrap();
+        let loaded = load_model(&conn).unwrap();
+        assert_eq!(loaded.calendar.non_working_dates.len(), 2);
+        assert_eq!(
+            loaded.calendar.non_working_dates[0].date,
+            chrono::NaiveDate::from_ymd_opt(2025, 7, 4).unwrap()
+        );
+        assert_eq!(
+            loaded.calendar.non_working_dates[0].description,
+            "Independence Day"
+        );
+        assert_eq!(
+            loaded.calendar.non_working_dates[1].date,
+            chrono::NaiveDate::from_ymd_opt(2025, 12, 25).unwrap()
+        );
+        assert_eq!(
+            loaded.calendar.non_working_dates[1].description,
+            "Christmas"
+        );
+    }
+
+    #[test]
+    fn calendar_non_working_dates_empty_by_default() {
+        let conn = open_in_memory();
+        let m = Model::default();
+        save_model(&conn, &m).unwrap();
+        let loaded = load_model(&conn).unwrap();
+        assert!(loaded.calendar.non_working_dates.is_empty());
+    }
+
+    #[test]
+    fn calendar_non_working_dates_empty_description_survives() {
+        let conn = open_in_memory();
+        let mut m = Model::default();
+        m.calendar.non_working_dates.push(NonWorkingDate {
+            date: chrono::NaiveDate::from_ymd_opt(2025, 1, 1).unwrap(),
+            description: String::new(),
+        });
+        save_model(&conn, &m).unwrap();
+        let loaded = load_model(&conn).unwrap();
+        assert_eq!(loaded.calendar.non_working_dates.len(), 1);
+        assert_eq!(loaded.calendar.non_working_dates[0].description, "");
+    }
 }
 
 const CREATE_TABLES_SQL: &str = "
@@ -1204,7 +1266,8 @@ CREATE TABLE IF NOT EXISTS calendar_config (
 );
 
 CREATE TABLE IF NOT EXISTS calendar_non_working_dates (
-    date TEXT PRIMARY KEY
+    date        TEXT PRIMARY KEY,
+    description TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS t_shirt_sizes (
