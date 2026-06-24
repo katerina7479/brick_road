@@ -183,9 +183,8 @@ pub(crate) fn compare_cache_is_stale(
     id_to_row: &HashMap<WorkBlockId, i32>,
 ) -> (bool, bool) {
     let plan_changed = cache.plan_id != Some(cmp_id);
-    let sched_stale = plan_changed
-        || &cache.block_snapshot != block_snapshot
-        || cache.dep_count != dep_count;
+    let sched_stale =
+        plan_changed || &cache.block_snapshot != block_snapshot || cache.dep_count != dep_count;
     let row_stale = &cache.row_snapshot != id_to_row;
     (sched_stale, row_stale)
 }
@@ -570,12 +569,7 @@ pub fn sync_compare_overlays(
     let block_snapshot: HashMap<WorkBlockId, i32> = cmp_plan
         .root_blocks
         .iter()
-        .filter_map(|id| {
-            model
-                .work_blocks
-                .get(id)
-                .map(|wb| (*id, wb.duration_days))
-        })
+        .filter_map(|id| model.work_blocks.get(id).map(|wb| (*id, wb.duration_days)))
         .collect();
 
     let dep_count = model
@@ -838,7 +832,7 @@ pub fn handle_block_selection(
     // Hit-test against the block sprites.
     let mut clicked: Option<WorkBlockId> = None;
     for (block_sprite, transform, sprite) in &block_query {
-        if sprite_hit(&transform, &sprite, world_pos) {
+        if sprite_hit(transform, sprite, world_pos) {
             clicked = Some(block_sprite.work_block_id);
             break;
         }
@@ -918,7 +912,7 @@ pub fn handle_canvas_create(
     }
     // Only empty space — bail if a block is under the cursor.
     for (_, transform, sprite) in &block_query {
-        if sprite_hit(&transform, &sprite, world_pos) {
+        if sprite_hit(transform, sprite, world_pos) {
             return;
         }
     }
@@ -1148,7 +1142,7 @@ pub fn handle_block_drag(
             return;
         }
         for (block_sprite, transform, sprite) in &block_query {
-            if sprite_hit(&transform, &sprite, world_pos) {
+            if sprite_hit(transform, sprite, world_pos) {
                 let id = block_sprite.work_block_id;
                 let start_px = model
                     .work_blocks
@@ -1385,6 +1379,7 @@ struct BlockGeom {
 /// Colors:
 ///   Edge — dim cyan
 ///   In-progress drag — white
+#[allow(clippy::too_many_arguments)]
 pub fn draw_dependency_edges(
     mut gizmos: Gizmos,
     model: Res<model::Model>,
@@ -1524,7 +1519,15 @@ fn dep_endpoints(model: &model::Model, dep: &model::Dependency) -> Option<(Vec2,
     let p_y = -(model.block_row(dep.plan_id, dep.predecessor) as f32) * ROW_HEIGHT;
     let (s_xl, s_xr) = block_edges_x(succ, &model.calendar);
     let s_y = -(model.block_row(dep.plan_id, dep.successor) as f32) * ROW_HEIGHT;
-    Some(dep_draw_endpoints(dep.dependency_type, p_xl, p_xr, p_y, s_xl, s_xr, s_y))
+    Some(dep_draw_endpoints(
+        dep.dependency_type,
+        p_xl,
+        p_xr,
+        p_y,
+        s_xl,
+        s_xr,
+        s_y,
+    ))
 }
 
 /// Distance from point `p` to segment `a`–`b`.
@@ -1840,6 +1843,7 @@ pub fn handle_dep_drag(
 ///
 /// Must run before `handle_block_selection` so the guard there sees the updated
 /// drill state on the same frame.
+#[allow(clippy::too_many_arguments)]
 pub fn handle_block_drill(
     mut egui_ctx: EguiContexts,
     windows: Query<&Window>,
@@ -1878,7 +1882,7 @@ pub fn handle_block_drill(
     let now = time.elapsed_secs();
 
     for (block_sprite, transform, sprite) in &block_query {
-        if sprite_hit(&transform, &sprite, world_pos) {
+        if sprite_hit(transform, sprite, world_pos) {
             let id = block_sprite.work_block_id;
             if let Some((last_id, last_time)) = *last_click {
                 if last_id == id && now - last_time < 0.4 {
@@ -1977,6 +1981,7 @@ pub fn handle_type_to_rename(
 /// focus-loss; cancels on Escape. On commit, persists to model + DB; the model
 /// change triggers `sync_block_label_names` which updates `BlockLabel::full_name`
 /// so the display text reflects the new name on the next frame.
+#[allow(clippy::too_many_arguments)]
 pub fn draw_name_edit_overlay(
     mut contexts: EguiContexts,
     mut name_edit: ResMut<NameEditState>,
@@ -2155,6 +2160,7 @@ fn restore_deletion_snapshot(model: &mut model::Model, snap: DeletedBlockSnapsho
 /// model. Runs in Update BEFORE `update_visible_blocks` so sprite reconciliation
 /// fires in the same frame — this avoids the timing bug where a deletion in
 /// `EguiPrimaryContextPass` would be invisible to `is_changed()` the next frame.
+#[allow(clippy::too_many_arguments)]
 pub fn handle_block_delete(
     mut egui_ctx: EguiContexts,
     keyboard: Res<ButtonInput<KeyCode>>,
@@ -2329,12 +2335,12 @@ mod tests {
         // `(-world_y / ROW_HEIGHT).round() as i32`.
         let r = |y: f32| (-y / ROW_HEIGHT).round() as i32;
         assert_eq!(r(0.0), 0);
-        assert_eq!(r(-40.0), 1);   // exactly row 1
-        assert_eq!(r(-80.0), 2);   // exactly row 2
-        assert_eq!(r(-20.0), 1);   // midpoint: 0.5f32.round() == 1 (half-away-from-zero)
-        assert_eq!(r(-60.0), 2);   // midpoint between row 1 and 2
-        assert_eq!(r(-39.0), 1);   // just below row 1 boundary
-        assert_eq!(r(-1.0), 0);    // almost row 0
+        assert_eq!(r(-40.0), 1); // exactly row 1
+        assert_eq!(r(-80.0), 2); // exactly row 2
+        assert_eq!(r(-20.0), 1); // midpoint: 0.5f32.round() == 1 (half-away-from-zero)
+        assert_eq!(r(-60.0), 2); // midpoint between row 1 and 2
+        assert_eq!(r(-39.0), 1); // just below row 1 boundary
+        assert_eq!(r(-1.0), 0); // almost row 0
     }
 
     #[test]
@@ -2409,7 +2415,10 @@ mod tests {
         let cal = CalendarConfig::default(); // no holidays
         let (left, right) = block_edges_x(wb, &cal);
         assert!((left - 0.0).abs() < 0.001, "left at day 0");
-        assert!((right - 5.0 * PIXELS_PER_DAY).abs() < 0.001, "right at day 5");
+        assert!(
+            (right - 5.0 * PIXELS_PER_DAY).abs() < 0.001,
+            "right at day 5"
+        );
     }
 
     #[test]
@@ -2431,8 +2440,8 @@ mod tests {
     fn block_edges_x_holiday_within_span_widens_right_edge() {
         // A holiday on 2025-01-03 (working day 2) inserts a visual column before
         // day 3. A block from day 1 to day 4 crosses it, so right_x is wider.
-        use chrono::NaiveDate;
         use crate::model::CalendarConfig;
+        use chrono::NaiveDate;
         let mut cal = CalendarConfig::default();
         let holiday = NaiveDate::from_ymd_opt(2025, 1, 3).unwrap(); // a Friday
         cal.non_working_dates = vec![holiday];
@@ -2461,8 +2470,8 @@ mod tests {
     #[test]
     fn block_edges_x_holiday_before_span_shifts_both_edges() {
         // Holiday before the block shifts both left and right by one column.
-        use chrono::NaiveDate;
         use crate::model::CalendarConfig;
+        use chrono::NaiveDate;
         let mut cal = CalendarConfig::default();
         let holiday = NaiveDate::from_ymd_opt(2025, 1, 3).unwrap(); // day 2
         cal.non_working_dates = vec![holiday];
@@ -2476,8 +2485,14 @@ mod tests {
         let (left_h, right_h) = block_edges_x(wb, &cal);
         let (left_n, right_n) = block_edges_x(wb, &CalendarConfig::default());
 
-        assert!((left_h - left_n - PIXELS_PER_DAY).abs() < 0.001, "left shifted right by one");
-        assert!((right_h - right_n - PIXELS_PER_DAY).abs() < 0.001, "right shifted right by one");
+        assert!(
+            (left_h - left_n - PIXELS_PER_DAY).abs() < 0.001,
+            "left shifted right by one"
+        );
+        assert!(
+            (right_h - right_n - PIXELS_PER_DAY).abs() < 0.001,
+            "right shifted right by one"
+        );
     }
 
     // ── fit_label ────────────────────────────────────────────────────────────
@@ -2646,13 +2661,8 @@ mod tests {
         let cache = make_cache(WorkBlockId(42), snap, 0, HashMap::new());
         // Same plan, same dep_count, but duration changed.
         let new_snap: HashMap<WorkBlockId, i32> = [(WorkBlockId(1), 10)].into_iter().collect();
-        let (sched_stale, _) = super::compare_cache_is_stale(
-            &cache,
-            PlanId(42),
-            &new_snap,
-            0,
-            &HashMap::new(),
-        );
+        let (sched_stale, _) =
+            super::compare_cache_is_stale(&cache, PlanId(42), &new_snap, 0, &HashMap::new());
         assert!(sched_stale, "duration change must invalidate schedule");
     }
 
@@ -2676,14 +2686,12 @@ mod tests {
         let rows: HashMap<WorkBlockId, i32> = [(WorkBlockId(1), 0)].into_iter().collect();
         let cache = make_cache(WorkBlockId(5), HashMap::new(), 0, rows);
         let new_rows: HashMap<WorkBlockId, i32> = [(WorkBlockId(1), 1)].into_iter().collect();
-        let (sched_stale, row_stale) = super::compare_cache_is_stale(
-            &cache,
-            PlanId(5),
-            &HashMap::new(),
-            0,
-            &new_rows,
+        let (sched_stale, row_stale) =
+            super::compare_cache_is_stale(&cache, PlanId(5), &HashMap::new(), 0, &new_rows);
+        assert!(
+            !sched_stale,
+            "row change alone must not invalidate schedule"
         );
-        assert!(!sched_stale, "row change alone must not invalidate schedule");
         assert!(row_stale, "row change must mark rows stale");
     }
 
@@ -2693,13 +2701,8 @@ mod tests {
         let snap: HashMap<WorkBlockId, i32> = [(WorkBlockId(1), 5)].into_iter().collect();
         let rows: HashMap<WorkBlockId, i32> = [(WorkBlockId(1), 2)].into_iter().collect();
         let cache = make_cache(WorkBlockId(3), snap.clone(), 1, rows.clone());
-        let (sched_stale, row_stale) = super::compare_cache_is_stale(
-            &cache,
-            PlanId(3),
-            &snap,
-            1,
-            &rows,
-        );
+        let (sched_stale, row_stale) =
+            super::compare_cache_is_stale(&cache, PlanId(3), &snap, 1, &rows);
         assert!(!sched_stale);
         assert!(!row_stale);
     }
@@ -2708,12 +2711,21 @@ mod tests {
     fn assign_compare_extra_rows_places_compare_only_blocks_after_max_row() {
         use crate::model::WorkBlockId;
         // Active plan has blocks at rows 2 and 5.
-        let id_to_row: HashMap<WorkBlockId, i32> =
-            [(WorkBlockId(1), 2), (WorkBlockId(2), 5)].into_iter().collect();
+        let id_to_row: HashMap<WorkBlockId, i32> = [(WorkBlockId(1), 2), (WorkBlockId(2), 5)]
+            .into_iter()
+            .collect();
         // Compare schedule has block 1 (shared) and block 3 (compare-only).
-        let extra = assign_compare_extra_rows(&id_to_row, [WorkBlockId(1), WorkBlockId(3)].into_iter());
-        assert!(!extra.contains_key(&WorkBlockId(1)), "shared block must not appear in extra");
-        assert_eq!(extra[&WorkBlockId(3)], 6, "compare-only block gets max_row+1");
+        let extra =
+            assign_compare_extra_rows(&id_to_row, [WorkBlockId(1), WorkBlockId(3)].into_iter());
+        assert!(
+            !extra.contains_key(&WorkBlockId(1)),
+            "shared block must not appear in extra"
+        );
+        assert_eq!(
+            extra[&WorkBlockId(3)],
+            6,
+            "compare-only block gets max_row+1"
+        );
     }
 
     #[test]
@@ -2734,8 +2746,7 @@ mod tests {
     #[test]
     fn assign_compare_extra_rows_empty_compare_schedule_returns_empty() {
         use crate::model::WorkBlockId;
-        let id_to_row: HashMap<WorkBlockId, i32> =
-            [(WorkBlockId(1), 3)].into_iter().collect();
+        let id_to_row: HashMap<WorkBlockId, i32> = [(WorkBlockId(1), 3)].into_iter().collect();
         let extra = assign_compare_extra_rows(&id_to_row, std::iter::empty());
         assert!(extra.is_empty());
     }
@@ -2923,7 +2934,7 @@ pub fn draw_block_tooltip(
     };
 
     for (block_sprite, transform, sprite) in &block_q {
-        if sprite_hit(&transform, &sprite, world_pos) {
+        if sprite_hit(transform, sprite, world_pos) {
             let Some(wb) = model.work_blocks.get(&block_sprite.work_block_id) else {
                 continue;
             };
