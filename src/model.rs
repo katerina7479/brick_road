@@ -118,12 +118,23 @@ impl ResourceType {
     }
 }
 
+/// A specific date when one resource is unavailable (PTO, leave, training).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NonWorkingDate {
+    pub date: NaiveDate,
+    /// Short label shown in the UI (e.g. "PTO", "offsite"). May be empty.
+    pub description: String,
+}
+
 /// A resource that can be allocated to work blocks.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ResourceBlock {
     pub id: ResourceBlockId,
     pub name: String,
     pub resource_type: ResourceType,
+    /// Dates this resource is unavailable, mirroring `CalendarConfig::non_working_dates`
+    /// but scoped to one resource rather than the whole project.
+    pub non_working_dates: Vec<NonWorkingDate>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -289,6 +300,7 @@ impl Model {
                 id,
                 name: name.into(),
                 resource_type,
+                non_working_dates: vec![],
             },
         );
         id
