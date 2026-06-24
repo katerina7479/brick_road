@@ -2750,6 +2750,38 @@ mod tests {
         let extra = assign_compare_extra_rows(&id_to_row, std::iter::empty());
         assert!(extra.is_empty());
     }
+
+    // ── hdr_swatch_color ─────────────────────────────────────────────────────
+
+    #[test]
+    fn hdr_swatch_color_black_is_zero() {
+        let c = hdr_swatch_color([0.0, 0.0, 0.0]);
+        assert_eq!(c, egui::Color32::from_rgb(0, 0, 0));
+    }
+
+    #[test]
+    fn hdr_swatch_color_white_is_255() {
+        let c = hdr_swatch_color([1.0, 1.0, 1.0]);
+        assert_eq!(c, egui::Color32::from_rgb(255, 255, 255));
+    }
+
+    #[test]
+    fn hdr_swatch_color_mid_gray_matches_srgb_encoding() {
+        // Linear 0.5 → sRGB ≈ 0.7354 → byte 188.
+        let c = hdr_swatch_color([0.5, 0.5, 0.5]);
+        let [r, g, b, _] = c.to_array();
+        assert_eq!(r, g);
+        assert_eq!(g, b);
+        // Correct sRGB encoding of linear 0.5 is ~187–188.
+        assert!((r as i32 - 188).abs() <= 1, "expected ~188, got {r}");
+    }
+
+    #[test]
+    fn hdr_swatch_color_hdr_clamped_to_white() {
+        // HDR values > 1.0 are clamped before encoding; all channels > 1.0 → white.
+        let c = hdr_swatch_color([2.0, 1.5, 3.0]);
+        assert_eq!(c, egui::Color32::from_rgb(255, 255, 255));
+    }
 }
 
 /// State for rapid block creation mode (activated with `N`).
@@ -2977,128 +3009,309 @@ pub fn draw_block_tooltip(
 
 // ── T-shirt size picker ──────────────────────────────────────────────────────
 
-/// State for the size picker: which block it targets (if open) and whether the
-/// editable size-map settings window is showing.
+/// State for the editable size-map settings window: whether it is showing. The
+/// window is launched from the block inspector fly-out's SIZE section and edits
+/// the global `t_shirt_sizes` table.
 #[derive(Resource, Default)]
 pub struct SizePickerState {
-    pub target: Option<WorkBlockId>,
     pub settings_open: bool,
 }
 
-/// Opens the size picker for the selected block on `s` (and closes it / the
-/// settings on `Esc`). Guarded so it never fires while typing in an egui field.
-pub fn handle_size_picker_hotkey(
-    mut egui_ctx: EguiContexts,
-    keyboard: Res<ButtonInput<KeyCode>>,
-    selected: Res<SelectedBlock>,
-    name_edit: Res<NameEditState>,
-    mut picker: ResMut<SizePickerState>,
+/// Edit buffers backing the block inspector fly-out. `bound` is the block the
+/// buffers currently mirror; when the selection changes the fly-out flushes the
+/// old buffers to their block and reloads from the newly selected one, so
+/// in-progress name/description text is never silently dropped.
+#[derive(Resource, Default)]
+pub struct BlockInspectorState {
+    pub bound: Option<WorkBlockId>,
+    pub name_buf: String,
+    pub desc_buf: String,
+}
+
+/// Human-readable priority labels indexed by `WorkBlock::priority` (0..=3).
+const PRIORITY_LABELS: [&str; 4] = ["Low", "Normal", "High", "Critical"];
+
+/// A section heading inside the inspector fly-out: muted small-caps label over a
+/// separator, matching the settings fly-out's sectioning.
+fn inspector_section(ui: &mut egui::Ui, title: &str) {
+    ui.add_space(12.0);
+    ui.label(
+        egui::RichText::new(title)
+            .size(11.0)
+            .color(egui::Color32::from_rgb(150, 130, 96)),
+    );
+    ui.separator();
+    ui.add_space(4.0);
+}
+
+/// Convert an HDR linear-RGB block color into a displayable egui swatch color.
+/// Channels are clamped to [0, 1] and sRGB-encoded; the bloom-driven over-bright
+/// values collapse to their base hue, which is enough to identify a swatch.
+fn hdr_swatch_color(rgb: [f32; 3]) -> egui::Color32 {
+    let enc = |c: f32| -> u8 {
+        let c = c.clamp(0.0, 1.0);
+        let s = if c <= 0.003_130_8 {
+            c * 12.92
+        } else {
+            1.055 * c.powf(1.0 / 2.4) - 0.055
+        };
+        (s * 255.0).round() as u8
+    };
+    egui::Color32::from_rgb(enc(rgb[0]), enc(rgb[1]), enc(rgb[2]))
+}
+
+/// Flush the inspector's name/description buffers to `id`, saving only if either
+/// actually changed. A blank name is ignored (a block must keep a name).
+fn flush_inspector_buffers(
+    model: &mut model::Model,
+    id: WorkBlockId,
+    name_buf: &str,
+    desc_buf: &str,
+    conn: &rusqlite::Connection,
 ) {
-    if name_edit.editing.is_some() {
-        return;
-    }
-    if let Ok(ctx) = egui_ctx.ctx_mut() {
-        if ctx.wants_keyboard_input() {
-            return;
+    let mut changed = false;
+    if let Some(wb) = model.work_blocks.get_mut(&id) {
+        let trimmed = name_buf.trim();
+        if !trimmed.is_empty() && wb.name != trimmed {
+            wb.name = trimmed.to_string();
+            changed = true;
+        }
+        if wb.description != desc_buf {
+            wb.description = desc_buf.to_string();
+            changed = true;
         }
     }
-    if keyboard.just_pressed(KeyCode::Escape) {
-        picker.target = None;
-        picker.settings_open = false;
-        return;
-    }
-    if keyboard.just_pressed(KeyCode::KeyS) {
-        if let Some(id) = selected.0 {
-            // Toggle on the selected block.
-            picker.target = if picker.target == Some(id) {
-                None
-            } else {
-                Some(id)
-            };
-            picker.settings_open = false;
+    if changed {
+        if let Err(e) = db::save_model(conn, model) {
+            error!("save_model failed: {e}");
         }
     }
 }
 
-/// Renders the size picker anchored next to the target block. Clicking a size
-/// sets the block's duration and records the chosen size label.
-pub fn draw_size_picker_popup(
+/// Right-side block inspector fly-out. Appears whenever a block is selected and
+/// gathers all of its editable properties in one cohesive panel — name,
+/// description, t-shirt size (write-through to `duration_days`), priority, and
+/// color — instead of scattering them across pop-ups. Dismisses on the ✕ button,
+/// on Escape, or when the block is deselected. Yields the right slot to the
+/// settings fly-out while that is open.
+#[allow(clippy::too_many_arguments)]
+pub fn block_inspector_flyout_ui(
     mut contexts: EguiContexts,
+    mut selected: ResMut<SelectedBlock>,
+    mut state: ResMut<BlockInspectorState>,
     mut picker: ResMut<SizePickerState>,
     mut model: ResMut<model::Model>,
+    settings: Res<crate::SettingsState>,
+    keys: Res<ButtonInput<KeyCode>>,
     conn: NonSend<rusqlite::Connection>,
-    camera: Query<(&Camera, &GlobalTransform), With<Camera2d>>,
-    block_query: Query<(&BlockSprite, &Transform)>,
 ) {
-    // The settings window takes over while it's open.
-    if picker.settings_open {
+    // The settings fly-out owns the right slot while it is open.
+    if settings.open {
         return;
     }
-    let Some(target) = picker.target else { return };
+    let Some(id) = selected.0 else {
+        state.bound = None;
+        return;
+    };
+    // Selection points at a block that no longer exists (e.g. just deleted).
+    if !model.work_blocks.contains_key(&id) {
+        selected.0 = None;
+        state.bound = None;
+        return;
+    }
     let Ok(ctx) = contexts.ctx_mut() else { return };
 
-    // Anchor to the block's screen position (fallback: upper-left).
-    let mut screen_pos = egui::pos2(80.0, 120.0);
-    if let Ok((cam, cam_tf)) = camera.single() {
-        for (bs, transform) in &block_query {
-            if bs.work_block_id == target {
-                if let Ok(vp) = cam.world_to_viewport(cam_tf, transform.translation) {
-                    screen_pos = egui::pos2(vp.x + 14.0, vp.y - 8.0);
-                }
-                break;
-            }
+    // (Re)bind the edit buffers when the selection changes, first flushing the
+    // previously bound block's pending edits so nothing is lost on a quick switch.
+    if state.bound != Some(id) {
+        if let Some(prev) = state.bound {
+            let (n, d) = (state.name_buf.clone(), state.desc_buf.clone());
+            flush_inspector_buffers(&mut model, prev, &n, &d, &conn);
         }
+        if let Some(wb) = model.work_blocks.get(&id) {
+            state.name_buf = wb.name.clone();
+            state.desc_buf = wb.description.clone();
+        }
+        state.bound = Some(id);
     }
 
-    let current = model
+    // Escape deselects — unless a text field is capturing the key, in which case
+    // egui uses it to defocus the field first.
+    if keys.just_pressed(KeyCode::Escape) && !ctx.wants_keyboard_input() {
+        let (n, d) = (state.name_buf.clone(), state.desc_buf.clone());
+        flush_inspector_buffers(&mut model, id, &n, &d, &conn);
+        selected.0 = None;
+        state.bound = None;
+        return;
+    }
+
+    // Snapshot current values for highlighting; the panel closure only reads
+    // these and the edit buffers, recording user intent in the locals below.
+    let cur_priority = model
         .work_blocks
-        .get(&target)
+        .get(&id)
+        .map(|wb| wb.priority)
+        .unwrap_or(1);
+    let cur_size = model
+        .work_blocks
+        .get(&id)
         .and_then(|wb| wb.t_shirt_size.clone());
+    let cur_color = model.work_blocks.get(&id).and_then(|wb| wb.color);
+    let duration_days = model
+        .work_blocks
+        .get(&id)
+        .map(|wb| wb.duration_days)
+        .unwrap_or(0);
     let sizes = model.t_shirt_sizes.clone();
 
-    let mut chosen: Option<(String, Day)> = None;
-    let mut open_settings = false;
+    let mut commit_name = false;
+    let mut commit_desc = false;
+    let mut chosen_size: Option<(String, Day)> = None;
+    let mut chosen_priority: Option<u8> = None;
+    let mut chosen_color: Option<Option<[f32; 3]>> = None;
+    let mut edit_sizes = false;
     let mut close = false;
 
-    egui::Area::new(egui::Id::new("size_picker_popup"))
-        .order(egui::Order::Foreground)
-        .fixed_pos(screen_pos)
+    egui::SidePanel::right("block_inspector_flyout")
+        .resizable(false)
+        .exact_width(272.0)
+        .frame(
+            egui::Frame::new()
+                .fill(egui::Color32::from_rgb(26, 20, 12))
+                .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(60, 46, 26)))
+                .inner_margin(egui::Margin::same(14)),
+        )
         .show(ctx, |ui| {
-            egui::Frame::popup(ui.style()).show(ui, |ui| {
-                ui.set_min_width(116.0);
-                ui.label(egui::RichText::new("Size").strong());
-                for size in &sizes {
-                    let is_current = current.as_deref() == Some(size.label.as_str());
-                    let text = format!("{}   {} d", size.label, size.days);
-                    if ui.selectable_label(is_current, text).clicked() {
-                        chosen = Some((size.label.clone(), size.days));
-                    }
-                }
-                ui.separator();
-                ui.horizontal(|ui| {
-                    if ui.small_button("⚙ Edit…").clicked() {
-                        open_settings = true;
-                    }
-                    if ui.small_button("Close").clicked() {
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new("Block")
+                        .size(16.0)
+                        .strong()
+                        .color(egui::Color32::from_rgb(238, 212, 152)),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button(egui::RichText::new("✕").size(14.0)).clicked() {
                         close = true;
                     }
                 });
             });
+
+            // ── Name ───────────────────────────────────────────────────────
+            inspector_section(ui, "NAME");
+            let resp = ui
+                .add(egui::TextEdit::singleline(&mut state.name_buf).desired_width(f32::INFINITY));
+            if resp.lost_focus() {
+                commit_name = true;
+            }
+
+            // ── Description ────────────────────────────────────────────────
+            inspector_section(ui, "DESCRIPTION");
+            let resp = ui.add(
+                egui::TextEdit::multiline(&mut state.desc_buf)
+                    .desired_width(f32::INFINITY)
+                    .desired_rows(3)
+                    .hint_text("Notes about this block"),
+            );
+            if resp.lost_focus() {
+                commit_desc = true;
+            }
+
+            // ── Size ───────────────────────────────────────────────────────
+            inspector_section(ui, "SIZE");
+            ui.horizontal_wrapped(|ui| {
+                for size in &sizes {
+                    let is_cur = cur_size.as_deref() == Some(size.label.as_str());
+                    let text = format!("{} · {}d", size.label, size.days);
+                    if ui.selectable_label(is_cur, text).clicked() {
+                        chosen_size = Some((size.label.clone(), size.days));
+                    }
+                }
+            });
+            ui.add_space(2.0);
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new(format!("{duration_days} working days"))
+                        .color(egui::Color32::from_rgb(150, 130, 96)),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.small_button("⚙ Edit sizes…").clicked() {
+                        edit_sizes = true;
+                    }
+                });
+            });
+
+            // ── Priority ───────────────────────────────────────────────────
+            inspector_section(ui, "PRIORITY");
+            ui.horizontal_wrapped(|ui| {
+                for (i, label) in PRIORITY_LABELS.iter().enumerate() {
+                    if ui
+                        .selectable_label(cur_priority as usize == i, *label)
+                        .clicked()
+                    {
+                        chosen_priority = Some(i as u8);
+                    }
+                }
+            });
+
+            // ── Color ──────────────────────────────────────────────────────
+            inspector_section(ui, "COLOR");
+            ui.horizontal_wrapped(|ui| {
+                for swatch in PALETTE {
+                    let [r, g, b, _] = swatch.to_f32_array();
+                    let rgb = [r, g, b];
+                    let is_cur = cur_color == Some(rgb);
+                    let mut btn = egui::Button::new("")
+                        .fill(hdr_swatch_color(rgb))
+                        .min_size(egui::vec2(26.0, 22.0))
+                        .corner_radius(egui::CornerRadius::same(4));
+                    if is_cur {
+                        btn = btn.stroke(egui::Stroke::new(2.0, egui::Color32::WHITE));
+                    }
+                    if ui.add(btn).clicked() {
+                        chosen_color = Some(Some(rgb));
+                    }
+                }
+            });
+            ui.add_space(4.0);
+            if cur_color.is_some() && ui.small_button("Reset to default").clicked() {
+                chosen_color = Some(None);
+            }
         });
 
-    if let Some((label, days)) = chosen {
-        if let Some(wb) = model.work_blocks.get_mut(&target) {
-            wb.duration_days = days;
-            wb.t_shirt_size = Some(label);
+    // Apply the recorded intent. Name/description go through the buffer flush
+    // (which saves only on a real change); the discrete pickers mutate directly.
+    if commit_name || commit_desc {
+        let (n, d) = (state.name_buf.clone(), state.desc_buf.clone());
+        flush_inspector_buffers(&mut model, id, &n, &d, &conn);
+    }
+    // Only take a mutable borrow when there is something to apply — otherwise
+    // `get_mut` would trip `Model`'s change-detection every frame the fly-out is
+    // open and force needless reschedules.
+    if chosen_size.is_some() || chosen_priority.is_some() || chosen_color.is_some() {
+        if let Some(wb) = model.work_blocks.get_mut(&id) {
+            if let Some((label, days)) = chosen_size {
+                wb.duration_days = days;
+                wb.t_shirt_size = Some(label);
+            }
+            if let Some(p) = chosen_priority {
+                wb.priority = p;
+            }
+            if let Some(c) = chosen_color {
+                wb.color = c;
+            }
         }
         if let Err(e) = db::save_model(&conn, &model) {
             error!("save_model failed: {e}");
         }
-        picker.target = None;
-    } else if open_settings {
+    }
+    if edit_sizes {
         picker.settings_open = true;
-    } else if close {
-        picker.target = None;
+    }
+    if close {
+        let (n, d) = (state.name_buf.clone(), state.desc_buf.clone());
+        flush_inspector_buffers(&mut model, id, &n, &d, &conn);
+        selected.0 = None;
+        state.bound = None;
     }
 }
 

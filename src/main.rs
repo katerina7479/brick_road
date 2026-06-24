@@ -42,6 +42,7 @@ fn main() {
         .insert_resource(blocks::UndoStack::default())
         .insert_resource(blocks::CreateModeState::default())
         .insert_resource(blocks::SizePickerState::default())
+        .insert_resource(blocks::BlockInspectorState::default())
         .insert_resource(schedule::VisibleBlocks::default())
         .insert_resource(schedule::DrillScope::default())
         .insert_resource(schedule::TodayMarker::default())
@@ -152,13 +153,12 @@ fn main() {
         .add_systems(Update, blocks::handle_block_drill)
         .add_systems(Update, blocks::handle_drill_out)
         // Runs before the keyboard shortcut handlers so the first typed
-        // character opens the rename instead of triggering F/N/S/Home.
+        // character opens the rename instead of triggering F/N/Home.
         .add_systems(
             Update,
             blocks::handle_type_to_rename
                 .before(camera_nav_keys)
-                .before(blocks::handle_create_mode_toggle)
-                .before(blocks::handle_size_picker_hotkey),
+                .before(blocks::handle_create_mode_toggle),
         )
         .add_systems(
             Update,
@@ -174,7 +174,6 @@ fn main() {
             blocks::handle_create_mode_toggle.after(blocks::handle_block_drill),
         )
         .add_systems(Update, blocks::handle_create_mode_click_exit)
-        .add_systems(Update, blocks::handle_size_picker_hotkey)
         .add_systems(
             Update,
             blocks::handle_block_selection.after(blocks::handle_block_drill),
@@ -242,12 +241,15 @@ fn main() {
         .add_systems(EguiPrimaryContextPass, settings_flyout_ui.after(top_bar_ui))
         .add_systems(
             EguiPrimaryContextPass,
+            blocks::block_inspector_flyout_ui.after(settings_flyout_ui),
+        )
+        .add_systems(
+            EguiPrimaryContextPass,
             resource_gutter_ui.after(calendar_ruler_ui),
         )
         .add_systems(EguiPrimaryContextPass, blocks::draw_name_edit_overlay)
         .add_systems(EguiPrimaryContextPass, blocks::draw_create_mode_overlay)
         .add_systems(EguiPrimaryContextPass, blocks::draw_block_tooltip)
-        .add_systems(EguiPrimaryContextPass, blocks::draw_size_picker_popup)
         .add_systems(EguiPrimaryContextPass, blocks::draw_size_settings_popup)
         .add_systems(EguiPrimaryContextPass, bands::draw_plan_rename_overlay)
         .add_systems(
