@@ -2750,6 +2750,38 @@ mod tests {
         let extra = assign_compare_extra_rows(&id_to_row, std::iter::empty());
         assert!(extra.is_empty());
     }
+
+    // ── hdr_swatch_color ─────────────────────────────────────────────────────
+
+    #[test]
+    fn hdr_swatch_color_black_is_zero() {
+        let c = hdr_swatch_color([0.0, 0.0, 0.0]);
+        assert_eq!(c, egui::Color32::from_rgb(0, 0, 0));
+    }
+
+    #[test]
+    fn hdr_swatch_color_white_is_255() {
+        let c = hdr_swatch_color([1.0, 1.0, 1.0]);
+        assert_eq!(c, egui::Color32::from_rgb(255, 255, 255));
+    }
+
+    #[test]
+    fn hdr_swatch_color_mid_gray_matches_srgb_encoding() {
+        // Linear 0.5 → sRGB ≈ 0.7354 → byte 188.
+        let c = hdr_swatch_color([0.5, 0.5, 0.5]);
+        let [r, g, b, _] = c.to_array();
+        assert_eq!(r, g);
+        assert_eq!(g, b);
+        // Correct sRGB encoding of linear 0.5 is ~187–188.
+        assert!((r as i32 - 188).abs() <= 1, "expected ~188, got {r}");
+    }
+
+    #[test]
+    fn hdr_swatch_color_hdr_clamped_to_white() {
+        // HDR values > 1.0 are clamped before encoding; all channels > 1.0 → white.
+        let c = hdr_swatch_color([2.0, 1.5, 3.0]);
+        assert_eq!(c, egui::Color32::from_rgb(255, 255, 255));
+    }
 }
 
 /// State for rapid block creation mode (activated with `N`).
