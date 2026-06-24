@@ -2788,6 +2788,65 @@ mod tests {
         let c = hdr_swatch_color([2.0, 1.5, 3.0]);
         assert_eq!(c, egui::Color32::from_rgb(255, 255, 255));
     }
+
+    // ── block_color ───────────────────────────────────────────────────────────
+
+    fn make_block_with_color(color: Option<[f32; 3]>) -> crate::model::WorkBlock {
+        use crate::model::WorkBlockId;
+        crate::model::WorkBlock {
+            id: WorkBlockId(1),
+            name: "test".to_string(),
+            description: String::new(),
+            start_day: 0,
+            duration_days: 1,
+            parent: None,
+            priority: 0,
+            t_shirt_size: None,
+            rollup: false,
+            color,
+        }
+    }
+
+    #[test]
+    fn block_color_uses_custom_color_when_set() {
+        let wb = make_block_with_color(Some([2.0, 0.5, 1.0]));
+        let c = block_color(&wb, 0);
+        assert_eq!(c, bevy::color::LinearRgba::new(2.0, 0.5, 1.0, 1.0));
+    }
+
+    #[test]
+    fn block_color_falls_back_to_palette_when_none() {
+        let wb = make_block_with_color(None);
+        let c = block_color(&wb, 0);
+        assert_eq!(c, PALETTE[0]);
+    }
+
+    #[test]
+    fn block_color_palette_cycles_with_row() {
+        let wb = make_block_with_color(None);
+        let len = PALETTE.len() as i32;
+        for row in 0..len {
+            assert_eq!(block_color(&wb, row), PALETTE[row as usize]);
+        }
+        // Wraps: row == len maps to PALETTE[0].
+        assert_eq!(block_color(&wb, len), PALETTE[0]);
+    }
+
+    #[test]
+    fn block_color_palette_wraps_negative_rows() {
+        let wb = make_block_with_color(None);
+        // rem_euclid maps -1 to PALETTE[len - 1], not a panic.
+        let len = PALETTE.len();
+        assert_eq!(block_color(&wb, -1), PALETTE[len - 1]);
+    }
+
+    #[test]
+    fn block_color_none_after_reset_uses_palette() {
+        // Simulate setting then clearing a custom color.
+        let mut wb = make_block_with_color(Some([1.0, 0.0, 0.0]));
+        wb.color = None;
+        assert_eq!(block_color(&wb, 1), PALETTE[1]);
+    }
 }
 
 /// State for rapid block creation mode (activated with `N`).
