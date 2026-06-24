@@ -13,52 +13,64 @@ use crate::model::{CalendarConfig, Day};
 // of holiday columns inserted before it. The model/scheduler stay in pure
 // working days; only this layer (and its inverse `x_to_day`) know about columns.
 
+impl CalendarConfig {
+    /// The project-wide non-working dates as a set, ready for the holiday-aware
+    /// day→pixel math below. This is the *global* layer every timeline caller
+    /// uses; per-resource off-days (br-217) are unioned on top by callers that
+    /// render one resource's row.
+    pub fn global_off_days(&self) -> HashSet<NaiveDate> {
+        self.non_working_dates.iter().map(|nwd| nwd.date).collect()
+    }
+}
+
 /// A holiday inserts a column only if it lands on what would otherwise be a
 /// working weekday (a holiday already on a weekend is compressed away like any
 /// weekend). Its column sits just before the working day that follows it —
 /// `date_to_day(holiday) + 1`. Returns those boundaries, ascending.
-fn holiday_boundaries(config: &CalendarConfig) -> Vec<Day> {
-    let mut b: Vec<Day> = config
-        .non_working_dates
+///
+/// `non_working` is supplied explicitly (rather than read from `config`) so a
+/// caller can pass the global holidays alone or unioned with a resource's
+/// off-days; `config` is still needed for the working week and `date_to_day`.
+fn holiday_boundaries(non_working: &HashSet<NaiveDate>, config: &CalendarConfig) -> Vec<Day> {
+    let mut b: Vec<Day> = non_working
         .iter()
-        .filter(|nwd| {
-            nwd.date.weekday().number_from_monday() <= config.working_days_per_week as u32
-        })
-        .map(|nwd| date_to_day(nwd.date, config) + 1)
+        .filter(|d| d.weekday().number_from_monday() <= config.working_days_per_week as u32)
+        .map(|d| date_to_day(*d, config) + 1)
         .collect();
     b.sort_unstable();
     b
 }
 
-/// Number of holiday columns inserted before working day `day`.
-pub fn holiday_offset(day: Day, config: &CalendarConfig) -> i32 {
-    if config.non_working_dates.is_empty() {
+/// Number of holiday columns inserted before working day `day`, given the
+/// explicit non-working set.
+pub fn holiday_offset(day: Day, non_working: &HashSet<NaiveDate>, config: &CalendarConfig) -> i32 {
+    if non_working.is_empty() {
         return 0;
     }
-    holiday_boundaries(config)
+    holiday_boundaries(non_working, config)
         .iter()
         .filter(|&&b| b <= day)
         .count() as i32
 }
 
 /// World-space x of the left edge of working day `day`, accounting for the
-/// greyed holiday columns inserted before it.
-pub fn day_to_x(day: Day, config: &CalendarConfig) -> f32 {
-    (day + holiday_offset(day, config)) as f32 * PIXELS_PER_DAY
+/// greyed holiday columns (from `non_working`) inserted before it.
+pub fn day_to_x(day: Day, non_working: &HashSet<NaiveDate>, config: &CalendarConfig) -> f32 {
+    (day + holiday_offset(day, non_working, config)) as f32 * PIXELS_PER_DAY
 }
 
 /// Inverse of [`day_to_x`]: the working day whose column contains world x `x`
 /// (floored). An x that lands inside a holiday column resolves to the working
 /// day just before that column.
-pub fn x_to_day(x: f32, config: &CalendarConfig) -> Day {
+pub fn x_to_day(x: f32, non_working: &HashSet<NaiveDate>, config: &CalendarConfig) -> Day {
     let v = (x / PIXELS_PER_DAY).floor() as Day; // visual column index
-    if config.non_working_dates.is_empty() {
+    if non_working.is_empty() {
         return v;
     }
     // Largest working day whose column starts at or before `v`. `day +
     // holiday_offset(day)` is monotonic, so walk down from `v` until it fits.
     let mut day = v;
-    while day + holiday_offset(day, config) > v {
+    while day + holiday_offset(day, non_working, config) > v {
         day -= 1;
     }
     day
@@ -66,8 +78,11 @@ pub fn x_to_day(x: f32, config: &CalendarConfig) -> Day {
 
 /// `(left_x, date)` for each holiday column whose working-day boundary falls in
 /// `0..=span_days`. Consecutive holidays that share a boundary get adjacent
-/// columns (earliest date leftmost).
+/// columns (earliest date leftmost). Reads the global holidays (with their
+/// descriptions) from `config`; the internal `day_to_x` calls use the global
+/// off-day set.
 pub fn holiday_columns(config: &CalendarConfig, span_days: Day) -> Vec<(f32, NaiveDate, String)> {
+    let non_working = config.global_off_days();
     let mut holidays: Vec<(NaiveDate, String)> = config
         .non_working_dates
         .iter()
@@ -92,7 +107,7 @@ pub fn holiday_columns(config: &CalendarConfig, span_days: Day) -> Vec<(f32, Nai
         if boundary >= 0 && boundary <= span_days + 1 {
             // The group occupies the columns immediately left of working day
             // `boundary`; earliest holiday leftmost.
-            let right = day_to_x(boundary, config);
+            let right = day_to_x(boundary, &non_working, config);
             let n = group.len();
             for (k, (date, desc)) in group.into_iter().enumerate() {
                 let left_x = right - (n - k) as f32 * PIXELS_PER_DAY;
@@ -384,9 +399,10 @@ mod tests {
     #[test]
     fn day_to_x_is_identity_without_holidays() {
         let cfg = mon_fri_config();
+        let off = cfg.global_off_days();
         for d in [0, 1, 5, 20] {
-            assert_eq!(day_to_x(d, &cfg), d as f32 * PIXELS_PER_DAY);
-            assert_eq!(x_to_day(day_to_x(d, &cfg), &cfg), d);
+            assert_eq!(day_to_x(d, &off, &cfg), d as f32 * PIXELS_PER_DAY);
+            assert_eq!(x_to_day(day_to_x(d, &off, &cfg), &off, &cfg), d);
         }
     }
 
@@ -403,18 +419,19 @@ mod tests {
             }],
             ..Default::default()
         };
+        let off = cfg.global_off_days();
         // date_to_day(Jan 8) = 1 (Tue Jan 7 is working day 1), boundary = 2.
         // Days before the boundary are unshifted; day 2 onward shift one column.
-        assert_eq!(day_to_x(1, &cfg), 1.0 * PIXELS_PER_DAY);
-        assert_eq!(day_to_x(2, &cfg), 3.0 * PIXELS_PER_DAY);
+        assert_eq!(day_to_x(1, &off, &cfg), 1.0 * PIXELS_PER_DAY);
+        assert_eq!(day_to_x(2, &off, &cfg), 3.0 * PIXELS_PER_DAY);
         // The holiday column sits between them, at visual index 2.
         let cols = holiday_columns(&cfg, 20);
         assert_eq!(cols.len(), 1);
         assert_eq!(cols[0].0, 2.0 * PIXELS_PER_DAY);
         assert_eq!(cols[0].1, holiday);
         // Inverse: an x in the holiday column resolves to the prior working day.
-        assert_eq!(x_to_day(2.5 * PIXELS_PER_DAY, &cfg), 1);
-        assert_eq!(x_to_day(3.0 * PIXELS_PER_DAY, &cfg), 2);
+        assert_eq!(x_to_day(2.5 * PIXELS_PER_DAY, &off, &cfg), 1);
+        assert_eq!(x_to_day(3.0 * PIXELS_PER_DAY, &off, &cfg), 2);
     }
 
     #[test]
@@ -430,8 +447,40 @@ mod tests {
             }],
             ..Default::default()
         };
+        let off = cfg.global_off_days();
         assert!(holiday_columns(&cfg, 20).is_empty());
-        assert_eq!(day_to_x(5, &cfg), 5.0 * PIXELS_PER_DAY);
+        assert_eq!(day_to_x(5, &off, &cfg), 5.0 * PIXELS_PER_DAY);
+    }
+
+    #[test]
+    fn explicit_extra_off_day_shifts_day_to_x_by_one_column() {
+        // The seam br-217 relies on: passing a set with an extra working-weekday
+        // date inserts one greyed column, independent of `config.non_working_dates`
+        // (which is left empty here). The column lands just before the working day
+        // *after* the extra date. Since `config` has no holidays, the extra date
+        // (Wed Jan 8) is itself global working day 2, so its boundary is day 3 and
+        // days 3+ shift one column right; days 0–2 are untouched.
+        let cfg = mon_fri_config(); // Mon Jan 6 start, no global holidays
+        let global = cfg.global_off_days();
+        assert!(global.is_empty());
+
+        let mut augmented = global.clone();
+        augmented.insert(NaiveDate::from_ymd_opt(2025, 1, 8).unwrap());
+
+        // Days before the boundary are identical to the unaugmented layout.
+        assert_eq!(
+            day_to_x(2, &augmented, &cfg),
+            day_to_x(2, &global, &cfg),
+            "day 2 (before the inserted column) is unshifted"
+        );
+        // Day 3 onward shifts right by exactly one greyed column.
+        assert_eq!(
+            day_to_x(3, &augmented, &cfg),
+            day_to_x(3, &global, &cfg) + PIXELS_PER_DAY,
+            "day 3 shifts one column for the explicit off-day"
+        );
+        // The explicit set never mutates the calendar config.
+        assert_eq!(cfg.non_working_dates, Vec::new());
     }
 
     #[test]

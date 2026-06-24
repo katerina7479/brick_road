@@ -75,11 +75,12 @@ pub(crate) fn compute_day_labels(
 ) -> Vec<DayLabelEntry> {
     let (step, month_only) = day_step_for_zoom(scale);
     let span = total_duration_days + step;
+    let off = config.global_off_days();
     (0..=span)
         .step_by(step as usize)
         .map(|day| DayLabelEntry {
             day,
-            x: day_to_x(day, config),
+            x: day_to_x(day, &off, config),
             label: format_day_label(day, month_only, config),
             alpha: if day < today_day { 0.3 } else { 0.75 },
         })
@@ -167,7 +168,8 @@ pub(crate) fn compute_quarter_ranges(
     config: &crate::model::CalendarConfig,
     span_days: crate::model::Day,
 ) -> Vec<QuarterRange> {
-    let span_px = day_to_x(span_days, config);
+    let off = config.global_off_days();
+    let span_px = day_to_x(span_days, &off, config);
     let start_year = config.start_date.year();
     let mut year = start_year;
     let mut month = config.start_date.month();
@@ -175,7 +177,7 @@ pub(crate) fn compute_quarter_ranges(
 
     loop {
         let x_start = match first_working_day_of_month(year, month, config) {
-            Some(d) => day_to_x(date_to_day(d, config), config).max(0.0),
+            Some(d) => day_to_x(date_to_day(d, config), &off, config).max(0.0),
             None => {
                 let (ny, nm) = next_ym(year, month);
                 year = ny;
@@ -198,7 +200,7 @@ pub(crate) fn compute_quarter_ranges(
             (year, q_end_month)
         };
         let x_end = match first_working_day_of_month(q_end_year, q_end_mon, config) {
-            Some(d) => day_to_x(date_to_day(d, config), config).min(span_px),
+            Some(d) => day_to_x(date_to_day(d, config), &off, config).min(span_px),
             None => span_px,
         };
 
@@ -430,8 +432,9 @@ mod tests {
         use crate::calendar::day_to_x;
         let cfg = mon_config();
         let entries = compute_day_labels(&cfg, 10, 0.5, 100);
+        let off = cfg.global_off_days();
         for e in &entries {
-            let expected_x = day_to_x(e.day, &cfg);
+            let expected_x = day_to_x(e.day, &off, &cfg);
             assert!(
                 (e.x - expected_x).abs() < 0.001,
                 "day {} x={} expected {}",

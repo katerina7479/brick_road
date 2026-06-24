@@ -45,7 +45,8 @@ pub fn home_target(
 ) -> CameraTarget {
     let w = window.width();
     let h = window.height();
-    let today_x = crate::calendar::day_to_x(today_day, cal);
+    let off = cal.global_off_days();
+    let today_x = crate::calendar::day_to_x(today_day, &off, cal);
     CameraTarget {
         zoom: 1.0,
         pos: Vec2::new(
@@ -67,8 +68,9 @@ pub fn frame_day_span(
 ) -> CameraTarget {
     let w = window.width();
     let h = window.height();
-    let x_min = crate::calendar::day_to_x(start_day, cal);
-    let x_max = crate::calendar::day_to_x(end_day, cal);
+    let off = cal.global_off_days();
+    let x_min = crate::calendar::day_to_x(start_day, &off, cal);
+    let x_max = crate::calendar::day_to_x(end_day, &off, cal);
     let span = (x_max - x_min).max(PIXELS_PER_DAY);
     // 1.8 leaves ~45% of the width as slack around the parent's span.
     const MARGIN: f32 = 1.8;
@@ -231,13 +233,14 @@ pub fn fit_to_blocks(
         return None;
     }
 
+    let off = model.calendar.global_off_days();
     let x_min = visible
         .iter()
-        .map(|wb| crate::calendar::day_to_x(wb.start_day, &model.calendar))
+        .map(|wb| crate::calendar::day_to_x(wb.start_day, &off, &model.calendar))
         .fold(f32::INFINITY, f32::min);
     let x_max = visible
         .iter()
-        .map(|wb| crate::calendar::day_to_x(wb.start_day + wb.duration_days, &model.calendar))
+        .map(|wb| crate::calendar::day_to_x(wb.start_day + wb.duration_days, &off, &model.calendar))
         .fold(f32::NEG_INFINITY, f32::max);
     // Rows are explicit and can be sparse/negative, so frame the real lane range.
     let min_row = visible
@@ -298,7 +301,7 @@ mod tests {
         let cfg = simple_config();
         let today_day = 10;
         let t = home_target(&win, today_day, &cfg);
-        let today_x = day_to_x(today_day, &cfg);
+        let today_x = day_to_x(today_day, &cfg.global_off_days(), &cfg);
         assert_eq!(t.pos.x, today_x + w * 0.5 - HOME_LEFT_MARGIN);
         assert_eq!(t.pos.y, ROW_HEIGHT * 0.5 - (h * 0.5 - HOME_TOP_MARGIN));
     }
@@ -326,8 +329,9 @@ mod tests {
         let win = test_window(1000.0, 600.0);
         let cfg = simple_config();
         let t = frame_day_span(&win, 0, 20, &cfg);
-        let x_min = day_to_x(0, &cfg);
-        let x_max = day_to_x(20, &cfg);
+        let off = cfg.global_off_days();
+        let x_min = day_to_x(0, &off, &cfg);
+        let x_max = day_to_x(20, &off, &cfg);
         assert_eq!(t.pos.x, (x_min + x_max) * 0.5);
     }
 
