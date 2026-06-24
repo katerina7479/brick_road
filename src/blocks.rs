@@ -92,6 +92,16 @@ pub fn block_color(wb: &model::WorkBlock, row: i32) -> LinearRgba {
     }
 }
 
+/// Extract the orthographic scale from a camera projection, or `None` for
+/// perspective projections. Used by systems that need the current zoom level.
+pub(crate) fn ortho_scale(proj: &Projection) -> Option<f32> {
+    if let Projection::Orthographic(o) = proj {
+        Some(o.scale)
+    } else {
+        None
+    }
+}
+
 /// Tracks the currently selected work block (if any).
 #[derive(Resource, Default)]
 pub struct SelectedBlock(pub Option<WorkBlockId>);
@@ -430,17 +440,7 @@ pub fn sync_block_sprites(
     camera_q: Query<&Projection, With<Camera2d>>,
     mut query: Query<(&BlockSprite, &mut Transform, &mut Sprite)>,
 ) {
-    let ortho_scale = camera_q
-        .single()
-        .ok()
-        .and_then(|p| {
-            if let Projection::Orthographic(o) = p {
-                Some(o.scale)
-            } else {
-                None
-            }
-        })
-        .unwrap_or(1.0);
+    let ortho_scale = camera_q.single().ok().and_then(ortho_scale).unwrap_or(1.0);
     let min_width = 8.0 * ortho_scale;
 
     let main_id = model.main_plan_id();
@@ -812,14 +812,7 @@ pub fn handle_block_selection(
         }
 
         // A click on (or near) a branch marker belongs to `handle_branch_selection`.
-        let marker_scale = cam_proj
-            .single()
-            .ok()
-            .and_then(|p| match p {
-                Projection::Orthographic(o) => Some(o.scale),
-                _ => None,
-            })
-            .unwrap_or(1.0);
+        let marker_scale = cam_proj.single().ok().and_then(ortho_scale).unwrap_or(1.0);
         if model.main_plan_id().is_some_and(|p| {
             crate::branch_plan_at_x(&model, p, world_pos.x, 6.0 * marker_scale).is_some()
         }) {
@@ -856,17 +849,7 @@ pub fn handle_block_selection(
         selected_dep.0 = None;
     } else {
         // A dependency edge under the cursor takes priority — select it (for delete).
-        let scale = cam_proj
-            .single()
-            .ok()
-            .and_then(|p| {
-                if let Projection::Orthographic(o) = p {
-                    Some(o.scale)
-                } else {
-                    None
-                }
-            })
-            .unwrap_or(1.0);
+        let scale = cam_proj.single().ok().and_then(ortho_scale).unwrap_or(1.0);
         if let Some(dep_id) = nearest_dep_edge(&model, world_pos, 7.0 * scale) {
             selected_dep.0 = Some(dep_id);
             selected.0 = None;
@@ -1356,17 +1339,7 @@ pub fn draw_block_borders(
     cam_q: Query<&Projection, With<Camera2d>>,
     block_q: Query<(&BlockSprite, &Transform, &Sprite)>,
 ) {
-    let scale = cam_q
-        .single()
-        .ok()
-        .and_then(|p| {
-            if let Projection::Orthographic(o) = p {
-                Some(o.scale)
-            } else {
-                None
-            }
-        })
-        .unwrap_or(1.0);
+    let scale = cam_q.single().ok().and_then(ortho_scale).unwrap_or(1.0);
 
     for (bs, transform, sprite) in &block_q {
         let Some(wb) = model.work_blocks.get(&bs.work_block_id) else {
@@ -1453,17 +1426,7 @@ pub fn draw_dependency_edges(
         })
         .collect();
 
-    let ortho_scale = cam_proj
-        .single()
-        .ok()
-        .and_then(|p| {
-            if let Projection::Orthographic(o) = p {
-                Some(o.scale)
-            } else {
-                None
-            }
-        })
-        .unwrap_or(1.0);
+    let ortho_scale = cam_proj.single().ok().and_then(ortho_scale).unwrap_or(1.0);
 
     // Fade edges between LOD_FAR_MIN and LOD_DEP_HIDE; skip entirely beyond LOD_DEP_HIDE.
     let edge_alpha = if ortho_scale <= LOD_FAR_MIN {
@@ -1481,12 +1444,8 @@ pub fn draw_dependency_edges(
 
             // Arrow points FROM the dependent (successor) TO what it depends on
             // (predecessor), so the arrowhead sits on the predecessor's anchor.
-            let (src, dst) = match dep.dependency_type {
-                DependencyType::FinishToStart => (Vec2::new(sg.xl, sg.y), Vec2::new(pg.xr, pg.y)),
-                DependencyType::StartToStart => (Vec2::new(sg.xl, sg.y), Vec2::new(pg.xl, pg.y)),
-                DependencyType::FinishToFinish => (Vec2::new(sg.xr, sg.y), Vec2::new(pg.xr, pg.y)),
-                DependencyType::StartToFinish => (Vec2::new(sg.xr, sg.y), Vec2::new(pg.xl, pg.y)),
-            };
+            let (src, dst) =
+                dep_draw_endpoints(dep.dependency_type, pg.xl, pg.xr, pg.y, sg.xl, sg.xr, sg.y);
 
             let is_selected = selected_dep.0 == Some(*dep_id);
             let color = if is_selected {
@@ -1535,7 +1494,7 @@ pub fn draw_dependency_edges(
     }
 }
 
-fn draw_arrowhead(gizmos: &mut Gizmos, src: Vec2, dst: Vec2, color: Color) {
+pub(crate) fn draw_arrowhead(gizmos: &mut Gizmos, src: Vec2, dst: Vec2, color: Color) {
     let dir = (dst - src).normalize_or_zero();
     if dir == Vec2::ZERO {
         return;
@@ -1543,6 +1502,26 @@ fn draw_arrowhead(gizmos: &mut Gizmos, src: Vec2, dst: Vec2, color: Color) {
     let perp = Vec2::new(-dir.y, dir.x);
     gizmos.line_2d(dst, dst - dir * 8.0 + perp * 4.0, color);
     gizmos.line_2d(dst, dst - dir * 8.0 - perp * 4.0, color);
+}
+
+/// Arrow endpoints for drawing a dependency: `(src=successor_anchor,
+/// dst=predecessor_anchor)`. The arrowhead sits at `dst` (the predecessor).
+/// Shared between the main timeline and branch swimlanes.
+pub(crate) fn dep_draw_endpoints(
+    dep_type: DependencyType,
+    pred_xl: f32,
+    pred_xr: f32,
+    pred_y: f32,
+    succ_xl: f32,
+    succ_xr: f32,
+    succ_y: f32,
+) -> (Vec2, Vec2) {
+    match dep_type {
+        DependencyType::FinishToStart => (Vec2::new(succ_xl, succ_y), Vec2::new(pred_xr, pred_y)),
+        DependencyType::StartToStart => (Vec2::new(succ_xl, succ_y), Vec2::new(pred_xl, pred_y)),
+        DependencyType::FinishToFinish => (Vec2::new(succ_xr, succ_y), Vec2::new(pred_xr, pred_y)),
+        DependencyType::StartToFinish => (Vec2::new(succ_xr, succ_y), Vec2::new(pred_xl, pred_y)),
+    }
 }
 
 /// World-space endpoints (predecessor anchor → successor anchor) of a dependency
@@ -1567,7 +1546,7 @@ fn dep_endpoints(model: &model::Model, dep: &model::Dependency) -> Option<(Vec2,
 }
 
 /// Distance from point `p` to segment `a`–`b`.
-fn point_segment_dist(p: Vec2, a: Vec2, b: Vec2) -> f32 {
+pub(crate) fn point_segment_dist(p: Vec2, a: Vec2, b: Vec2) -> f32 {
     let ab = b - a;
     let len2 = ab.length_squared();
     let t = if len2 > 0.0 {
@@ -1601,7 +1580,7 @@ fn nearest_dep_edge(
 /// Dependency type implied by which edge you drag from and which edge you drop
 /// on. `*_finish` is true for the finish (right) edge, false for the start (left)
 /// edge. The drag source is always the predecessor, the drop target the successor.
-fn dep_type_from_edges(source_finish: bool, target_finish: bool) -> DependencyType {
+pub(crate) fn dep_type_from_edges(source_finish: bool, target_finish: bool) -> DependencyType {
     match (source_finish, target_finish) {
         (true, false) => DependencyType::FinishToStart,
         (true, true) => DependencyType::FinishToFinish,

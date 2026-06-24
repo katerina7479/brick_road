@@ -100,17 +100,6 @@ pub struct LaneDepDrag {
     from_right: bool,
 }
 
-/// Dependency type implied by the source edge (which handle was grabbed) and the
-/// target edge (which half it was dropped on). The drag source is the
-/// predecessor. Mirrors main's `dep_type_from_edges`.
-fn dep_type_from_edges(from_right: bool, to_finish: bool) -> DependencyType {
-    match (from_right, to_finish) {
-        (true, false) => DependencyType::FinishToStart,
-        (true, true) => DependencyType::FinishToFinish,
-        (false, false) => DependencyType::StartToStart,
-        (false, true) => DependencyType::StartToFinish,
-    }
-}
 
 /// One block in a lane, world coordinates.
 struct BandBlock {
@@ -781,24 +770,12 @@ fn lane_dep_segment(
 ) -> Option<(Vec2, Vec2)> {
     let (&(pxl, pxr, py), &(sxl, sxr, sy)) =
         (geom.get(&dep.predecessor)?, geom.get(&dep.successor)?);
-    Some(match dep.dependency_type {
-        DependencyType::FinishToStart => (Vec2::new(sxl, sy), Vec2::new(pxr, py)),
-        DependencyType::StartToStart => (Vec2::new(sxl, sy), Vec2::new(pxl, py)),
-        DependencyType::FinishToFinish => (Vec2::new(sxr, sy), Vec2::new(pxr, py)),
-        DependencyType::StartToFinish => (Vec2::new(sxr, sy), Vec2::new(pxl, py)),
-    })
+    Some(crate::blocks::dep_draw_endpoints(
+        dep.dependency_type,
+        pxl, pxr, py, sxl, sxr, sy,
+    ))
 }
 
-/// Distance from point `p` to segment `a`–`b`.
-fn point_segment_dist(p: Vec2, a: Vec2, b: Vec2) -> f32 {
-    let ab = b - a;
-    let t = if ab.length_squared() > 0.0 {
-        ((p - a).dot(ab) / ab.length_squared()).clamp(0.0, 1.0)
-    } else {
-        0.0
-    };
-    (p - (a + ab * t)).length()
-}
 
 /// The lane dependency edge nearest `world` within a small threshold, if any.
 fn lane_dep_at(model: &Model, world: Vec2) -> Option<DependencyId> {
@@ -815,7 +792,7 @@ fn lane_dep_at(model: &Model, world: Vec2) -> Option<DependencyId> {
                 continue;
             }
             if let Some((src, dst)) = lane_dep_segment(&geom, dep) {
-                let d = point_segment_dist(world, src, dst);
+                let d = crate::blocks::point_segment_dist(world, src, dst);
                 if d < HIT && best.is_none_or(|(bd, _)| d < bd) {
                     best = Some((d, dep.id));
                 }
@@ -1031,7 +1008,7 @@ pub fn handle_lane_dep_drag(
         let pred_id = hit.id;
         let pred_finish = world.x >= (hit.left_x + hit.right_x) * 0.5;
         // dep_type_from_edges is (predecessor_finish, successor_finish).
-        let dep_type = dep_type_from_edges(pred_finish, drag.from_right);
+        let dep_type = crate::blocks::dep_type_from_edges(pred_finish, drag.from_right);
         let exists = model.dependencies.values().any(|d| {
             d.plan_id == plan
                 && d.predecessor == pred_id
@@ -1081,12 +1058,10 @@ pub fn draw_lane_dependencies(
             };
             // Arrow points FROM the dependent (successor) TO what it depends on
             // (predecessor) — arrowhead on the predecessor's anchor.
-            let (src, dst) = match dep.dependency_type {
-                DependencyType::FinishToStart => (Vec2::new(sxl, sy), Vec2::new(pxr, py)),
-                DependencyType::StartToStart => (Vec2::new(sxl, sy), Vec2::new(pxl, py)),
-                DependencyType::FinishToFinish => (Vec2::new(sxr, sy), Vec2::new(pxr, py)),
-                DependencyType::StartToFinish => (Vec2::new(sxr, sy), Vec2::new(pxl, py)),
-            };
+            let (src, dst) = crate::blocks::dep_draw_endpoints(
+                dep.dependency_type,
+                pxl, pxr, py, sxl, sxr, sy,
+            );
             let color = if selected_dep.0 == Some(dep.id) {
                 selected
             } else if !crate::schedule::dependency_satisfied(&model, dep) {
@@ -1095,13 +1070,7 @@ pub fn draw_lane_dependencies(
                 edge
             };
             gizmos.line_2d(src, dst, color);
-            // Arrowhead at the destination.
-            let dir = (dst - src).normalize_or_zero();
-            if dir != Vec2::ZERO {
-                let perp = Vec2::new(-dir.y, dir.x);
-                gizmos.line_2d(dst, dst - dir * 8.0 + perp * 4.0, color);
-                gizmos.line_2d(dst, dst - dir * 8.0 - perp * 4.0, color);
-            }
+            crate::blocks::draw_arrowhead(&mut gizmos, src, dst, color);
         }
 
         // Edge handles on every lane block.
@@ -1274,22 +1243,22 @@ mod tests {
 
     #[test]
     fn dep_type_finish_to_start() {
-        assert_eq!(dep_type_from_edges(true, false), DependencyType::FinishToStart);
+        assert_eq!(crate::blocks::dep_type_from_edges(true, false), DependencyType::FinishToStart);
     }
 
     #[test]
     fn dep_type_finish_to_finish() {
-        assert_eq!(dep_type_from_edges(true, true), DependencyType::FinishToFinish);
+        assert_eq!(crate::blocks::dep_type_from_edges(true, true), DependencyType::FinishToFinish);
     }
 
     #[test]
     fn dep_type_start_to_start() {
-        assert_eq!(dep_type_from_edges(false, false), DependencyType::StartToStart);
+        assert_eq!(crate::blocks::dep_type_from_edges(false, false), DependencyType::StartToStart);
     }
 
     #[test]
     fn dep_type_start_to_finish() {
-        assert_eq!(dep_type_from_edges(false, true), DependencyType::StartToFinish);
+        assert_eq!(crate::blocks::dep_type_from_edges(false, true), DependencyType::StartToFinish);
     }
 
     // ── layout_bands ghost-vs-owned classification ───────────────────────────

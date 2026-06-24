@@ -1259,12 +1259,7 @@ fn resource_gutter_ui(
                     };
                     let mut text_x = rect.left() + 10.0;
                     if let Some(k) = kind {
-                        let (cr, cg, cb) = resource_type_rgb(*k);
-                        ui.painter().circle_filled(
-                            egui::pos2(rect.left() + 8.0, cy),
-                            3.5,
-                            egui::Color32::from_rgb(cr, cg, cb),
-                        );
+                        draw_resource_dot(ui.painter(), egui::pos2(rect.left() + 8.0, cy), *k);
                         text_x = rect.left() + 18.0;
                     }
                     let hovered = resp.hovered();
@@ -1306,14 +1301,9 @@ fn resource_gutter_ui(
                                                 .is_some_and(|n| n.eq_ignore_ascii_case(res_name));
                                             ui.horizontal(|ui| {
                                                 if let Some(k) = resource_kinds[i] {
-                                                    let (cr, cg, cb) = resource_type_rgb(k);
                                                     let (_, dot_rect) =
                                                         ui.allocate_space(egui::vec2(10.0, 16.0));
-                                                    ui.painter().circle_filled(
-                                                        dot_rect.center(),
-                                                        3.5,
-                                                        egui::Color32::from_rgb(cr, cg, cb),
-                                                    );
+                                                    draw_resource_dot(ui.painter(), dot_rect.center(), k);
                                                 } else {
                                                     ui.allocate_space(egui::vec2(10.0, 16.0));
                                                 }
@@ -1497,6 +1487,12 @@ fn resource_type_rgb(kind: model::ResourceType) -> (u8, u8, u8) {
         model::ResourceType::Equipment => (224, 176, 92),  // amber
         model::ResourceType::Budget => (180, 150, 222),    // violet
     }
+}
+
+/// Paint the small resource-type indicator dot at `pos`.
+fn draw_resource_dot(painter: &egui::Painter, pos: egui::Pos2, kind: model::ResourceType) {
+    let (r, g, b) = resource_type_rgb(kind);
+    painter.circle_filled(pos, 3.5, egui::Color32::from_rgb(r, g, b));
 }
 
 /// World-space x of the start of calendar year `y` (its Jan 1, mapped to a
@@ -1731,13 +1727,8 @@ fn settings_flyout_ui(
                 ui.horizontal(|ui| {
                     let kind = model.resource_kind(name);
                     if let Some(k) = kind {
-                        let (r, g, b) = resource_type_rgb(k);
                         let dot = ui.allocate_space(egui::vec2(9.0, 9.0)).1;
-                        ui.painter().circle_filled(
-                            dot.center(),
-                            3.5,
-                            egui::Color32::from_rgb(r, g, b),
-                        );
+                        draw_resource_dot(ui.painter(), dot.center(), k);
                     }
                     ui.label(
                         egui::RichText::new(name)
