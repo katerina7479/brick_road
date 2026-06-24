@@ -1750,13 +1750,14 @@ fn settings_flyout_ui(
                         .hint_text("YYYY-MM-DD")
                         .desired_width(110.0),
                 );
-                ui.add(
+                let resp_desc = ui.add(
                     egui::TextEdit::singleline(&mut settings.holiday_desc_input)
                         .hint_text("Label (optional)")
                         .desired_width(120.0),
                 );
+                let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
                 let submit = ui.button("Add").clicked()
-                    || (resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)));
+                    || ((resp.lost_focus() || resp_desc.lost_focus()) && enter);
                 if submit {
                     if let Ok(date) =
                         chrono::NaiveDate::parse_from_str(settings.holiday_input.trim(), "%Y-%m-%d")

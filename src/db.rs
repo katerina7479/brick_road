@@ -9,14 +9,6 @@ use crate::model::{
 pub fn create_tables(conn: &Connection) -> Result<()> {
     conn.execute_batch("PRAGMA foreign_keys = ON;")?;
     conn.execute_batch(CREATE_TABLES_SQL)?;
-    // Migration: calendar_non_working_dates gained a description column.
-    if let Err(e) = conn.execute_batch(
-        "ALTER TABLE calendar_non_working_dates ADD COLUMN description TEXT NOT NULL DEFAULT '';",
-    ) {
-        if !e.to_string().contains("duplicate column name") {
-            return Err(e);
-        }
-    }
     // Seed default t-shirt sizes on first use (table created above).
     let count: i64 = conn.query_row("SELECT COUNT(*) FROM t_shirt_sizes", [], |r| r.get(0))?;
     if count == 0 {
@@ -1274,7 +1266,8 @@ CREATE TABLE IF NOT EXISTS calendar_config (
 );
 
 CREATE TABLE IF NOT EXISTS calendar_non_working_dates (
-    date TEXT PRIMARY KEY
+    date        TEXT PRIMARY KEY,
+    description TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS t_shirt_sizes (
