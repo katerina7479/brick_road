@@ -48,6 +48,7 @@ fn main() {
         .insert_resource(blocks::BlockSpriteMap::default())
         .insert_resource(blocks::ComparePlanState::default())
         .insert_resource(blocks::CompareBlockSpriteMap::default())
+        .insert_resource(blocks::CompareScheduleCache::default())
         .insert_resource(ForkHoverState::default())
         .insert_resource(SelectedPlan::default())
         .insert_resource(RowRename::default())

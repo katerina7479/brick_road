@@ -128,6 +128,17 @@ pub struct CompareBlockSprite {
     pub work_block_id: WorkBlockId,
 }
 
+/// Caches the compare plan's forward_pass result so `sync_compare_overlays` can
+/// skip rescheduling on frames where neither the compare plan's block positions
+/// nor the active plan's row assignments have changed.
+#[derive(Resource, Default)]
+pub struct CompareScheduleCache {
+    plan_id: Option<PlanId>,
+    block_snapshot: HashMap<WorkBlockId, (i32, i32)>,
+    row_snapshot: HashMap<WorkBlockId, i32>,
+    sched: Option<schedule::Schedule>,
+}
+
 /// Faded palette for branch ghost lanes — distinct colors, lower saturation
 /// than the main block palette so they read as "alternative" rather than active.
 pub const BRANCH_PALETTE: &[LinearRgba] = &[
@@ -493,33 +504,75 @@ pub fn sync_compare_overlays(
     model: Res<model::Model>,
     compare_state: Res<ComparePlanState>,
     mut map: ResMut<CompareBlockSpriteMap>,
+    mut cache: ResMut<CompareScheduleCache>,
     block_sprites: Query<&BlockSprite>,
 ) {
     if !compare_state.is_changed() && !model.is_changed() {
         return;
     }
 
-    for (_, entity) in map.entities.drain() {
-        commands.entity(entity).despawn();
-    }
-
     let Some(cmp_id) = compare_state.compare_plan_id else {
+        for (_, entity) in map.entities.drain() {
+            commands.entity(entity).despawn();
+        }
+        *cache = CompareScheduleCache::default();
         return;
     };
     let Some(cmp_plan) = model.plans.get(&cmp_id).cloned() else {
+        for (_, entity) in map.entities.drain() {
+            commands.entity(entity).despawn();
+        }
+        *cache = CompareScheduleCache::default();
         return;
     };
 
-    let cmp_graph = graph::build_graph(&model, &cmp_plan);
-    let Ok(cmp_sched) = schedule::forward_pass(&model, &cmp_graph) else {
-        return;
-    };
+    let block_snapshot: HashMap<WorkBlockId, (i32, i32)> = cmp_plan
+        .root_blocks
+        .iter()
+        .filter_map(|id| {
+            model
+                .work_blocks
+                .get(id)
+                .map(|wb| (*id, (wb.start_day, wb.duration_days)))
+        })
+        .collect();
 
-    // Build id → row from the active plan's current block sprites.
     let id_to_row: HashMap<WorkBlockId, i32> = block_sprites
         .iter()
         .map(|bs| (bs.work_block_id, bs.row))
         .collect();
+
+    let plan_changed = cache.plan_id != Some(cmp_id);
+    let sched_stale = plan_changed || cache.block_snapshot != block_snapshot;
+    let row_stale = cache.row_snapshot != id_to_row;
+
+    if !sched_stale && !row_stale {
+        return;
+    }
+
+    if sched_stale {
+        let cmp_graph = graph::build_graph(&model, &cmp_plan);
+        match schedule::forward_pass(&model, &cmp_graph) {
+            Ok(s) => {
+                cache.plan_id = Some(cmp_id);
+                cache.block_snapshot = block_snapshot;
+                cache.sched = Some(s);
+            }
+            Err(_) => {
+                for (_, entity) in map.entities.drain() {
+                    commands.entity(entity).despawn();
+                }
+                *cache = CompareScheduleCache::default();
+                return;
+            }
+        }
+    }
+    cache.row_snapshot = id_to_row.clone();
+
+    for (_, entity) in map.entities.drain() {
+        commands.entity(entity).despawn();
+    }
+    let cmp_sched = cache.sched.as_ref().unwrap();
 
     let extra_rows = assign_compare_extra_rows(&id_to_row, cmp_sched.blocks.keys().copied());
 
@@ -541,13 +594,10 @@ pub fn sync_compare_overlays(
 
         let active_dur = model.work_blocks.get(&id).map(|wb| wb.duration_days);
         let color = if active_dur.is_none() {
-            // Compare-only block.
             Color::from(LinearRgba::new(1.2, 0.15, 0.15, 0.45))
         } else if active_dur == Some(cmp_block.duration_days) {
-            // Same duration — ghost confirms the block matches.
             Color::from(LinearRgba::new(0.5, 0.5, 0.55, 0.22))
         } else {
-            // Duration differs — amber ghost.
             Color::from(LinearRgba::new(1.4, 0.9, 0.05, 0.45))
         };
 
@@ -1145,11 +1195,18 @@ pub fn handle_block_drag(
             // block keeps its top row when clicked without moving.
             let cursor_row = (-world_pos.y / ROW_HEIGHT).round() as i32;
             let new_row = cursor_row + grab_row_delta;
-            if let Some(wb) = model.work_blocks.get_mut(&id) {
-                wb.start_day = new_start;
+            // Only write when values changed — avoids tripping is_changed() every
+            // held frame when the cursor hasn't moved.
+            let cur_start = model.work_blocks.get(&id).map(|wb| wb.start_day);
+            if cur_start != Some(new_start) {
+                if let Some(wb) = model.work_blocks.get_mut(&id) {
+                    wb.start_day = new_start;
+                }
             }
             if let Some(p) = model.main_plan_id() {
-                model.set_block_row(p, id, new_row);
+                if model.block_row(p, id) != new_row {
+                    model.set_block_row(p, id, new_row);
+                }
             }
         }
         return;
