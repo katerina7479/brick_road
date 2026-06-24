@@ -543,9 +543,9 @@ fn sync_weekend_bands(
 
 /// Spawns row-height grey columns for per-resource non-working dates (PTO,
 /// offsite, etc.) in the task view. Each column is PIXELS_PER_DAY wide and
-/// ROW_HEIGHT tall, centred on the resource's row y and at the date's global
-/// x position. Weekends and dates already covered by a global holiday (which
-/// get a full-height column via `sync_weekend_bands`) are skipped.
+/// ROW_HEIGHT tall, centred on the resource's row y. The column is positioned
+/// using the row-augmented off-day set (global ∪ resource off-days) so it
+/// aligns with the gap `block_span_x` opens for the same date on the same row.
 fn sync_resource_offday_bands(
     model: Res<model::Model>,
     schedule: Res<schedule::Schedule>,
@@ -560,7 +560,9 @@ fn sync_resource_offday_bands(
     }
 
     let cal = &model.calendar;
-    let global_offs = cal.global_off_days();
+    // Build the same (global, row_offs) map that sync_block_sprites uses so
+    // band x-positions are computed against the identical off-day sets.
+    let (global_offs, row_offs_map) = blocks::compute_row_offs(&model);
     let span = schedule.total_duration_days.max(CALENDAR_HORIZON_DAYS) + 10;
 
     let Some(main_id) = model.main_plan_id() else {
@@ -587,10 +589,13 @@ fn sync_resource_offday_bands(
         }
         let row = row_idx as i32;
         let row_y = -(row as f32) * constants::ROW_HEIGHT;
+        // Row-augmented set: same one used by block_span_x for this row.
+        let row_offs = row_offs_map.get(&row).unwrap_or(&global_offs);
 
         for nwd in &rb.non_working_dates {
             let date = nwd.date;
-            // Skip compressed weekends and dates already covered by a global holiday column.
+            // Skip compressed weekends and dates already covered by a
+            // full-height global holiday column.
             if date.weekday().number_from_monday() > cal.working_days_per_week as u32 {
                 continue;
             }
@@ -601,7 +606,9 @@ fn sync_resource_offday_bands(
             if day < 0 || day > span {
                 continue;
             }
-            let left_x = calendar::day_to_x(day, &global_offs, cal);
+            // Position the band in the row's augmented layout so it falls
+            // in the same gap that block_span_x stretches the block over.
+            let left_x = blocks::resource_offday_column_left_x(date, row_offs, cal);
             commands.spawn((
                 ResourceOffDayBand,
                 Sprite {
