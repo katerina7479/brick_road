@@ -459,6 +459,29 @@ pub fn sync_block_sprites(
 /// Spawns, updates, and despawns ghost block sprites overlaid on the timeline
 /// to show how the comparison plan schedules each block.
 ///
+/// Assigns stable row numbers to compare-only blocks (blocks present in the
+/// comparison schedule but absent from the active plan's sprite map).
+///
+/// Extra rows are allocated starting at `max(id_to_row) + 1`, assigned in
+/// ascending `WorkBlockId` order so the mapping is deterministic across frames.
+/// Returns only the extra-row entries; shared blocks are looked up in `id_to_row`
+/// by the caller.
+pub(crate) fn assign_compare_extra_rows(
+    id_to_row: &HashMap<model::WorkBlockId, i32>,
+    compare_ids: impl Iterator<Item = model::WorkBlockId>,
+) -> HashMap<model::WorkBlockId, i32> {
+    let max_row = id_to_row.values().copied().max().unwrap_or(0);
+    let mut extra_ids: Vec<model::WorkBlockId> = compare_ids
+        .filter(|id| !id_to_row.contains_key(id))
+        .collect();
+    extra_ids.sort_by_key(|id| id.0);
+    extra_ids
+        .into_iter()
+        .enumerate()
+        .map(|(i, id)| (id, max_row + 1 + i as i32))
+        .collect()
+}
+
 /// Fires when `ComparePlanState` or the model changes. Clears all ghost sprites
 /// before rebuilding so there is never stale state. Ghost sprites sit at Z = -0.5
 /// (behind active-plan blocks). Color encodes the relationship to the active plan:
@@ -498,29 +521,14 @@ pub fn sync_compare_overlays(
         .map(|bs| (bs.work_block_id, bs.row))
         .collect();
 
-    let max_row = id_to_row.values().copied().max().unwrap_or(0);
-
-    // Pre-sort compare-only block IDs by their raw u64 so extra-row assignments
-    // are deterministic frame-to-frame (HashMap iteration order is not stable).
-    let mut extra_ids: Vec<WorkBlockId> = cmp_sched
-        .blocks
-        .keys()
-        .filter(|id| !id_to_row.contains_key(*id))
-        .copied()
-        .collect();
-    extra_ids.sort_by_key(|id| id.0);
-    let extra_rows: HashMap<WorkBlockId, i32> = extra_ids
-        .into_iter()
-        .enumerate()
-        .map(|(i, id)| (id, max_row + 1 + i as i32))
-        .collect();
+    let extra_rows = assign_compare_extra_rows(&id_to_row, cmp_sched.blocks.keys().copied());
 
     for (&id, cmp_block) in &cmp_sched.blocks {
         let row = id_to_row
             .get(&id)
             .or_else(|| extra_rows.get(&id))
             .copied()
-            .unwrap_or(max_row + 1);
+            .unwrap_or(0);
 
         let lx = crate::calendar::day_to_x(cmp_block.start_day, &model.calendar);
         let rx = crate::calendar::day_to_x(
@@ -2561,6 +2569,42 @@ mod tests {
         let snap = build_deletion_snapshot(&m, a);
         assert_eq!(snap.dependencies.len(), 1);
         assert_eq!(snap.dependencies[0].id, dep_ab);
+    }
+
+    #[test]
+    fn assign_compare_extra_rows_places_compare_only_blocks_after_max_row() {
+        use crate::model::WorkBlockId;
+        // Active plan has blocks at rows 2 and 5.
+        let id_to_row: HashMap<WorkBlockId, i32> =
+            [(WorkBlockId(1), 2), (WorkBlockId(2), 5)].into_iter().collect();
+        // Compare schedule has block 1 (shared) and block 3 (compare-only).
+        let extra = assign_compare_extra_rows(&id_to_row, [WorkBlockId(1), WorkBlockId(3)].into_iter());
+        assert!(!extra.contains_key(&WorkBlockId(1)), "shared block must not appear in extra");
+        assert_eq!(extra[&WorkBlockId(3)], 6, "compare-only block gets max_row+1");
+    }
+
+    #[test]
+    fn assign_compare_extra_rows_ordering_is_by_id_not_insertion() {
+        use crate::model::WorkBlockId;
+        // Empty active plan → max_row = 0, extra rows start at 1.
+        let id_to_row: HashMap<WorkBlockId, i32> = HashMap::new();
+        // IDs passed in reverse order; sort by id.0 must win.
+        let extra = assign_compare_extra_rows(
+            &id_to_row,
+            [WorkBlockId(30), WorkBlockId(10), WorkBlockId(20)].into_iter(),
+        );
+        assert_eq!(extra[&WorkBlockId(10)], 1);
+        assert_eq!(extra[&WorkBlockId(20)], 2);
+        assert_eq!(extra[&WorkBlockId(30)], 3);
+    }
+
+    #[test]
+    fn assign_compare_extra_rows_empty_compare_schedule_returns_empty() {
+        use crate::model::WorkBlockId;
+        let id_to_row: HashMap<WorkBlockId, i32> =
+            [(WorkBlockId(1), 3)].into_iter().collect();
+        let extra = assign_compare_extra_rows(&id_to_row, std::iter::empty());
+        assert!(extra.is_empty());
     }
 }
 
