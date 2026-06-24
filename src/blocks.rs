@@ -134,9 +134,36 @@ pub struct CompareBlockSprite {
 #[derive(Resource, Default)]
 pub struct CompareScheduleCache {
     plan_id: Option<PlanId>,
-    block_snapshot: HashMap<WorkBlockId, (i32, i32)>,
+    /// `duration_days` per active block — the only per-block field `forward_pass` reads.
+    /// `start_day` is intentionally excluded: the scheduler always places from day 0.
+    block_snapshot: HashMap<WorkBlockId, i32>,
+    /// Number of dependency edges whose `plan_id` matches the compare plan.
+    /// Catches edge additions/removals that would change the scheduled topology.
+    dep_count: usize,
     row_snapshot: HashMap<WorkBlockId, i32>,
     sched: Option<schedule::Schedule>,
+}
+
+/// Decides whether the cached schedule or sprite rows are stale.
+///
+/// Returns `(sched_stale, row_stale)`. Extracted as a pure function so the
+/// invalidation logic can be unit-tested without constructing Bevy resources.
+///
+/// `block_snapshot` maps each active block to its `duration_days`.
+/// `dep_count` is the number of dependency edges that belong to the compare plan.
+pub(crate) fn compare_cache_is_stale(
+    cache: &CompareScheduleCache,
+    cmp_id: PlanId,
+    block_snapshot: &HashMap<WorkBlockId, i32>,
+    dep_count: usize,
+    id_to_row: &HashMap<WorkBlockId, i32>,
+) -> (bool, bool) {
+    let plan_changed = cache.plan_id != Some(cmp_id);
+    let sched_stale = plan_changed
+        || &cache.block_snapshot != block_snapshot
+        || cache.dep_count != dep_count;
+    let row_stale = &cache.row_snapshot != id_to_row;
+    (sched_stale, row_stale)
 }
 
 /// Faded palette for branch ghost lanes — distinct colors, lower saturation
@@ -526,25 +553,30 @@ pub fn sync_compare_overlays(
         return;
     };
 
-    let block_snapshot: HashMap<WorkBlockId, (i32, i32)> = cmp_plan
+    let block_snapshot: HashMap<WorkBlockId, i32> = cmp_plan
         .root_blocks
         .iter()
         .filter_map(|id| {
             model
                 .work_blocks
                 .get(id)
-                .map(|wb| (*id, (wb.start_day, wb.duration_days)))
+                .map(|wb| (*id, wb.duration_days))
         })
         .collect();
+
+    let dep_count = model
+        .dependencies
+        .values()
+        .filter(|d| d.plan_id == cmp_id)
+        .count();
 
     let id_to_row: HashMap<WorkBlockId, i32> = block_sprites
         .iter()
         .map(|bs| (bs.work_block_id, bs.row))
         .collect();
 
-    let plan_changed = cache.plan_id != Some(cmp_id);
-    let sched_stale = plan_changed || cache.block_snapshot != block_snapshot;
-    let row_stale = cache.row_snapshot != id_to_row;
+    let (sched_stale, row_stale) =
+        compare_cache_is_stale(&cache, cmp_id, &block_snapshot, dep_count, &id_to_row);
 
     if !sched_stale && !row_stale {
         return;
@@ -556,6 +588,7 @@ pub fn sync_compare_overlays(
             Ok(s) => {
                 cache.plan_id = Some(cmp_id);
                 cache.block_snapshot = block_snapshot;
+                cache.dep_count = dep_count;
                 cache.sched = Some(s);
             }
             Err(_) => {
@@ -2626,6 +2659,104 @@ mod tests {
         let snap = build_deletion_snapshot(&m, a);
         assert_eq!(snap.dependencies.len(), 1);
         assert_eq!(snap.dependencies[0].id, dep_ab);
+    }
+
+    // ---- compare_cache_is_stale tests ----
+
+    fn make_cache(
+        cmp_id: WorkBlockId,
+        block_snapshot: HashMap<WorkBlockId, i32>,
+        dep_count: usize,
+        row_snapshot: HashMap<WorkBlockId, i32>,
+    ) -> super::CompareScheduleCache {
+        use crate::model::PlanId;
+        super::CompareScheduleCache {
+            plan_id: Some(PlanId(cmp_id.0)),
+            block_snapshot,
+            dep_count,
+            row_snapshot,
+            sched: None,
+        }
+    }
+
+    #[test]
+    fn cache_is_stale_on_plan_id_change() {
+        use crate::model::{PlanId, WorkBlockId};
+        let cache = make_cache(WorkBlockId(1), HashMap::new(), 0, HashMap::new());
+        let (sched_stale, row_stale) = super::compare_cache_is_stale(
+            &cache,
+            PlanId(99), // different plan
+            &HashMap::new(),
+            0,
+            &HashMap::new(),
+        );
+        assert!(sched_stale, "changing plan_id must invalidate schedule");
+        assert!(!row_stale);
+    }
+
+    #[test]
+    fn cache_is_stale_on_block_duration_change() {
+        use crate::model::{PlanId, WorkBlockId};
+        let snap: HashMap<WorkBlockId, i32> = [(WorkBlockId(1), 5)].into_iter().collect();
+        let cache = make_cache(WorkBlockId(42), snap, 0, HashMap::new());
+        // Same plan, same dep_count, but duration changed.
+        let new_snap: HashMap<WorkBlockId, i32> = [(WorkBlockId(1), 10)].into_iter().collect();
+        let (sched_stale, _) = super::compare_cache_is_stale(
+            &cache,
+            PlanId(42),
+            &new_snap,
+            0,
+            &HashMap::new(),
+        );
+        assert!(sched_stale, "duration change must invalidate schedule");
+    }
+
+    #[test]
+    fn cache_is_stale_on_dep_count_change() {
+        use crate::model::{PlanId, WorkBlockId};
+        let cache = make_cache(WorkBlockId(7), HashMap::new(), 2, HashMap::new());
+        let (sched_stale, _) = super::compare_cache_is_stale(
+            &cache,
+            PlanId(7),
+            &HashMap::new(),
+            3, // one more dep
+            &HashMap::new(),
+        );
+        assert!(sched_stale, "dep count change must invalidate schedule");
+    }
+
+    #[test]
+    fn cache_is_stale_on_row_change() {
+        use crate::model::{PlanId, WorkBlockId};
+        let rows: HashMap<WorkBlockId, i32> = [(WorkBlockId(1), 0)].into_iter().collect();
+        let cache = make_cache(WorkBlockId(5), HashMap::new(), 0, rows);
+        let new_rows: HashMap<WorkBlockId, i32> = [(WorkBlockId(1), 1)].into_iter().collect();
+        let (sched_stale, row_stale) = super::compare_cache_is_stale(
+            &cache,
+            PlanId(5),
+            &HashMap::new(),
+            0,
+            &new_rows,
+        );
+        assert!(!sched_stale, "row change alone must not invalidate schedule");
+        assert!(row_stale, "row change must mark rows stale");
+    }
+
+    #[test]
+    fn cache_is_not_stale_when_nothing_changed() {
+        use crate::model::{PlanId, WorkBlockId};
+        let snap: HashMap<WorkBlockId, i32> = [(WorkBlockId(1), 5)].into_iter().collect();
+        let rows: HashMap<WorkBlockId, i32> = [(WorkBlockId(1), 2)].into_iter().collect();
+        let cache = make_cache(WorkBlockId(3), snap.clone(), 1, rows.clone());
+        let (sched_stale, row_stale) = super::compare_cache_is_stale(
+            &cache,
+            PlanId(3),
+            &snap,
+            1,
+            &rows,
+        );
+        assert!(!sched_stale);
+        assert!(!row_stale);
     }
 
     #[test]
