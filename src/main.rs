@@ -2058,7 +2058,7 @@ fn top_bar_ui(
     mut schedule: ResMut<schedule::Schedule>,
     mut drill: ResMut<schedule::DrillScope>,
     mut settings: ResMut<SettingsState>,
-    selected_plan: Res<SelectedPlan>,
+    mut selected_plan: ResMut<SelectedPlan>,
     windows: Query<&Window>,
     today: Res<schedule::TodayMarker>,
     conn: NonSend<rusqlite::Connection>,
@@ -2066,6 +2066,8 @@ fn top_bar_ui(
     let Ok(ctx) = contexts.ctx_mut() else { return };
     let mut clear_all = false;
     let mut export_csv = false;
+    // The branch (if any) the user asked to promote to main this frame.
+    let mut accept_branch: Option<model::PlanId> = None;
     // Breadcrumb path (block ids) to optionally truncate to, and a rollup toggle.
     let mut jump_to: Option<usize> = None; // new path length
     let mut toggle_rollup: Option<model::WorkBlockId> = None;
@@ -2137,6 +2139,37 @@ fn top_bar_ui(
                             .changed()
                         {
                             toggle_rollup = Some(current);
+                        }
+                    }
+                }
+
+                // When a branch is selected, offer to promote it to main. The
+                // action is destructive and immediate by design — no confirm
+                // dialog; undo (br-225) is the safety net.
+                if let Some(bid) = selected_plan.0 {
+                    if plan_is_acceptable(&model, bid) {
+                        ui.separator();
+                        let name = model.plans[&bid].name.clone();
+                        if ui
+                            .add(
+                                egui::Button::new(
+                                    egui::RichText::new("▲ Accept as main")
+                                        .size(12.5)
+                                        .color(egui::Color32::from_rgb(250, 220, 150)),
+                                )
+                                .fill(egui::Color32::from_rgb(46, 34, 14))
+                                .stroke(egui::Stroke::new(
+                                    1.0,
+                                    egui::Color32::from_rgb(120, 92, 40),
+                                ))
+                                .corner_radius(6.0),
+                            )
+                            .on_hover_text(format!(
+                                "Rewrite main to adopt \"{name}\" and delete this branch"
+                            ))
+                            .clicked()
+                        {
+                            accept_branch = Some(bid);
                         }
                     }
                 }
@@ -2232,6 +2265,15 @@ fn top_bar_ui(
             error!("save_model failed: {e}");
         }
     }
+    if let Some(bid) = accept_branch {
+        // Promote the branch to main, persist, and drop the now-gone selection.
+        // The mutated model drives the canvas refresh via change-detection.
+        model.accept_plan_as_main(bid);
+        selected_plan.0 = None;
+        if let Err(e) = db::save_model(&conn, &model) {
+            error!("save_model failed: {e}");
+        }
+    }
     if let Some(len) = jump_to {
         drill.path.truncate(len);
     }
@@ -2244,6 +2286,16 @@ fn top_bar_ui(
             error!("save_model failed: {e}");
         }
     }
+}
+
+/// Whether `plan_id` can be promoted to main: it must be an existing *branch*
+/// (a forked plan, i.e. one with a `branch_start_day`). The baseline/main plan
+/// has no fork day and can never accept itself; a missing id is not acceptable.
+fn plan_is_acceptable(model: &model::Model, plan_id: model::PlanId) -> bool {
+    model
+        .plans
+        .get(&plan_id)
+        .is_some_and(|p| p.branch_start_day.is_some())
 }
 
 /// The branch (forked plan) whose marker is currently selected, if any.
@@ -2393,6 +2445,25 @@ fn handle_branch_delete(
 mod tests {
     use super::*;
     use chrono::NaiveDate;
+
+    #[test]
+    fn only_branches_are_acceptable_as_main() {
+        let mut m = model::Model::default();
+        let main = m.create_plan("main", None);
+        let branch = m.fork_main(0).unwrap();
+        assert!(
+            plan_is_acceptable(&m, branch),
+            "a forked branch can be accepted"
+        );
+        assert!(
+            !plan_is_acceptable(&m, main),
+            "the baseline/main plan cannot accept itself"
+        );
+        assert!(
+            !plan_is_acceptable(&m, model::PlanId(99_999)),
+            "a missing plan id is not acceptable"
+        );
+    }
 
     #[test]
     fn week_bands_at_calendar_week_boundaries() {
