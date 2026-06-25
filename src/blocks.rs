@@ -3473,6 +3473,7 @@ pub fn block_inspector_flyout_ui(
     let mut chosen_color: Option<Option<[f32; 3]>> = None;
     let mut edit_sizes = false;
     let mut close = false;
+    let mut reparent_to: Option<Option<model::WorkBlockId>> = None;
 
     egui::SidePanel::right("block_inspector_flyout")
         .resizable(false)
@@ -3578,6 +3579,41 @@ pub fn block_inspector_flyout_ui(
             if cur_color.is_some() && ui.small_button("Reset to default").clicked() {
                 chosen_color = Some(None);
             }
+
+            // ── Parent ─────────────────────────────────────────────────────
+            inspector_section(ui, "PARENT");
+            let cur_parent = model.work_blocks.get(&id).and_then(|wb| wb.parent);
+            // Collect all blocks except id and its descendants (cycle guard).
+            let candidates: Vec<(model::WorkBlockId, String)> = {
+                let all: Vec<_> = model
+                    .work_blocks
+                    .values()
+                    .filter(|wb| wb.id != id)
+                    .map(|wb| (wb.id, wb.name.clone()))
+                    .collect();
+                let mut v: Vec<_> = all
+                    .into_iter()
+                    .filter(|(cid, _)| !model.is_descendant_or_self(*cid, id))
+                    .collect();
+                v.sort_by(|a, b| a.1.cmp(&b.1));
+                v
+            };
+            // "(top-level)" option — clears the parent.
+            let is_top = cur_parent.is_none();
+            if ui
+                .selectable_label(is_top, egui::RichText::new("(top-level)").italics())
+                .clicked()
+                && !is_top
+            {
+                reparent_to = Some(None);
+            }
+            for (cid, cname) in &candidates {
+                let is_cur = cur_parent == Some(*cid);
+                let label: &str = if cname.is_empty() { "(unnamed)" } else { cname };
+                if ui.selectable_label(is_cur, label).clicked() && !is_cur {
+                    reparent_to = Some(Some(*cid));
+                }
+            }
         });
 
     // Apply the recorded intent. Name/description go through the buffer flush
@@ -3604,6 +3640,15 @@ pub fn block_inspector_flyout_ui(
         }
         if let Err(e) = db::save_model(&conn, &model) {
             error!("save_model failed: {e}");
+        }
+    }
+    if let Some(new_parent) = reparent_to {
+        if let Some(plan_id) = model.main_plan_id() {
+            if model.reparent(plan_id, id, new_parent).is_ok() {
+                if let Err(e) = db::save_model(&conn, &model) {
+                    error!("save_model failed: {e}");
+                }
+            }
         }
     }
     if edit_sizes {
