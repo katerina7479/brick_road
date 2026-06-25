@@ -10,6 +10,7 @@ pub mod blocks;
 pub mod calendar;
 pub mod camera;
 pub mod constants;
+pub mod csv_export;
 pub mod db;
 pub mod graph;
 pub mod labels;
@@ -528,7 +529,9 @@ fn sync_weekend_bands(
 
     // Holidays occupy a full greyed day-wide column that work skips.
     let holiday_color = Color::srgba(0.48, 0.50, 0.56, 0.20);
-    for (left_x, _date, _desc) in calendar::holiday_columns(&model.calendar.global_off_days(), &model.calendar, span) {
+    for (left_x, _date, _desc) in
+        calendar::holiday_columns(&model.calendar.global_off_days(), &model.calendar, span)
+    {
         commands.spawn((
             WeekendBand,
             Sprite {
@@ -2055,12 +2058,14 @@ fn top_bar_ui(
     mut schedule: ResMut<schedule::Schedule>,
     mut drill: ResMut<schedule::DrillScope>,
     mut settings: ResMut<SettingsState>,
+    selected_plan: Res<SelectedPlan>,
     windows: Query<&Window>,
     today: Res<schedule::TodayMarker>,
     conn: NonSend<rusqlite::Connection>,
 ) {
     let Ok(ctx) = contexts.ctx_mut() else { return };
     let mut clear_all = false;
+    let mut export_csv = false;
     // Breadcrumb path (block ids) to optionally truncate to, and a rollup toggle.
     let mut jump_to: Option<usize> = None; // new path length
     let mut toggle_rollup: Option<model::WorkBlockId> = None;
@@ -2146,6 +2151,13 @@ fn top_bar_ui(
                         settings.open = !settings.open;
                     }
                     ui.add_space(8.0);
+                    if tool_button(ui, "⬇ Export", false)
+                        .on_hover_text("Export plan blocks to CSV")
+                        .clicked()
+                    {
+                        export_csv = true;
+                    }
+                    ui.add_space(8.0);
                     if tool_button(ui, "→ Today", false).clicked() {
                         target.pos.x = calendar::day_to_x(
                             today.day,
@@ -2195,6 +2207,24 @@ fn top_bar_ui(
             });
         });
 
+    if export_csv {
+        let plan_id = selected_plan.0.or_else(|| model.main_plan_id());
+        if let Some(pid) = plan_id {
+            if let Some(plan) = model.plans.get(&pid) {
+                let csv = csv_export::plan_to_csv(plan, &model);
+                let file_name = format!("{}.csv", plan.name.replace('/', "_"));
+                if let Some(path) = rfd::FileDialog::new()
+                    .set_file_name(&file_name)
+                    .add_filter("CSV", &["csv"])
+                    .save_file()
+                {
+                    if let Err(e) = std::fs::write(&path, csv) {
+                        error!("CSV export failed: {e}");
+                    }
+                }
+            }
+        }
+    }
     if clear_all {
         model.clear_all_work();
         *schedule = schedule::Schedule::default();
