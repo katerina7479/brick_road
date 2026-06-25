@@ -54,7 +54,6 @@ pub fn save_model(conn: &Connection, model: &Model) -> Result<()> {
     tx.execute_batch(
         "DELETE FROM plan_blocks;
          DELETE FROM calendar_non_working_dates;
-         DELETE FROM resource_non_working_dates;
          DELETE FROM t_shirt_sizes;
          DELETE FROM quarter_colors;",
     )?;
@@ -223,7 +222,8 @@ pub fn save_model(conn: &Connection, model: &Model) -> Result<()> {
 
     for nwd in &model.calendar.non_working_dates {
         tx.execute(
-            "INSERT INTO calendar_non_working_dates (date, description) VALUES (?1, ?2)",
+            "INSERT INTO calendar_non_working_dates (date, description, resource_id)
+             VALUES (?1, ?2, NULL)",
             (&nwd.date.format("%Y-%m-%d").to_string(), &nwd.description),
         )?;
     }
@@ -231,12 +231,12 @@ pub fn save_model(conn: &Connection, model: &Model) -> Result<()> {
     for rb in model.resource_blocks.values() {
         for nwd in &rb.non_working_dates {
             tx.execute(
-                "INSERT INTO resource_non_working_dates (resource_id, date, description)
+                "INSERT INTO calendar_non_working_dates (date, description, resource_id)
                  VALUES (?1, ?2, ?3)",
                 (
-                    rb.id.0 as i64,
                     &nwd.date.format("%Y-%m-%d").to_string(),
                     &nwd.description,
+                    rb.id.0 as i64,
                 ),
             )?;
         }
@@ -384,34 +384,6 @@ pub fn load_model(conn: &Connection) -> Result<Model> {
                     non_working_dates: vec![],
                 },
             );
-        }
-    }
-
-    // resource_non_working_dates
-    {
-        let mut stmt = conn.prepare(
-            "SELECT resource_id, date, description
-             FROM resource_non_working_dates
-             ORDER BY resource_id, date",
-        )?;
-        let rows = stmt.query_map([], |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-            ))
-        })?;
-        for row in rows {
-            let (resource_id, date_str, description) = row?;
-            if let Ok(date) = NaiveDate::parse_from_str(&date_str, "%Y-%m-%d") {
-                if let Some(rb) = model
-                    .resource_blocks
-                    .get_mut(&ResourceBlockId(resource_id as u64))
-                {
-                    rb.non_working_dates
-                        .push(NonWorkingDate { date, description });
-                }
-            }
         }
     }
 
@@ -607,20 +579,40 @@ pub fn load_model(conn: &Connection) -> Result<Model> {
         }
     }
 
-    // calendar_non_working_dates
+    // calendar_non_working_dates — unified table for global (resource_id IS NULL)
+    // and per-resource (resource_id IS NOT NULL) non-working dates.
     {
-        let mut stmt =
-            conn.prepare("SELECT date, description FROM calendar_non_working_dates ORDER BY date")?;
+        let mut stmt = conn.prepare(
+            "SELECT date, description, resource_id
+             FROM calendar_non_working_dates
+             ORDER BY resource_id, date",
+        )?;
         let rows = stmt.query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<i64>>(2)?,
+            ))
         })?;
         for row in rows {
-            let (date_str, description) = row?;
+            let (date_str, description, resource_id) = row?;
             if let Ok(date) = NaiveDate::parse_from_str(&date_str, "%Y-%m-%d") {
-                model
-                    .calendar
-                    .non_working_dates
-                    .push(NonWorkingDate { date, description });
+                match resource_id {
+                    None => {
+                        model
+                            .calendar
+                            .non_working_dates
+                            .push(NonWorkingDate { date, description });
+                    }
+                    Some(rid) => {
+                        if let Some(rb) =
+                            model.resource_blocks.get_mut(&ResourceBlockId(rid as u64))
+                        {
+                            rb.non_working_dates
+                                .push(NonWorkingDate { date, description });
+                        }
+                    }
+                }
             }
         }
     }
@@ -1195,6 +1187,42 @@ mod tests {
     }
 
     #[test]
+    fn global_and_resource_non_working_dates_coexist_in_unified_table() {
+        // Same date can appear as a global holiday AND a per-resource entry.
+        let conn = open_in_memory();
+        let mut m = Model::default();
+        let rb_id = m.create_resource_block("Alice", ResourceType::Engineer);
+        // Global holiday
+        m.calendar.non_working_dates.push(NonWorkingDate {
+            date: NaiveDate::from_ymd_opt(2025, 7, 4).unwrap(),
+            description: "Independence Day".to_string(),
+        });
+        // Resource PTO on a different date
+        m.resource_blocks
+            .get_mut(&rb_id)
+            .unwrap()
+            .non_working_dates
+            .push(NonWorkingDate {
+                date: NaiveDate::from_ymd_opt(2025, 8, 1).unwrap(),
+                description: "Alice PTO".to_string(),
+            });
+
+        save_model(&conn, &m).unwrap();
+        let loaded = load_model(&conn).unwrap();
+
+        assert_eq!(loaded.calendar.non_working_dates.len(), 1);
+        assert_eq!(
+            loaded.calendar.non_working_dates[0].date,
+            NaiveDate::from_ymd_opt(2025, 7, 4).unwrap()
+        );
+        assert_eq!(loaded.resource_blocks[&rb_id].non_working_dates.len(), 1);
+        assert_eq!(
+            loaded.resource_blocks[&rb_id].non_working_dates[0].date,
+            NaiveDate::from_ymd_opt(2025, 8, 1).unwrap()
+        );
+    }
+
+    #[test]
     fn calendar_non_working_dates_round_trip() {
         let conn = open_in_memory();
         let mut m = Model::default();
@@ -1258,13 +1286,6 @@ CREATE TABLE IF NOT EXISTS resource_blocks (
     resource_type TEXT    NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS resource_non_working_dates (
-    resource_id  INTEGER NOT NULL REFERENCES resource_blocks(id),
-    date         TEXT    NOT NULL,
-    description  TEXT    NOT NULL DEFAULT '',
-    PRIMARY KEY (resource_id, date)
-);
-
 CREATE TABLE IF NOT EXISTS work_blocks (
     id                   INTEGER PRIMARY KEY,
     name                 TEXT    NOT NULL,
@@ -1310,9 +1331,16 @@ CREATE TABLE IF NOT EXISTS calendar_config (
 );
 
 CREATE TABLE IF NOT EXISTS calendar_non_working_dates (
-    date        TEXT PRIMARY KEY,
-    description TEXT NOT NULL DEFAULT ''
+    date        TEXT    NOT NULL,
+    description TEXT    NOT NULL DEFAULT '',
+    resource_id INTEGER REFERENCES resource_blocks(id)
 );
+
+CREATE UNIQUE INDEX IF NOT EXISTS uix_calendar_nwd_global
+    ON calendar_non_working_dates (date) WHERE resource_id IS NULL;
+
+CREATE UNIQUE INDEX IF NOT EXISTS uix_calendar_nwd_resource
+    ON calendar_non_working_dates (resource_id, date) WHERE resource_id IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS t_shirt_sizes (
     label      TEXT    PRIMARY KEY,
