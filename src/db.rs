@@ -770,6 +770,50 @@ mod tests {
     }
 
     #[test]
+    fn accept_plan_as_main_round_trips_through_db() {
+        // The post-accept model must be fully persistable: no dangling dep
+        // plan_id, no roots/rows referencing deleted blocks (br-222).
+        let conn = open_in_memory();
+        let mut m = Model::default();
+        let main = m.create_plan("main", None);
+        let trunk = m.add_block_to_plan(main, "trunk", 0, 5, 0); // < F
+        let ghost = m.add_block_to_plan(main, "ghost", 30, 5, 0); // >= F, branch removes
+        let branch = m.fork_main(10).unwrap();
+        let owned = m.add_block_to_plan(branch, "owned", 15, 5, 2);
+        m.plans
+            .get_mut(&branch)
+            .unwrap()
+            .set_row_name(None, 2, "Alice".to_string());
+        let dep = m.create_dependency_in(branch, trunk, owned, DependencyType::FinishToStart);
+        m.remove_block_from_plan(branch, ghost);
+
+        m.accept_plan_as_main(branch);
+
+        // Persist and reload — must be error-free and consistent.
+        save_model(&conn, &m).unwrap();
+        let loaded = load_model(&conn).unwrap();
+
+        assert!(!loaded.plans.contains_key(&branch), "branch consumed in DB");
+        assert!(
+            loaded.work_blocks.contains_key(&owned),
+            "owned block persisted"
+        );
+        let roots = &loaded.plans[&main].root_blocks;
+        assert!(roots.contains(&trunk) && roots.contains(&owned));
+        assert!(!roots.contains(&ghost), "removed ghost is gone from main");
+        assert!(
+            !loaded.work_blocks.contains_key(&ghost),
+            "ghost block deleted"
+        );
+        assert_eq!(
+            loaded.dependencies[&dep].plan_id, main,
+            "branch dep promoted to main survives the round trip"
+        );
+        assert_eq!(loaded.block_row(main, owned), 2, "promoted lane persisted");
+        assert_eq!(loaded.plans[&main].row_name(None, 2), Some("Alice"));
+    }
+
+    #[test]
     fn row_names_round_trip_through_db() {
         let conn = open_in_memory();
         let mut m = Model::default();
