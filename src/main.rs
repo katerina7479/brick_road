@@ -528,7 +528,7 @@ fn sync_weekend_bands(
 
     // Holidays occupy a full greyed day-wide column that work skips.
     let holiday_color = Color::srgba(0.48, 0.50, 0.56, 0.20);
-    for (left_x, _date, _desc) in calendar::holiday_columns(&model.calendar, span) {
+    for (left_x, _date, _desc) in calendar::holiday_columns(&model.calendar.global_off_days(), &model.calendar, span) {
         commands.spawn((
             WeekendBand,
             Sprite {
@@ -1159,7 +1159,7 @@ fn calendar_ruler_ui(
                 // Holiday columns carry their own greyed date number, so the
                 // date doesn't disappear from the header where work skips it.
                 let holiday_num = egui::Color32::from_rgb(120, 122, 134);
-                for (left_x, date, desc) in calendar::holiday_columns(config, day_max) {
+                for (left_x, date, desc) in calendar::holiday_columns(&off, config, day_max) {
                     let sx = world_to_screen_x(left_x);
                     let cx = sx + day_w * 0.5;
                     if cx < rect.left() || cx > rect.right() {
