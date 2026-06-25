@@ -2174,6 +2174,22 @@ struct DeletedBlockSnapshot {
 #[derive(Resource, Default)]
 pub struct UndoStack {
     last_deletion: Option<DeletedBlockSnapshot>,
+    /// Full model snapshot taken immediately before `accept_plan_as_main`.
+    /// Stored in a `Box` to keep the `UndoStack` stack frame small (Model is
+    /// several hundred bytes). Consumed on Cmd+Z; supersedes `last_deletion`
+    /// since accept is more destructive and always the newer operation when set.
+    pub last_accept: Option<Box<model::Model>>,
+}
+
+/// Records the current model state so that the next Cmd+Z can fully reverse
+/// `accept_plan_as_main`. Call this immediately before calling
+/// `model.accept_plan_as_main(...)` from the UI.
+///
+/// Clears `last_deletion` because after an accept the deletion snapshot is
+/// stale — blocks it references may no longer exist.
+pub fn snapshot_before_accept(undo: &mut UndoStack, model: &model::Model) {
+    undo.last_accept = Some(Box::new(model.clone()));
+    undo.last_deletion = None;
 }
 
 fn build_deletion_snapshot(model: &model::Model, id: WorkBlockId) -> DeletedBlockSnapshot {
@@ -2303,7 +2319,15 @@ pub fn handle_undo(
     let ctrl = keyboard.any_pressed([KeyCode::ControlLeft, KeyCode::ControlRight])
         || keyboard.any_pressed([KeyCode::SuperLeft, KeyCode::SuperRight]);
     if ctrl && keyboard.just_pressed(KeyCode::KeyZ) {
-        if let Some(snap) = undo.last_deletion.take() {
+        if let Some(snap) = undo.last_accept.take() {
+            // Accept undo: restore the full model snapshot taken before accept.
+            // Clear the deletion slot too — it's stale after an accept.
+            undo.last_deletion = None;
+            *model = *snap;
+            if let Err(e) = db::save_model(&conn, &model) {
+                error!("save_model failed: {e}");
+            }
+        } else if let Some(snap) = undo.last_deletion.take() {
             restore_deletion_snapshot(&mut model, snap);
             if let Err(e) = db::save_model(&conn, &model) {
                 error!("save_model failed: {e}");
@@ -2714,6 +2738,77 @@ mod tests {
         let snap = build_deletion_snapshot(&m, a);
         assert_eq!(snap.dependencies.len(), 1);
         assert_eq!(snap.dependencies[0].id, dep_ab);
+    }
+
+    // ── accept undo ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn snapshot_before_accept_stores_clone_and_clears_deletion() {
+        use crate::model::DependencyType;
+        let mut m = Model::default();
+        let main = m.create_plan("main", None);
+        let _block = m.add_block_to_plan(main, "b", 0, 5, 0);
+        let branch = m.fork_main(0).unwrap();
+        let _ = branch;
+
+        // Prime the deletion slot with a dummy snapshot.
+        let dummy_snap = build_deletion_snapshot(&m, _block);
+        let mut undo = UndoStack {
+            last_deletion: Some(dummy_snap),
+            last_accept: None,
+        };
+
+        snapshot_before_accept(&mut undo, &m);
+
+        assert!(undo.last_accept.is_some(), "accept snapshot stored");
+        assert!(
+            undo.last_deletion.is_none(),
+            "deletion slot cleared by accept snapshot"
+        );
+        // The stored snapshot must be equal to the model at the time of snapshot.
+        assert_eq!(*undo.last_accept.unwrap(), m);
+    }
+
+    #[test]
+    fn accept_undo_restores_full_model_via_undo_stack() {
+        use crate::model::DependencyType;
+        let mut m = Model::default();
+        let main = m.create_plan("main", None);
+        let _trunk = m.add_block_to_plan(main, "trunk", 0, 5, 0);
+        let ghost = m.add_block_to_plan(main, "ghost", 15, 5, 0);
+        let branch = m.fork_main(10).unwrap();
+        let sibling = m.fork_main(10).unwrap();
+        let b_owned = m.add_block_to_plan(branch, "owned", 12, 4, 1);
+        let branch_dep =
+            m.create_dependency_in(branch, b_owned, ghost, DependencyType::FinishToStart);
+        let _ = branch_dep;
+
+        let mut undo = UndoStack::default();
+
+        // Simulate what the UI will do: snapshot, then accept.
+        snapshot_before_accept(&mut undo, &m);
+        let before = m.clone(); // reference copy to verify equality after undo
+        m.accept_plan_as_main(branch);
+
+        // Accept changed things.
+        assert!(!m.plans.contains_key(&branch));
+        assert!(m.plans[&sibling].root_blocks.contains(&b_owned));
+
+        // Undo: restore from the accept snapshot.
+        let snap = undo.last_accept.take().expect("accept snapshot must exist");
+        m = *snap;
+
+        // Model is identical to pre-accept state.
+        assert_eq!(m, before, "undo restores full model equality");
+        assert!(m.plans.contains_key(&branch), "branch plan restored");
+        assert!(
+            !m.plans[&main].root_blocks.contains(&b_owned),
+            "promoted block un-promoted"
+        );
+        assert!(
+            m.plans[&branch].root_blocks.contains(&b_owned),
+            "b_owned is back in branch"
+        );
     }
 
     // ---- compare_cache_is_stale tests ----

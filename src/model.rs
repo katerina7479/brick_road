@@ -207,7 +207,7 @@ impl Plan {
 
 /// Central data store. All entities are keyed by their ID type.
 /// Derives `Resource` so Bevy can manage it as an ECS resource.
-#[derive(Debug, Default, Resource, PartialEq)]
+#[derive(Debug, Default, Clone, Resource, PartialEq)]
 pub struct Model {
     next_id: u64,
     pub work_blocks: HashMap<WorkBlockId, WorkBlock>,
@@ -1915,5 +1915,179 @@ mod tests {
 
         m.accept_plan_as_main(accepted); // no other branches → no-op sibling pass
         assert_eq!(m.main_plan_id(), Some(main));
+    }
+
+    // ── end-to-end accept scenarios (br-225) ─────────────────────────────────
+
+    /// Full accept scenario: trunk preservation, owned promotion, removed-ghost
+    /// drop, lane/row_name promotion, dep promotion + pruning, branch
+    /// consumption, and sibling rebase — all verified in a single model.
+    #[test]
+    fn accept_end_to_end_comprehensive() {
+        let mut m = Model::default();
+        let main = m.create_plan("main", None);
+
+        // Trunk block (start_day < F=10) — must survive unchanged.
+        let trunk = placed(&mut m, main, "trunk", 3, 5);
+        m.set_block_row(main, trunk, 1);
+
+        // Two future blocks that branch B will inherit as ghosts.
+        let keep_ghost = placed(&mut m, main, "keep_ghost", 15, 5);
+        let drop_ghost = placed(&mut m, main, "drop_ghost", 25, 5);
+
+        // Fork B at day 10.
+        let branch = m.fork_main(10).unwrap();
+
+        // Fork sibling S at day 10 — also inherits keep_ghost and drop_ghost.
+        let sibling = m.fork_main(10).unwrap();
+
+        // B: remove drop_ghost.
+        m.remove_block_from_plan(branch, drop_ghost);
+
+        // B: add an owned block.
+        let b_owned = m.add_block_to_plan(branch, "b_owned", 20, 4, 2);
+
+        // B: re-lane keep_ghost and name its row.
+        m.set_block_row(branch, keep_ghost, 3);
+        m.plans
+            .get_mut(&branch)
+            .unwrap()
+            .set_row_name(None, 3, "Bob".to_string());
+
+        // B: branch-local dep between keep_ghost and b_owned (will be promoted).
+        let promoted_dep =
+            m.create_dependency_in(branch, keep_ghost, b_owned, DependencyType::FinishToStart);
+
+        // B: branch-local dep touching drop_ghost (will be pruned).
+        let pruned_dep = m.create_dependency_in(
+            branch,
+            keep_ghost,
+            drop_ghost,
+            DependencyType::FinishToStart,
+        );
+
+        // Sibling S: add its own block.
+        let s_owned = m.add_block_to_plan(sibling, "s_owned", 30, 3, 0);
+
+        // Sibling S: branch-local dep between two ghosts it holds.
+        let s_dep = m.create_dependency_in(
+            sibling,
+            keep_ghost,
+            drop_ghost,
+            DependencyType::FinishToStart,
+        );
+
+        // ── accept B ─────────────────────────────────────────────────────────
+        m.accept_plan_as_main(branch);
+
+        // Branch is consumed.
+        assert!(!m.plans.contains_key(&branch), "branch is consumed");
+
+        // Trunk untouched.
+        assert!(m.plans[&main].root_blocks.contains(&trunk));
+        assert_eq!(m.block_row(main, trunk), 1, "trunk lane preserved");
+
+        // keep_ghost is in main; B's lane + row_name promoted.
+        assert!(m.plans[&main].root_blocks.contains(&keep_ghost));
+        assert_eq!(m.block_row(main, keep_ghost), 3, "B's lane promoted");
+        assert_eq!(
+            m.plans[&main].row_name(None, 3),
+            Some("Bob"),
+            "B's row_name promoted"
+        );
+
+        // drop_ghost is removed from main and deleted (no sibling holds it after
+        // sibling rebase removes it as a deliberately-removed ghost... wait: sibling
+        // kept drop_ghost. Actually sibling had drop_ghost in its root_blocks
+        // (sibling never removed it). So drop_ghost should survive in work_blocks.
+        // After rebase, sibling loses drop_ghost from main (B removed it), but
+        // sibling kept it → it becomes sibling-owned. So work_blocks still has it.
+        assert!(!m.plans[&main].root_blocks.contains(&drop_ghost));
+        assert!(
+            m.work_blocks.contains_key(&drop_ghost),
+            "drop_ghost survives: sibling still roots it"
+        );
+
+        // b_owned is promoted into main.
+        assert!(m.plans[&main].root_blocks.contains(&b_owned));
+        assert!(m.work_blocks.contains_key(&b_owned));
+
+        // promoted_dep is rewritten to main.
+        let dep = m
+            .dependencies
+            .get(&promoted_dep)
+            .expect("promoted dep survives");
+        assert_eq!(dep.plan_id, main);
+
+        // pruned_dep is gone (endpoint drop_ghost left main).
+        assert!(!m.dependencies.contains_key(&pruned_dep));
+
+        // ── sibling rebase outcomes ───────────────────────────────────────────
+
+        // Sibling still exists.
+        assert!(m.plans.contains_key(&sibling));
+
+        // Sibling keeps its own block.
+        assert!(m.plans[&sibling].root_blocks.contains(&s_owned));
+
+        // Sibling inherits b_owned (promoted by B, start_day=20 >= fork=10).
+        assert!(
+            m.plans[&sibling].root_blocks.contains(&b_owned),
+            "sibling inherits B's promoted block"
+        );
+
+        // Sibling keeps drop_ghost (it never removed it → becomes sibling-owned).
+        assert!(
+            m.plans[&sibling].root_blocks.contains(&drop_ghost),
+            "sibling keeps drop_ghost as owned"
+        );
+
+        // Sibling's dep touching drop_ghost survives (drop_ghost is still in sibling).
+        assert!(
+            m.dependencies.contains_key(&s_dep),
+            "sibling dep stays valid (drop_ghost is still in sibling)"
+        );
+    }
+
+    /// Undo round-trip: a full Model clone taken before accept is identical to
+    /// the model after restoration. Validates that `Clone` on `Model` is
+    /// deep enough for the snapshot-and-restore pattern used in the UI undo path.
+    #[test]
+    fn accept_undo_round_trip_restores_full_model() {
+        // No sibling — ghost dropped by B is hard-deleted, making the delta
+        // between before/after clearly observable. Sibling rebase is already
+        // exercised in accept_end_to_end_comprehensive.
+        let mut m = Model::default();
+        let main = m.create_plan("main", None);
+        let trunk = placed(&mut m, main, "trunk", 2, 5);
+        let ghost = placed(&mut m, main, "ghost", 15, 5);
+        let branch = m.fork_main(10).unwrap();
+        let b_owned = m.add_block_to_plan(branch, "owned", 12, 3, 0);
+        m.remove_block_from_plan(branch, ghost); // B removes ghost
+        let branch_dep =
+            m.create_dependency_in(branch, b_owned, ghost, DependencyType::FinishToStart);
+        let _ = branch_dep;
+
+        // Snapshot the full model before accepting.
+        let before = m.clone();
+
+        m.accept_plan_as_main(branch);
+
+        // Sanity: accept did change the model.
+        assert_ne!(m, before, "accept must mutate the model");
+        assert!(!m.plans.contains_key(&branch));
+        assert!(
+            !m.work_blocks.contains_key(&ghost),
+            "ghost deleted (no sibling holds it)"
+        );
+
+        // Undo: restore the snapshot.
+        m = before.clone();
+
+        // Model is back to pre-accept state.
+        assert!(m.plans.contains_key(&branch), "branch plan restored");
+        assert!(m.work_blocks.contains_key(&ghost), "ghost restored");
+        assert!(m.work_blocks.contains_key(&trunk), "trunk still there");
+        assert_eq!(m, before, "full model equality after undo");
     }
 }
