@@ -3328,6 +3328,10 @@ pub struct BlockInspectorState {
     pub bound: Option<WorkBlockId>,
     pub name_buf: String,
     pub desc_buf: String,
+    /// Whether the multi-step reparent picker is open.
+    pub reparent_open: bool,
+    /// Which plan the user has selected for the parent pick (None = choosing plan).
+    pub reparent_plan_id: Option<model::PlanId>,
 }
 
 /// Human-readable priority labels indexed by `WorkBlock::priority` (0..=3).
@@ -3435,6 +3439,8 @@ pub fn block_inspector_flyout_ui(
             state.desc_buf = wb.description.clone();
         }
         state.bound = Some(id);
+        state.reparent_open = false;
+        state.reparent_plan_id = None;
     }
 
     // Escape deselects — unless a text field is capturing the key, in which case
@@ -3474,6 +3480,9 @@ pub fn block_inspector_flyout_ui(
     let mut edit_sizes = false;
     let mut close = false;
     let mut reparent_to: Option<Option<model::WorkBlockId>> = None;
+    let mut open_reparent = false;
+    let mut cancel_reparent = false;
+    let mut pick_plan: Option<model::PlanId> = None;
 
     egui::SidePanel::right("block_inspector_flyout")
         .resizable(false)
@@ -3583,35 +3592,95 @@ pub fn block_inspector_flyout_ui(
             // ── Parent ─────────────────────────────────────────────────────
             inspector_section(ui, "PARENT");
             let cur_parent = model.work_blocks.get(&id).and_then(|wb| wb.parent);
-            // Collect all blocks except id and its descendants (cycle guard).
-            let candidates: Vec<(model::WorkBlockId, String)> = {
-                let all: Vec<_> = model
-                    .work_blocks
+            let cur_parent_name = cur_parent
+                .and_then(|pid| model.work_blocks.get(&pid))
+                .map(|wb| wb.name.as_str())
+                .unwrap_or("(none)");
+
+            if !state.reparent_open {
+                // Collapsed state: show current parent + a "Move…" trigger.
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new(cur_parent_name)
+                            .color(egui::Color32::from_rgb(180, 165, 130)),
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.small_button("Move…").clicked() {
+                            open_reparent = true;
+                        }
+                    });
+                });
+            } else if state.reparent_plan_id.is_none() {
+                // Step 1 — choose plan.
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new("Select plan:")
+                            .color(egui::Color32::from_rgb(180, 165, 130)),
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.small_button("Cancel").clicked() {
+                            cancel_reparent = true;
+                        }
+                    });
+                });
+                let mut plans: Vec<(model::PlanId, String)> = model
+                    .plans
                     .values()
-                    .filter(|wb| wb.id != id)
-                    .map(|wb| (wb.id, wb.name.clone()))
+                    .map(|p| (p.id, p.name.clone()))
                     .collect();
-                let mut v: Vec<_> = all
-                    .into_iter()
-                    .filter(|(cid, _)| !model.is_descendant_or_self(*cid, id))
+                plans.sort_by(|a, b| a.1.cmp(&b.1));
+                for (pid, pname) in &plans {
+                    if ui.selectable_label(false, pname.as_str()).clicked() {
+                        pick_plan = Some(*pid);
+                    }
+                }
+            } else if let Some(sel_plan) = state.reparent_plan_id {
+                // Step 2 — choose parent block (top-level blocks in sel_plan).
+                let plan_name = model
+                    .plans
+                    .get(&sel_plan)
+                    .map(|p| p.name.clone())
+                    .unwrap_or_default();
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new(format!("Parent in {plan_name}:"))
+                            .color(egui::Color32::from_rgb(180, 165, 130)),
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.small_button("Cancel").clicked() {
+                            cancel_reparent = true;
+                        }
+                    });
+                });
+                // "(detach to top-level)" option.
+                if ui
+                    .selectable_label(
+                        cur_parent.is_none(),
+                        egui::RichText::new("(top-level)").italics(),
+                    )
+                    .clicked()
+                    && cur_parent.is_some()
+                {
+                    reparent_to = Some(None);
+                }
+                // Top-level blocks in the selected plan (filtered: no descendants of id).
+                let root_ids: Vec<model::WorkBlockId> = model
+                    .plans
+                    .get(&sel_plan)
+                    .map(|p| p.root_blocks.clone())
+                    .unwrap_or_default();
+                let mut roots: Vec<(model::WorkBlockId, String)> = root_ids
+                    .iter()
+                    .filter(|&&bid| bid != id && !model.is_descendant_or_self(bid, id))
+                    .filter_map(|&bid| model.work_blocks.get(&bid).map(|wb| (bid, wb.name.clone())))
                     .collect();
-                v.sort_by(|a, b| a.1.cmp(&b.1));
-                v
-            };
-            // "(top-level)" option — clears the parent.
-            let is_top = cur_parent.is_none();
-            if ui
-                .selectable_label(is_top, egui::RichText::new("(top-level)").italics())
-                .clicked()
-                && !is_top
-            {
-                reparent_to = Some(None);
-            }
-            for (cid, cname) in &candidates {
-                let is_cur = cur_parent == Some(*cid);
-                let label: &str = if cname.is_empty() { "(unnamed)" } else { cname };
-                if ui.selectable_label(is_cur, label).clicked() && !is_cur {
-                    reparent_to = Some(Some(*cid));
+                roots.sort_by(|a, b| a.1.cmp(&b.1));
+                for (bid, bname) in &roots {
+                    let is_cur = cur_parent == Some(*bid);
+                    let label: &str = if bname.is_empty() { "(unnamed)" } else { bname };
+                    if ui.selectable_label(is_cur, label).clicked() && !is_cur {
+                        reparent_to = Some(Some(*bid));
+                    }
                 }
             }
         });
@@ -3642,14 +3711,25 @@ pub fn block_inspector_flyout_ui(
             error!("save_model failed: {e}");
         }
     }
+    if open_reparent {
+        state.reparent_open = true;
+        state.reparent_plan_id = None;
+    }
+    if let Some(pid) = pick_plan {
+        state.reparent_plan_id = Some(pid);
+    }
+    if cancel_reparent {
+        state.reparent_open = false;
+        state.reparent_plan_id = None;
+    }
     if let Some(new_parent) = reparent_to {
-        if let Some(plan_id) = model.main_plan_id() {
-            if model.reparent(plan_id, id, new_parent).is_ok() {
-                if let Err(e) = db::save_model(&conn, &model) {
-                    error!("save_model failed: {e}");
-                }
+        if model.reparent(id, new_parent).is_ok() {
+            if let Err(e) = db::save_model(&conn, &model) {
+                error!("save_model failed: {e}");
             }
         }
+        state.reparent_open = false;
+        state.reparent_plan_id = None;
     }
     if edit_sizes {
         picker.settings_open = true;
