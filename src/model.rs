@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use bevy::prelude::Resource;
 use chrono::NaiveDate;
@@ -748,6 +748,127 @@ impl Model {
         }
     }
 
+    /// Promotes branch `branch_id` to be the new main: main adopts the branch's
+    /// future and the branch is consumed.
+    ///
+    /// For a branch `B` forked at day `F`:
+    /// - main's trunk (`start_day < F`) is preserved untouched;
+    /// - `B`'s `root_blocks` (its owned blocks plus the ghosts it kept) become
+    ///   main's future, **promoting** `B`'s owned blocks and **dropping** the
+    ///   ghosts `B` removed;
+    /// - `B`'s branch-local staffing (`block_rows`, `row_names`) and dependencies
+    ///   are promoted onto main (B-wins);
+    /// - `B` is then deleted (its future is now main's).
+    ///
+    /// No-op if `branch_id` is missing, is itself main (`branch_start_day` is
+    /// `None`), or there is no main plan.
+    ///
+    /// **Siblings are intentionally left as-is** — a sibling may still reference a
+    /// ghost main just dropped, or miss a block main just promoted; reconciling
+    /// them is br-223's job. This method only guarantees the model is internally
+    /// consistent enough to `save_model` (no dangling dep `plan_id`, no
+    /// `block_rows`/roots referencing deleted blocks). The caller persists via
+    /// `db::save_model`, per the auto-save convention.
+    pub fn accept_plan_as_main(&mut self, branch_id: PlanId) {
+        let Some(branch) = self.plans.get(&branch_id) else {
+            return;
+        };
+        // A `None` fork day means this *is* a baseline plan, not a branch.
+        let Some(fork_day) = branch.branch_start_day else {
+            return;
+        };
+        let Some(main_id) = self.main_plan_id() else {
+            return;
+        };
+        if main_id == branch_id {
+            return;
+        }
+
+        // Snapshot the branch's data before we start mutating plans.
+        let b_roots = branch.root_blocks.clone();
+        let b_row_names = branch.row_names.clone();
+        let b_block_rows = branch.block_rows.clone();
+
+        // --- Step 1: new main membership = trunk (< F) ++ B's future, deduped. ---
+        let old_main_roots = self.plans[&main_id].root_blocks.clone();
+        let mut new_main_roots: Vec<WorkBlockId> = Vec::new();
+        let mut seen: HashSet<WorkBlockId> = HashSet::new();
+        // Trunk first, in main's existing order.
+        for &id in &old_main_roots {
+            let is_trunk = self
+                .work_blocks
+                .get(&id)
+                .is_some_and(|wb| wb.start_day < fork_day);
+            if is_trunk && seen.insert(id) {
+                new_main_roots.push(id);
+            }
+        }
+        // Then B's future, in B's order (owned blocks + kept ghosts).
+        for &id in &b_roots {
+            if seen.insert(id) {
+                new_main_roots.push(id);
+            }
+        }
+        let new_set: HashSet<WorkBlockId> = new_main_roots.iter().copied().collect();
+        // Ghosts B removed: old main blocks (>= F) no longer present in main.
+        let dropped: Vec<WorkBlockId> = old_main_roots
+            .iter()
+            .copied()
+            .filter(|id| !new_set.contains(id))
+            .collect();
+
+        // --- Step 2: promote staffing onto main and apply the new membership. ---
+        {
+            let main = self.plans.get_mut(&main_id).unwrap();
+            // B's lane wins for its blocks; trunk keeps main's existing lane.
+            for (id, row) in b_block_rows {
+                main.block_rows.insert(id, row);
+            }
+            // Drop lane entries for blocks that are no longer main's.
+            main.block_rows.retain(|id, _| new_set.contains(id));
+            // B's staffing (row names) becomes main's. B was forked from main, so
+            // its row_names started as a copy of main's and only diverged — trunk
+            // names are preserved, B's edits win.
+            main.row_names = b_row_names;
+            main.root_blocks = new_main_roots;
+        }
+
+        // --- Step 3: promote branch-local dependencies, prune the dangling. ---
+        for dep in self.dependencies.values_mut() {
+            if dep.plan_id == branch_id {
+                dep.plan_id = main_id;
+            }
+        }
+        // A main dep is invalid if either endpoint left main. Sibling deps
+        // (other plan_ids) are untouched here — that's br-223's concern.
+        self.dependencies.retain(|_, d| {
+            d.plan_id != main_id
+                || (new_set.contains(&d.predecessor) && new_set.contains(&d.successor))
+        });
+
+        // --- Step 4: drop orphaned removed-ghosts not rooted in any plan. ---
+        // A dropped block still rooted in a sibling stays alive (br-223 handles
+        // it); one rooted nowhere is fully removed, mirroring the cleanup in
+        // `remove_block_from_plan`.
+        for id in dropped {
+            let still_rooted = self.plans.values().any(|p| p.root_blocks.contains(&id));
+            if !still_rooted {
+                self.work_blocks.remove(&id);
+                self.dependencies
+                    .retain(|_, d| d.predecessor != id && d.successor != id);
+                for wb in self.work_blocks.values_mut() {
+                    if wb.parent == Some(id) {
+                        wb.parent = None;
+                    }
+                }
+            }
+        }
+
+        // --- Step 5: consume B. Its owned blocks are now rooted in main, so
+        // `delete_plan` (which only deletes blocks rooted nowhere) keeps them. ---
+        self.delete_plan(branch_id);
+    }
+
     /// Dev reset: removes every work block, dependency, and branch plan, leaving
     /// a single empty main plan. Returns main's id (creating one if needed).
     pub fn clear_all_work(&mut self) -> PlanId {
@@ -1282,5 +1403,168 @@ mod tests {
         assert_eq!(dep.predecessor, block_a);
         assert_eq!(dep.successor, block_b);
         assert_eq!(dep.dependency_type, DependencyType::FinishToStart);
+    }
+
+    // --- accept_plan_as_main ---
+
+    #[test]
+    fn accept_promotes_owned_branch_block_into_main() {
+        let mut m = Model::default();
+        let main = m.create_plan("main", None);
+        let trunk = placed(&mut m, main, "trunk", 0, 5); // < F
+        let ghost = placed(&mut m, main, "ghost", 20, 5); // >= F, branch keeps
+        let branch = m.fork_main(10).unwrap(); // F = 10
+        let owned = m.add_block_to_plan(branch, "owned", 15, 5, 0); // branch-owned, >= F
+
+        m.accept_plan_as_main(branch);
+
+        let roots = &m.plans[&main].root_blocks;
+        assert!(roots.contains(&owned), "owned block is promoted into main");
+        assert!(
+            m.work_blocks.contains_key(&owned),
+            "owned block survives consume"
+        );
+        assert!(roots.contains(&trunk), "trunk is preserved");
+        assert!(roots.contains(&ghost), "kept ghost is preserved");
+    }
+
+    #[test]
+    fn accept_drops_ghost_the_branch_removed() {
+        let mut m = Model::default();
+        let main = m.create_plan("main", None);
+        let keep = placed(&mut m, main, "keep", 20, 5);
+        let drop = placed(&mut m, main, "drop", 30, 5);
+        let branch = m.fork_main(10).unwrap(); // inherits both ghosts
+        m.remove_block_from_plan(branch, drop); // branch removes one
+
+        m.accept_plan_as_main(branch);
+
+        let roots = &m.plans[&main].root_blocks;
+        assert!(roots.contains(&keep), "kept ghost stays in main");
+        assert!(!roots.contains(&drop), "removed ghost is dropped from main");
+        assert!(
+            !m.work_blocks.contains_key(&drop),
+            "dropped ghost is deleted when no sibling holds it"
+        );
+    }
+
+    #[test]
+    fn accept_leaves_the_trunk_untouched() {
+        let mut m = Model::default();
+        let main = m.create_plan("main", None);
+        let trunk = placed(&mut m, main, "trunk", 2, 5); // < F
+        m.set_block_row(main, trunk, 3);
+        let branch = m.fork_main(10).unwrap();
+
+        m.accept_plan_as_main(branch);
+
+        assert!(m.plans[&main].root_blocks.contains(&trunk));
+        assert!(m.work_blocks.contains_key(&trunk));
+        assert_eq!(m.block_row(main, trunk), 3, "trunk lane is preserved");
+    }
+
+    #[test]
+    fn accept_promotes_branch_rows_and_row_names() {
+        let mut m = Model::default();
+        let main = m.create_plan("main", None);
+        let ghost = placed(&mut m, main, "ghost", 20, 5);
+        let branch = m.fork_main(10).unwrap();
+        // Branch re-lanes the ghost and names that row.
+        m.set_block_row(branch, ghost, 4);
+        m.plans
+            .get_mut(&branch)
+            .unwrap()
+            .set_row_name(None, 4, "Alice".to_string());
+
+        m.accept_plan_as_main(branch);
+
+        assert_eq!(m.block_row(main, ghost), 4, "branch lane promoted to main");
+        assert_eq!(
+            m.plans[&main].row_name(None, 4),
+            Some("Alice"),
+            "branch row name promoted to main"
+        );
+    }
+
+    #[test]
+    fn accept_promotes_branch_deps_and_prunes_dangling() {
+        let mut m = Model::default();
+        let main = m.create_plan("main", None);
+        let a = placed(&mut m, main, "a", 15, 5);
+        let b = placed(&mut m, main, "b", 25, 5);
+        let doomed = placed(&mut m, main, "doomed", 35, 5);
+        let branch = m.fork_main(10).unwrap(); // inherits a, b, doomed
+                                               // A branch-local dep between two kept blocks → promoted to main.
+        let kept_dep = m.create_dependency_in(branch, a, b, DependencyType::FinishToStart);
+        // A branch-local dep touching the removed ghost → endpoint dropped → pruned.
+        let dangling = m.create_dependency_in(branch, a, doomed, DependencyType::FinishToStart);
+        m.remove_block_from_plan(branch, doomed);
+
+        m.accept_plan_as_main(branch);
+
+        let kept = m.dependencies.get(&kept_dep).expect("kept dep survives");
+        assert_eq!(kept.plan_id, main, "branch dep is rewritten to main's id");
+        assert!(
+            !m.dependencies.contains_key(&dangling),
+            "dep whose endpoint left main is pruned"
+        );
+    }
+
+    #[test]
+    fn accept_consumes_the_branch() {
+        let mut m = Model::default();
+        let main = m.create_plan("main", None);
+        let _ghost = placed(&mut m, main, "ghost", 20, 5);
+        let branch = m.fork_main(10).unwrap();
+        let owned = m.add_block_to_plan(branch, "owned", 15, 5, 0);
+
+        m.accept_plan_as_main(branch);
+
+        assert!(!m.plans.contains_key(&branch), "branch plan is consumed");
+        assert!(
+            m.work_blocks.contains_key(&owned),
+            "branch-owned block is kept (now main's)"
+        );
+        assert_eq!(m.main_plan_id(), Some(main), "main is still main");
+    }
+
+    #[test]
+    fn accept_keeps_a_dropped_ghost_a_sibling_still_holds() {
+        // A removed ghost still rooted in a sibling branch must not be hard
+        // deleted — sibling reconciliation is br-223's job.
+        let mut m = Model::default();
+        let main = m.create_plan("main", None);
+        let shared = placed(&mut m, main, "shared", 20, 5);
+        let accepted = m.fork_main(10).unwrap(); // inherits shared
+        let sibling = m.fork_main(10).unwrap(); // also inherits shared
+        m.remove_block_from_plan(accepted, shared); // accepted branch removes it
+
+        m.accept_plan_as_main(accepted);
+
+        assert!(
+            !m.plans[&main].root_blocks.contains(&shared),
+            "main drops the ghost"
+        );
+        assert!(
+            m.plans[&sibling].root_blocks.contains(&shared),
+            "sibling still holds it"
+        );
+        assert!(
+            m.work_blocks.contains_key(&shared),
+            "block stays alive because a sibling still roots it"
+        );
+    }
+
+    #[test]
+    fn accept_on_baseline_plan_is_a_noop() {
+        let mut m = Model::default();
+        let main = m.create_plan("main", None);
+        let b = placed(&mut m, main, "b", 5, 5);
+
+        m.accept_plan_as_main(main); // main has no branch_start_day → no-op
+
+        assert_eq!(m.main_plan_id(), Some(main));
+        assert!(m.plans.contains_key(&main));
+        assert!(m.work_blocks.contains_key(&b));
     }
 }
