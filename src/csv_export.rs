@@ -116,9 +116,12 @@ pub struct CsvRow {
 pub fn parse_csv(csv: &str) -> Result<Vec<CsvRow>, Vec<String>> {
     let mut rows = Vec::new();
     let mut errors = Vec::new();
-    let mut lines = csv.lines();
 
-    let header = lines.next().unwrap_or("").trim();
+    // The header is always a single physical line. The data rows below it are
+    // full RFC-4180 records, which may span several physical lines when a quoted
+    // field carries an embedded newline — the inverse of `csv_field`'s quoting.
+    let (header_line, body) = csv.split_once('\n').unwrap_or((csv, ""));
+    let header = header_line.trim();
     if header != "id,name,parent_id,start_date,duration_days,row,row_name" {
         errors.push(format!(
             "Line 1: expected header \
@@ -127,9 +130,8 @@ pub fn parse_csv(csv: &str) -> Result<Vec<CsvRow>, Vec<String>> {
         return Err(errors);
     }
 
-    for (idx, line) in lines.enumerate() {
+    for (idx, fields) in parse_csv_records(body).into_iter().enumerate() {
         let line_num = idx + 2;
-        let fields = parse_csv_line(line);
         if fields.len() != 7 {
             errors.push(format!(
                 "Line {line_num}: expected 7 fields, got {}",
@@ -305,47 +307,52 @@ pub fn clear_plan_blocks(model: &mut Model, plan_id: PlanId) {
     }
 }
 
-/// Parses one RFC-4180 CSV line into fields.  Handles quoted fields with
-/// embedded commas and doubled-quote escapes (`""`).  Assumes single-line
-/// (no newlines embedded in fields — consistent with what `plan_to_csv` writes).
-fn parse_csv_line(line: &str) -> Vec<String> {
-    let mut fields = Vec::new();
-    let mut chars = line.chars().peekable();
-    loop {
-        let field = if chars.peek() == Some(&'"') {
-            chars.next();
-            let mut s = String::new();
-            loop {
-                match chars.next() {
-                    None => break,
-                    Some('"') => {
-                        if chars.peek() == Some(&'"') {
-                            chars.next();
-                            s.push('"');
-                        } else {
-                            break;
-                        }
-                    }
-                    Some(c) => s.push(c),
+/// Splits an RFC-4180 CSV body into records, each a vector of fields.
+///
+/// A quoted field (`"…"`) may contain commas, doubled-quote escapes (`""` → a
+/// literal `"`), and embedded newlines; record boundaries are the newlines that
+/// fall *outside* quotes. This is the exact inverse of the quoting `csv_field`
+/// applies on export, so a multi-line quoted field round-trips. Both `\n` and
+/// `\r\n` line endings are accepted; a trailing newline does not yield an empty
+/// trailing record.
+fn parse_csv_records(body: &str) -> Vec<Vec<String>> {
+    let mut records: Vec<Vec<String>> = Vec::new();
+    let mut record: Vec<String> = Vec::new();
+    let mut field = String::new();
+    let mut in_quotes = false;
+    let mut chars = body.chars().peekable();
+
+    while let Some(c) = chars.next() {
+        if in_quotes {
+            match c {
+                '"' if chars.peek() == Some(&'"') => {
+                    chars.next();
+                    field.push('"');
                 }
+                '"' => in_quotes = false,
+                other => field.push(other),
             }
-            s
         } else {
-            let mut s = String::new();
-            while matches!(chars.peek(), Some(&c) if c != ',') {
-                s.push(chars.next().unwrap());
+            match c {
+                '"' => in_quotes = true,
+                ',' => record.push(std::mem::take(&mut field)),
+                // `\r\n`: drop the `\r` and let the `\n` end the record. A lone
+                // `\r` (rare) also ends the record.
+                '\r' if chars.peek() == Some(&'\n') => {}
+                '\n' | '\r' => {
+                    record.push(std::mem::take(&mut field));
+                    records.push(std::mem::take(&mut record));
+                }
+                other => field.push(other),
             }
-            s
-        };
-        fields.push(field);
-        match chars.peek() {
-            Some(&',') => {
-                chars.next();
-            }
-            _ => break,
         }
     }
-    fields
+    // Flush a final record that ended without a trailing newline.
+    if !field.is_empty() || !record.is_empty() {
+        record.push(field);
+        records.push(record);
+    }
+    records
 }
 
 #[cfg(test)]
@@ -591,17 +598,46 @@ mod tests {
     }
 
     #[test]
-    fn parse_csv_line_handles_empty_trailing_field() {
+    fn parse_csv_records_handles_empty_trailing_field() {
         // Last field (row_name) may be empty — must still produce 7 fields.
-        let fields = parse_csv_line("1,Alpha,,2025-01-06,5,0,");
-        assert_eq!(fields.len(), 7);
-        assert_eq!(fields[6], "");
+        let records = parse_csv_records("1,Alpha,,2025-01-06,5,0,");
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].len(), 7);
+        assert_eq!(records[0][6], "");
     }
 
     #[test]
-    fn parse_csv_line_unquotes_doubled_quotes() {
-        let fields = parse_csv_line("1,\"say \"\"hi\"\"\",, 2025-01-06,5,0,");
-        assert_eq!(fields[1], "say \"hi\"");
+    fn parse_csv_records_unquotes_doubled_quotes() {
+        let records = parse_csv_records("1,\"say \"\"hi\"\"\",, 2025-01-06,5,0,");
+        assert_eq!(records[0][1], "say \"hi\"");
+    }
+
+    #[test]
+    fn parse_csv_records_no_trailing_empty_record() {
+        let records = parse_csv_records("1,A,,2025-01-06,5,0,\n2,B,,2025-01-06,5,0,\n");
+        assert_eq!(
+            records.len(),
+            2,
+            "a trailing newline must not add an empty record"
+        );
+    }
+
+    #[test]
+    fn parse_csv_records_reassembles_quoted_embedded_newline() {
+        // A quoted field containing a newline is one field of one record — the
+        // physical line break inside the quotes must not split the record.
+        let records = parse_csv_records("1,\"line\nbreak\",,2025-01-06,5,0,\n");
+        assert_eq!(records.len(), 1, "embedded newline stays within one record");
+        assert_eq!(records[0].len(), 7);
+        assert_eq!(records[0][1], "line\nbreak");
+    }
+
+    #[test]
+    fn parse_csv_records_handles_crlf_line_endings() {
+        let records = parse_csv_records("1,A,,2025-01-06,5,0,\r\n2,B,,2025-01-06,5,0,\r\n");
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0][1], "A");
+        assert_eq!(records[1][1], "B");
     }
 
     #[test]
@@ -778,6 +814,38 @@ mod tests {
             m.plans[&import_id].row_name(None, 1),
             Some("Team"),
             "row name must survive round-trip"
+        );
+    }
+
+    #[test]
+    fn export_import_round_trips_name_with_embedded_newline() {
+        // The asymmetry br-234 fixes: csv_field quotes embedded newlines on
+        // export, so the importer must reassemble the quoted multi-line field
+        // rather than fail the 7-field check on the split physical lines.
+        let mut m = base_model();
+        let plan_id = m.main_plan_id().unwrap();
+        m.add_block_to_plan(plan_id, "two\nlines", 0, 5, 0);
+
+        let csv = plan_to_csv(&m.plans[&plan_id], &m);
+        // Precondition: export really did quote the newline into the field.
+        assert!(
+            csv.contains("\"two\nlines\""),
+            "export should RFC-4180-quote the embedded newline"
+        );
+
+        let import_id = m.create_plan("imported", None);
+        let rows = parse_csv(&csv).expect("import must succeed, not fail the field count");
+        let errors = populate_plan(&rows, import_id, &mut m);
+        assert!(errors.is_empty(), "{errors:?}");
+
+        let name = m.plans[&import_id]
+            .root_blocks
+            .first()
+            .map(|id| m.work_blocks[id].name.clone())
+            .expect("one imported block");
+        assert_eq!(
+            name, "two\nlines",
+            "the embedded newline survives the round trip"
         );
     }
 
