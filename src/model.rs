@@ -450,6 +450,77 @@ impl Model {
         }
     }
 
+    /// Returns `true` if `target` is `ancestor` itself or a transitive
+    /// descendant of it (i.e., reachable by following parent links down from
+    /// `ancestor`). Used by `reparent` to reject cycles.
+    pub(crate) fn is_descendant_or_self(&self, target: WorkBlockId, ancestor: WorkBlockId) -> bool {
+        let mut stack = vec![ancestor];
+        while let Some(id) = stack.pop() {
+            if id == target {
+                return true;
+            }
+            for wb in self.work_blocks.values() {
+                if wb.parent == Some(id) {
+                    stack.push(wb.id);
+                }
+            }
+        }
+        false
+    }
+
+    /// Moves `block` under `new_parent`, or detaches it to top-level when
+    /// `new_parent` is `None`. Returns `Err` if the move would create a cycle.
+    ///
+    /// `WorkBlock.parent` is global (not per-plan), so the change applies
+    /// across every plan that shares the block. `root_blocks` is updated on
+    /// ALL plans accordingly: adopting removes the block everywhere; detaching
+    /// adds it to the main plan and propagates to branches via
+    /// `link_main_block_to_branches` (same logic as creating a new top-level
+    /// block).
+    ///
+    /// Rollup is recomputed up both the old and new parent chains.
+    pub fn reparent(
+        &mut self,
+        block: WorkBlockId,
+        new_parent: Option<WorkBlockId>,
+    ) -> Result<(), &'static str> {
+        if !self.work_blocks.contains_key(&block) {
+            return Err("block not found");
+        }
+        if let Some(np) = new_parent {
+            if self.is_descendant_or_self(np, block) {
+                return Err("would create a cycle");
+            }
+        }
+        let old_parent = self.work_blocks.get(&block).and_then(|wb| wb.parent);
+        if old_parent.is_none() && new_parent.is_some() {
+            // Top-level → child: remove from ALL plans (parent is global).
+            for plan in self.plans.values_mut() {
+                plan.root_blocks.retain(|&b| b != block);
+            }
+        } else if old_parent.is_some() && new_parent.is_none() {
+            // Child → top-level: add to main and propagate to branches.
+            if let Some(main_id) = self.main_plan_id() {
+                if let Some(plan) = self.plans.get_mut(&main_id) {
+                    if !plan.root_blocks.contains(&block) {
+                        plan.root_blocks.push(block);
+                    }
+                }
+                self.link_main_block_to_branches(block);
+            }
+        }
+        if let Some(wb) = self.work_blocks.get_mut(&block) {
+            wb.parent = new_parent;
+        }
+        if let Some(op) = old_parent {
+            self.recompute_rollup(op);
+        }
+        if let Some(np) = new_parent {
+            self.recompute_rollup(np);
+        }
+        Ok(())
+    }
+
     // --- Accessors ---
 
     pub fn get_work_block(&self, id: WorkBlockId) -> Option<&WorkBlock> {
@@ -1060,6 +1131,134 @@ mod tests {
         assert_eq!(m.work_blocks[&p].duration_days, 4);
         assert_eq!(m.work_blocks[&gp].start_day, 8);
         assert_eq!(m.work_blocks[&gp].duration_days, 4);
+    }
+
+    // ── reparent ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn reparent_moves_child_to_new_parent() {
+        let mut m = Model::default();
+        let pl = m.create_plan("p", None);
+        let a = placed(&mut m, pl, "a", 0, 5);
+        let b = placed(&mut m, pl, "b", 0, 5);
+        let child = m.add_child_block(pl, a, "child", 0, 3, 0);
+        // Move child from a to b.
+        m.reparent(child, Some(b)).unwrap();
+        assert_eq!(m.work_blocks[&child].parent, Some(b));
+        assert!(!m.children(a).contains(&child));
+        assert!(m.children(b).contains(&child));
+    }
+
+    #[test]
+    fn reparent_detach_adds_to_root_blocks() {
+        let mut m = Model::default();
+        let pl = m.create_plan("p", None);
+        let parent = placed(&mut m, pl, "parent", 0, 5);
+        let child = m.add_child_block(pl, parent, "child", 0, 3, 0);
+        assert!(!m.plans[&pl].root_blocks.contains(&child));
+        m.reparent(child, None).unwrap();
+        assert_eq!(m.work_blocks[&child].parent, None);
+        assert!(m.plans[&pl].root_blocks.contains(&child));
+    }
+
+    #[test]
+    fn reparent_to_child_removes_from_root_blocks() {
+        let mut m = Model::default();
+        let pl = m.create_plan("p", None);
+        let parent = placed(&mut m, pl, "parent", 0, 5);
+        let top = placed(&mut m, pl, "top", 0, 3);
+        assert!(m.plans[&pl].root_blocks.contains(&top));
+        m.reparent(top, Some(parent)).unwrap();
+        assert_eq!(m.work_blocks[&top].parent, Some(parent));
+        assert!(!m.plans[&pl].root_blocks.contains(&top));
+    }
+
+    #[test]
+    fn reparent_rejects_self_cycle() {
+        let mut m = Model::default();
+        let pl = m.create_plan("p", None);
+        let a = placed(&mut m, pl, "a", 0, 5);
+        assert!(m.reparent(a, Some(a)).is_err());
+    }
+
+    #[test]
+    fn reparent_rejects_ancestor_as_descendant() {
+        let mut m = Model::default();
+        let pl = m.create_plan("p", None);
+        let gp = placed(&mut m, pl, "gp", 0, 5);
+        let p = m.add_child_block(pl, gp, "p", 0, 3, 0);
+        let c = m.add_child_block(pl, p, "c", 0, 2, 0);
+        // Making gp a child of c would create a cycle gp→p→c→gp.
+        assert!(m.reparent(gp, Some(c)).is_err());
+    }
+
+    #[test]
+    fn reparent_recomputes_rollup_on_old_and_new_parent() {
+        let mut m = Model::default();
+        let pl = m.create_plan("p", None);
+        let old_p = placed(&mut m, pl, "old_p", 0, 10);
+        let new_p = placed(&mut m, pl, "new_p", 20, 10);
+        m.work_blocks.get_mut(&old_p).unwrap().rollup = true;
+        m.work_blocks.get_mut(&new_p).unwrap().rollup = true;
+        let child = m.add_child_block(pl, old_p, "child", 2, 4, 0);
+        // old_p should now span [2,6) from rollup.
+        assert_eq!(m.work_blocks[&old_p].start_day, 2);
+        m.reparent(child, Some(new_p)).unwrap();
+        // old_p has no children → rollup recompute is a no-op (keeps own placement).
+        // new_p gains child at [2,6) → new_p should roll up to span it.
+        assert_eq!(m.work_blocks[&new_p].start_day, 2);
+        assert_eq!(m.work_blocks[&new_p].duration_days, 4);
+    }
+
+    #[test]
+    fn reparent_cross_plan_removes_from_all_root_blocks() {
+        // A top-level block shared between main and a branch must be removed
+        // from BOTH plans' root_blocks when reparented to a child.
+        let mut m = Model::default();
+        let main = m.create_plan("main", None);
+        let parent = placed(&mut m, main, "parent", 0, 5);
+        let shared = placed(&mut m, main, "shared", 0, 3);
+        // Fork so the branch also inherits `shared`.
+        let branch = m.fork_main(0).unwrap();
+        assert!(m.plans[&main].root_blocks.contains(&shared));
+        assert!(m.plans[&branch].root_blocks.contains(&shared));
+        // Reparent `shared` to become a child of `parent`.
+        m.reparent(shared, Some(parent)).unwrap();
+        // Must be gone from both plans.
+        assert!(!m.plans[&main].root_blocks.contains(&shared));
+        assert!(!m.plans[&branch].root_blocks.contains(&shared));
+        assert_eq!(m.work_blocks[&shared].parent, Some(parent));
+    }
+
+    #[test]
+    fn reparent_detach_propagates_to_branches() {
+        // Detaching a child to top-level adds it to main and propagates to
+        // branches that start at or before the block's start_day.
+        let mut m = Model::default();
+        let main = m.create_plan("main", None);
+        let root = placed(&mut m, main, "root", 0, 5);
+        let child = m.add_child_block(main, root, "child", 1, 3, 0);
+        let branch = m.fork_main(0).unwrap();
+        // child is a child (not in root_blocks) before the call.
+        assert!(!m.plans[&main].root_blocks.contains(&child));
+        m.reparent(child, None).unwrap();
+        // Now top-level in main.
+        assert!(m.plans[&main].root_blocks.contains(&child));
+        // And propagated to the branch (start_day=1 >= fork_day=0).
+        assert!(m.plans[&branch].root_blocks.contains(&child));
+    }
+
+    #[test]
+    fn is_descendant_or_self_detects_transitive() {
+        let mut m = Model::default();
+        let pl = m.create_plan("p", None);
+        let gp = placed(&mut m, pl, "gp", 0, 5);
+        let p = m.add_child_block(pl, gp, "p", 0, 3, 0);
+        let c = m.add_child_block(pl, p, "c", 0, 2, 0);
+        assert!(m.is_descendant_or_self(gp, gp)); // self
+        assert!(m.is_descendant_or_self(p, gp)); // direct child
+        assert!(m.is_descendant_or_self(c, gp)); // grandchild
+        assert!(!m.is_descendant_or_self(gp, c)); // ancestor is NOT a descendant
     }
 
     #[test]

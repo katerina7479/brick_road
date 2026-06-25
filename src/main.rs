@@ -528,7 +528,9 @@ fn sync_weekend_bands(
 
     // Holidays occupy a full greyed day-wide column that work skips.
     let holiday_color = Color::srgba(0.48, 0.50, 0.56, 0.20);
-    for (left_x, _date, _desc) in calendar::holiday_columns(&model.calendar.global_off_days(), &model.calendar, span) {
+    for (left_x, _date, _desc) in
+        calendar::holiday_columns(&model.calendar.global_off_days(), &model.calendar, span)
+    {
         commands.spawn((
             WeekendBand,
             Sprite {
