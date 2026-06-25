@@ -1,0 +1,6 @@
+# Lock the formatting edition explicitly so a contributor's global rustfmt
+# config or a newer default style edition can't reintroduce cross-version drift.
+# Everything else stays at rustfmt defaults (the project's "cargo fmt defaults"
+# stance). See br-218.
+edition = "2021"
+style_edition = "2021"

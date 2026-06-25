@@ -1,0 +1,7 @@
+[toolchain]
+# Pin a SPECIFIC version (not "stable", which floats) so every contributor's
+# `cargo fmt` / `cargo clippy` produces identical output. 1.96.0 is the latest
+# stable as of this pin and the formatter `main` is already clean under.
+# See br-218 and the .githooks/pre-commit fmt gate.
+channel = "1.96.0"
+components = ["rustfmt", "clippy"]
