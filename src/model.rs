@@ -867,6 +867,121 @@ impl Model {
         // --- Step 5: consume B. Its owned blocks are now rooted in main, so
         // `delete_plan` (which only deletes blocks rooted nowhere) keeps them. ---
         self.delete_plan(branch_id);
+
+        // --- Step 6: rebase every remaining sibling onto the new main.
+        // Pass old_main_roots so rebase can distinguish "new block from B"
+        // (not in old main → inherit) from "sibling deliberately removed"
+        // (in old main, sibling dropped it → don't re-add). ---
+        self.rebase_siblings_onto_main(&old_main_roots);
+    }
+
+    /// Rebases every branch (sibling) onto the current state of main.
+    ///
+    /// Called after [`accept_plan_as_main`] rewrites main. Each sibling
+    /// re-derives its membership: it inherits the new main's blocks where
+    /// `start_day >= sibling.branch_start_day` (ghosts), while keeping blocks
+    /// it owns (in its `root_blocks` but not in new main).
+    ///
+    /// Removed-ghost semantics: if a sibling had previously removed a ghost
+    /// (the block was not in the sibling's `root_blocks`), it stays removed —
+    /// that removal was deliberate and is preserved. `old_main_roots` (main's
+    /// roots before the accept) lets us distinguish a sibling-removed ghost
+    /// (was in old main, sibling dropped it) from a newly promoted block (was
+    /// not in old main, block comes from the accepted branch) — only newly
+    /// promoted blocks are unconditionally added as new ghosts.
+    ///
+    /// Newly promoted blocks (from the accepted branch) with
+    /// `start_day >= sibling.branch_start_day` are added to the sibling as
+    /// new ghosts, seeded with main's lane (`block_rows`).
+    ///
+    /// Sibling-local deps whose endpoints are no longer in the sibling's
+    /// roster are pruned to keep the model internally consistent.
+    pub fn rebase_siblings_onto_main(&mut self, old_main_roots: &[WorkBlockId]) {
+        let Some(main_id) = self.main_plan_id() else {
+            return;
+        };
+
+        let new_main_roots: Vec<WorkBlockId> = self.plans[&main_id].root_blocks.clone();
+        let new_main_set: HashSet<WorkBlockId> = new_main_roots.iter().copied().collect();
+        let old_main_set: HashSet<WorkBlockId> = old_main_roots.iter().copied().collect();
+        let main_rows: HashMap<WorkBlockId, i32> = self.plans[&main_id].block_rows.clone();
+
+        let sibling_ids: Vec<PlanId> = self
+            .plans
+            .values()
+            .filter(|p| p.branch_start_day.is_some())
+            .map(|p| p.id)
+            .collect();
+
+        // Collect the new root sets per sibling before mutating plans (needed
+        // later for dep pruning without re-borrowing).
+        let mut new_root_sets: HashMap<PlanId, HashSet<WorkBlockId>> = HashMap::new();
+
+        for sib_id in &sibling_ids {
+            let sib_id = *sib_id;
+            let fork_day = self.plans[&sib_id].branch_start_day.unwrap();
+            let old_roots = self.plans[&sib_id].root_blocks.clone();
+            let old_roots_set: HashSet<WorkBlockId> = old_roots.iter().copied().collect();
+
+            // Blocks the sibling owns: in its roster but not in new main.
+            let owned: Vec<WorkBlockId> = old_roots
+                .iter()
+                .copied()
+                .filter(|id| !new_main_set.contains(id))
+                .collect();
+
+            // New roster: main's ghosts (start_day >= fork_day) then owned.
+            //
+            // A block from new_main is inherited by this sibling only if:
+            //   - it qualifies by start_day (>= fork_day), AND
+            //   - it was NOT in old main (newly promoted from accepted branch → new
+            //     ghost, always add), OR it IS already in the sibling's roster (was
+            //     a ghost the sibling kept → preserve).
+            //
+            // Blocks that were in old main AND the sibling does NOT have them are
+            // deliberately-removed ghosts: we honour the sibling's removal.
+            let new_roots: Vec<WorkBlockId> = new_main_roots
+                .iter()
+                .copied()
+                .filter(|id| {
+                    let start_ok = self
+                        .work_blocks
+                        .get(id)
+                        .is_some_and(|wb| wb.start_day >= fork_day);
+                    if !start_ok {
+                        return false;
+                    }
+                    let newly_promoted = !old_main_set.contains(id);
+                    let sibling_kept = old_roots_set.contains(id);
+                    newly_promoted || sibling_kept
+                })
+                .chain(owned.iter().copied())
+                .collect();
+
+            let new_set: HashSet<WorkBlockId> = new_roots.iter().copied().collect();
+
+            let sib = self.plans.get_mut(&sib_id).unwrap();
+            // Prune stale lane entries; seed newly-inherited ghosts from main's lane.
+            sib.block_rows.retain(|id, _| new_set.contains(id));
+            for &id in &new_roots {
+                if new_main_set.contains(&id) {
+                    let main_row = main_rows.get(&id).copied().unwrap_or(0);
+                    sib.block_rows.entry(id).or_insert(main_row);
+                }
+            }
+            sib.root_blocks = new_roots;
+
+            new_root_sets.insert(sib_id, new_set);
+        }
+
+        // Prune sibling-local deps whose endpoints left the sibling's roster.
+        self.dependencies.retain(|_, d| {
+            if let Some(set) = new_root_sets.get(&d.plan_id) {
+                set.contains(&d.predecessor) && set.contains(&d.successor)
+            } else {
+                true
+            }
+        });
     }
 
     /// Dev reset: removes every work block, dependency, and branch plan, leaving
@@ -1566,5 +1681,239 @@ mod tests {
         assert_eq!(m.main_plan_id(), Some(main));
         assert!(m.plans.contains_key(&main));
         assert!(m.work_blocks.contains_key(&b));
+    }
+
+    // ── rebase_siblings_onto_main ────────────────────────────────────────────
+
+    #[test]
+    fn rebase_sibling_inherits_promoted_block_from_accepted_branch() {
+        // Accepted branch B has an owned block; after accept it lands in main.
+        // Sibling S (fork_day <= owned.start_day) must inherit it as a new ghost.
+        let mut m = Model::default();
+        let main = m.create_plan("main", None);
+        let accepted = m.fork_main(0).unwrap();
+        let sibling = m.fork_main(0).unwrap();
+        // B creates its own block (not in main, not in sibling).
+        let b_owned = m.add_block_to_plan(accepted, "b_owned", 10, 5, 0);
+
+        m.accept_plan_as_main(accepted);
+
+        assert!(
+            m.plans[&main].root_blocks.contains(&b_owned),
+            "promoted block is in main"
+        );
+        assert!(
+            m.plans[&sibling].root_blocks.contains(&b_owned),
+            "sibling inherits the promoted block as a ghost"
+        );
+    }
+
+    #[test]
+    fn rebase_sibling_keeps_its_own_owned_block() {
+        // S has a block it created itself (not in old main). After rebase it
+        // must still be in S's root_blocks.
+        let mut m = Model::default();
+        let main = m.create_plan("main", None);
+        let accepted = m.fork_main(0).unwrap();
+        let sibling = m.fork_main(0).unwrap();
+        let s_owned = m.add_block_to_plan(sibling, "s_owned", 15, 3, 0);
+
+        m.accept_plan_as_main(accepted);
+
+        assert!(
+            m.plans[&sibling].root_blocks.contains(&s_owned),
+            "sibling keeps its own block after rebase"
+        );
+    }
+
+    #[test]
+    fn rebase_sibling_removed_ghost_stays_removed() {
+        // S had deliberately removed a ghost. After accept (B kept it), S's
+        // removal is preserved — the block re-enters main but S stays opted-out.
+        let mut m = Model::default();
+        let main = m.create_plan("main", None);
+        let shared = placed(&mut m, main, "shared", 10, 5);
+        let accepted = m.fork_main(0).unwrap(); // inherits shared, keeps it
+        let sibling = m.fork_main(0).unwrap(); // inherits shared, then removes it
+        m.remove_block_from_plan(sibling, shared);
+
+        m.accept_plan_as_main(accepted); // B keeps shared → in new main
+
+        assert!(
+            m.plans[&main].root_blocks.contains(&shared),
+            "shared is in new main"
+        );
+        assert!(
+            !m.plans[&sibling].root_blocks.contains(&shared),
+            "sibling's deliberate removal is preserved"
+        );
+    }
+
+    #[test]
+    fn rebase_sibling_ex_ghost_dropped_by_both_becomes_sibling_owned() {
+        // S and B both see a ghost. B removes it (drops from new main). S
+        // keeps it. After rebase: S still holds it (now S-owned, no longer a
+        // ghost of main).
+        let mut m = Model::default();
+        let main = m.create_plan("main", None);
+        let shared = placed(&mut m, main, "shared", 20, 5);
+        let accepted = m.fork_main(10).unwrap(); // inherits shared
+        let sibling = m.fork_main(10).unwrap(); // also inherits shared
+        m.remove_block_from_plan(accepted, shared); // B removes it
+
+        m.accept_plan_as_main(accepted);
+
+        assert!(
+            !m.plans[&main].root_blocks.contains(&shared),
+            "main dropped the ghost"
+        );
+        assert!(
+            m.plans[&sibling].root_blocks.contains(&shared),
+            "sibling keeps it as its own"
+        );
+        assert!(
+            m.work_blocks.contains_key(&shared),
+            "block stays alive — sibling still roots it"
+        );
+    }
+
+    #[test]
+    fn rebase_sibling_forked_after_accepted_does_not_inherit_earlier_blocks() {
+        // Accepted B (fork=5) has an owned block at start_day=7.
+        // Sibling S (fork=10) must NOT inherit that block (7 < 10).
+        let mut m = Model::default();
+        let main = m.create_plan("main", None);
+        let accepted = m.fork_main(5).unwrap();
+        let sibling = m.fork_main(10).unwrap();
+        let b_early = m.add_block_to_plan(accepted, "early", 7, 3, 0);
+        let b_late = m.add_block_to_plan(accepted, "late", 12, 3, 0);
+
+        m.accept_plan_as_main(accepted);
+
+        assert!(
+            !m.plans[&sibling].root_blocks.contains(&b_early),
+            "sibling (fork=10) does not inherit block at start_day=7"
+        );
+        assert!(
+            m.plans[&sibling].root_blocks.contains(&b_late),
+            "sibling (fork=10) does inherit block at start_day=12"
+        );
+    }
+
+    #[test]
+    fn rebase_sibling_owned_block_coexists_with_promoted_main_block() {
+        // S has its own block at start_day=20; B also has an owned block at
+        // start_day=20. After accept they are different IDs and both appear in S.
+        let mut m = Model::default();
+        let main = m.create_plan("main", None);
+        let accepted = m.fork_main(0).unwrap();
+        let sibling = m.fork_main(0).unwrap();
+        let s_own = m.add_block_to_plan(sibling, "s_block", 20, 5, 0);
+        let b_own = m.add_block_to_plan(accepted, "b_block", 20, 5, 0);
+
+        m.accept_plan_as_main(accepted);
+
+        assert!(
+            m.plans[&sibling].root_blocks.contains(&s_own),
+            "sibling keeps its own block"
+        );
+        assert!(
+            m.plans[&sibling].root_blocks.contains(&b_own),
+            "sibling also inherits the promoted block"
+        );
+    }
+
+    #[test]
+    fn rebase_sibling_keeps_dep_when_block_becomes_owned() {
+        // S has a branch-local dep between two ghosts. Accepted branch B removes
+        // one ghost. S kept it → it becomes S-owned after rebase. Dep stays valid.
+        let mut m = Model::default();
+        let main = m.create_plan("main", None);
+        let a = placed(&mut m, main, "a", 5, 5);
+        let b_block = placed(&mut m, main, "b_blk", 15, 5);
+        let accepted = m.fork_main(0).unwrap();
+        let sibling = m.fork_main(0).unwrap();
+        // Sibling adds a dep between its two ghosts.
+        let dep = m.create_dependency_in(sibling, a, b_block, DependencyType::FinishToStart);
+        // Accepted branch removes b_block; sibling does not.
+        m.remove_block_from_plan(accepted, b_block);
+
+        m.accept_plan_as_main(accepted);
+
+        // Sibling kept b_block (B's removal doesn't force sibling to drop it).
+        assert!(
+            m.plans[&sibling].root_blocks.contains(&b_block),
+            "sibling keeps b_block as owned after B removes it from main"
+        );
+        // Dep is still valid — both endpoints are in sibling's roster.
+        assert!(
+            m.dependencies.contains_key(&dep),
+            "dep remains valid: b_block is still in sibling"
+        );
+    }
+
+    #[test]
+    fn rebase_sibling_dep_pruned_when_both_removed_block_and_block_deleted() {
+        // Both S and B remove a ghost → block is hard-deleted in accept step 4
+        // (no plan roots it). Any dep referencing it is cleaned up during accept.
+        let mut m = Model::default();
+        let main = m.create_plan("main", None);
+        let a = placed(&mut m, main, "a", 5, 5);
+        let shared = placed(&mut m, main, "shared", 15, 5);
+        let accepted = m.fork_main(0).unwrap();
+        let sibling = m.fork_main(0).unwrap();
+        // Sibling removes shared, then adds a dep (tests that cleanup runs even
+        // for deps whose endpoint the sibling had removed before accept).
+        m.remove_block_from_plan(sibling, shared);
+        let dep = m.create_dependency_in(sibling, a, shared, DependencyType::FinishToStart);
+        // Accepted also removes shared — block will be hard-deleted.
+        m.remove_block_from_plan(accepted, shared);
+
+        m.accept_plan_as_main(accepted);
+
+        assert!(
+            !m.work_blocks.contains_key(&shared),
+            "shared is deleted (no plan roots it)"
+        );
+        assert!(
+            !m.dependencies.contains_key(&dep),
+            "dep referencing deleted block is pruned"
+        );
+    }
+
+    #[test]
+    fn rebase_sibling_lane_seeded_from_main_for_new_ghost() {
+        // A promoted block gets main's lane (block_row) in the sibling.
+        let mut m = Model::default();
+        let main = m.create_plan("main", None);
+        let accepted = m.fork_main(0).unwrap();
+        let sibling = m.fork_main(0).unwrap();
+        let b_owned = m.add_block_to_plan(accepted, "b_owned", 10, 5, 3); // lane 3 in B
+
+        m.accept_plan_as_main(accepted);
+
+        // Main got B's lane (block_row = 3). Sibling should inherit that.
+        assert_eq!(
+            m.plans[&sibling]
+                .block_rows
+                .get(&b_owned)
+                .copied()
+                .unwrap_or(0),
+            3,
+            "sibling inherits main's lane for the newly promoted ghost"
+        );
+    }
+
+    #[test]
+    fn rebase_no_siblings_is_a_noop() {
+        // Accepting the only branch (no siblings) should not panic.
+        let mut m = Model::default();
+        let main = m.create_plan("main", None);
+        let _trunk = placed(&mut m, main, "t", 0, 5);
+        let accepted = m.fork_main(0).unwrap();
+        let _b_own = m.add_block_to_plan(accepted, "b_own", 10, 5, 0);
+
+        m.accept_plan_as_main(accepted); // no other branches → no-op sibling pass
+        assert_eq!(m.main_plan_id(), Some(main));
     }
 }
