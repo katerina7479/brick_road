@@ -3073,7 +3073,7 @@ mod tests {
         });
         let global_offs = cal.global_off_days();
         // holiday_columns returns (left_x, date, desc) for this date.
-        let hols = crate::calendar::holiday_columns(&cal, 20);
+        let hols = crate::calendar::holiday_columns(&global_offs, &cal, 20);
         assert_eq!(hols.len(), 1);
         let holiday_left_x = hols[0].0;
 

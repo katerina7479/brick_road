@@ -76,13 +76,17 @@ pub fn x_to_day(x: f32, non_working: &HashSet<NaiveDate>, config: &CalendarConfi
     day
 }
 
-/// `(left_x, date)` for each holiday column whose working-day boundary falls in
-/// `0..=span_days`. Consecutive holidays that share a boundary get adjacent
-/// columns (earliest date leftmost). Reads the global holidays (with their
-/// descriptions) from `config`; the internal `day_to_x` calls use the global
-/// off-day set.
-pub fn holiday_columns(config: &CalendarConfig, span_days: Day) -> Vec<(f32, NaiveDate, String)> {
-    let non_working = config.global_off_days();
+/// `(left_x, date, desc)` for each holiday column whose working-day boundary
+/// falls in `0..=span_days`. Consecutive holidays that share a boundary get
+/// adjacent columns (earliest date leftmost). Reads the holiday date/description
+/// list from `config.non_working_dates`; pixel positions use `non_working` —
+/// pass the caller's off-day set (global, or global ∪ resource) so per-row
+/// renderers can produce correctly aligned columns without modifying the config.
+pub fn holiday_columns(
+    non_working: &HashSet<NaiveDate>,
+    config: &CalendarConfig,
+    span_days: Day,
+) -> Vec<(f32, NaiveDate, String)> {
     let mut holidays: Vec<(NaiveDate, String)> = config
         .non_working_dates
         .iter()
@@ -425,7 +429,7 @@ mod tests {
         assert_eq!(day_to_x(1, &off, &cfg), 1.0 * PIXELS_PER_DAY);
         assert_eq!(day_to_x(2, &off, &cfg), 3.0 * PIXELS_PER_DAY);
         // The holiday column sits between them, at visual index 2.
-        let cols = holiday_columns(&cfg, 20);
+        let cols = holiday_columns(&off, &cfg, 20);
         assert_eq!(cols.len(), 1);
         assert_eq!(cols[0].0, 2.0 * PIXELS_PER_DAY);
         assert_eq!(cols[0].1, holiday);
@@ -448,7 +452,7 @@ mod tests {
             ..Default::default()
         };
         let off = cfg.global_off_days();
-        assert!(holiday_columns(&cfg, 20).is_empty());
+        assert!(holiday_columns(&off, &cfg, 20).is_empty());
         assert_eq!(day_to_x(5, &off, &cfg), 5.0 * PIXELS_PER_DAY);
     }
 
