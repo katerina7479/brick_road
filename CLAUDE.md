@@ -16,7 +16,7 @@ cargo test calendar::   # run tests in one module (e.g. calendar)
 cargo build        # compile without running
 ```
 
-There is no CI, rustfmt.toml, or clippy config — use `cargo fmt` and `cargo clippy` defaults.
+There is no CI. The Rust toolchain is pinned via `rust-toolchain.toml` (1.96.0, with the `rustfmt` and `clippy` components) and `rustfmt.toml` pins `edition`/`style_edition` to 2021, so `cargo fmt` and `cargo clippy` produce identical output on every host (no cross-version formatting churn). Keep everything else at `cargo fmt` / `cargo clippy` defaults.
 
 A repo-tracked **pre-commit hook** (`.githooks/pre-commit`) runs `cargo fmt --check` to keep the tree formatted. It is **not active until you enable it once per checkout/worktree**: `git config core.hooksPath .githooks`. It only checks formatting (fast); run `cargo clippy`/`cargo test` yourself before pushing (they need a full compile and are too slow per-commit). Bypass a single commit with `git commit --no-verify`.
 
