@@ -73,6 +73,10 @@ fn main() {
         )
         .add_systems(
             PostStartup,
+            sync_resource_offday_bands.after(blocks::reconcile_block_sprites),
+        )
+        .add_systems(
+            PostStartup,
             sync_period_bands.after(blocks::reconcile_block_sprites),
         )
         .add_systems(
@@ -140,6 +144,10 @@ fn main() {
         .add_systems(Update, schedule::update_today_marker)
         .add_systems(Update, sync_total_duration)
         .add_systems(Update, sync_weekend_bands.after(sync_total_duration))
+        .add_systems(
+            Update,
+            sync_resource_offday_bands.after(sync_total_duration),
+        )
         .add_systems(Update, sync_period_bands.after(sync_total_duration))
         .add_systems(
             Update,
@@ -465,6 +473,10 @@ fn draw_grid(
 #[derive(Component)]
 struct WeekendBand;
 
+/// Marker for per-resource non-working-day column sprites (row-height only).
+#[derive(Component)]
+struct ResourceOffDayBand;
+
 /// World x of each compressed-weekend seam within the span: a thin marker at
 /// every real calendar-week boundary (where consecutive working days fall in
 /// different ISO weeks), holiday-shifted. Anchored to actual weeks, not counted
@@ -526,6 +538,87 @@ fn sync_weekend_bands(
             },
             Transform::from_xyz(left_x + PIXELS_PER_DAY * 0.5, 0.0, -0.5),
         ));
+    }
+}
+
+/// Spawns row-height grey columns for per-resource non-working dates (PTO,
+/// offsite, etc.) in the task view. Each column is PIXELS_PER_DAY wide and
+/// ROW_HEIGHT tall, centred on the resource's row y. The column is positioned
+/// using the row-augmented off-day set (global ∪ resource off-days) so it
+/// aligns with the gap `block_span_x` opens for the same date on the same row.
+fn sync_resource_offday_bands(
+    model: Res<model::Model>,
+    schedule: Res<schedule::Schedule>,
+    mut commands: Commands,
+    band_q: Query<Entity, With<ResourceOffDayBand>>,
+) {
+    if !model.is_changed() && !schedule.is_changed() {
+        return;
+    }
+    for e in &band_q {
+        commands.entity(e).despawn();
+    }
+
+    let cal = &model.calendar;
+    // Build the same (global, row_offs) map that sync_block_sprites uses so
+    // band x-positions are computed against the identical off-day sets.
+    let (global_offs, row_offs_map) = blocks::compute_row_offs(&model);
+    let span = schedule.total_duration_days.max(CALENDAR_HORIZON_DAYS) + 10;
+
+    let Some(main_id) = model.main_plan_id() else {
+        return;
+    };
+    let Some(plan) = model.plans.get(&main_id) else {
+        return;
+    };
+    let Some(row_names) = plan.row_names.get(&None) else {
+        return;
+    };
+
+    let offday_color = Color::srgba(0.48, 0.50, 0.56, 0.28);
+
+    for (row_idx, name) in row_names.iter().enumerate() {
+        if name.is_empty() {
+            continue;
+        }
+        let Some(rb) = model.resource_by_name(name) else {
+            continue;
+        };
+        if rb.non_working_dates.is_empty() {
+            continue;
+        }
+        let row = row_idx as i32;
+        let row_y = -(row as f32) * constants::ROW_HEIGHT;
+        // Row-augmented set: same one used by block_span_x for this row.
+        let row_offs = row_offs_map.get(&row).unwrap_or(&global_offs);
+
+        for nwd in &rb.non_working_dates {
+            let date = nwd.date;
+            // Skip compressed weekends and dates already covered by a
+            // full-height global holiday column.
+            if date.weekday().number_from_monday() > cal.working_days_per_week as u32 {
+                continue;
+            }
+            if global_offs.contains(&date) {
+                continue;
+            }
+            let day = calendar::date_to_day(date, cal);
+            if day < 0 || day > span {
+                continue;
+            }
+            // Position the band in the row's augmented layout so it falls
+            // in the same gap that block_span_x stretches the block over.
+            let left_x = blocks::resource_offday_column_left_x(date, row_offs, cal);
+            commands.spawn((
+                ResourceOffDayBand,
+                Sprite {
+                    color: offday_color,
+                    custom_size: Some(Vec2::new(PIXELS_PER_DAY, constants::ROW_HEIGHT)),
+                    ..default()
+                },
+                Transform::from_xyz(left_x + PIXELS_PER_DAY * 0.5, row_y, -0.4),
+            ));
+        }
     }
 }
 
