@@ -8,6 +8,7 @@ use crate::model::{
 
 pub fn create_tables(conn: &Connection) -> Result<()> {
     conn.execute_batch("PRAGMA foreign_keys = ON;")?;
+    migrate_unified_non_working_dates(conn)?;
     conn.execute_batch(CREATE_TABLES_SQL)?;
     // Seed default t-shirt sizes on first use (table created above).
     let count: i64 = conn.query_row("SELECT COUNT(*) FROM t_shirt_sizes", [], |r| r.get(0))?;
@@ -26,6 +27,66 @@ pub fn create_tables(conn: &Connection) -> Result<()> {
              INSERT INTO t_shirt_sizes (label, days, sort_order) VALUES ('4XL', 100, 8);",
         )?;
     }
+    Ok(())
+}
+
+/// One-time schema migration: merge `resource_non_working_dates` into
+/// `calendar_non_working_dates` (adding a nullable `resource_id` column).
+///
+/// Runs before `CREATE_TABLES_SQL` on every open so it is a no-op for fresh
+/// databases (table doesn't exist yet) and for already-migrated databases
+/// (column already present).  For old databases it:
+///
+/// 1. Renames the old single-column table.
+/// 2. Recreates it with the unified schema.
+/// 3. Copies global rows (resource_id = NULL) from the renamed table.
+/// 4. Copies per-resource rows from `resource_non_working_dates` if present.
+/// 5. Drops both temporary/old tables.
+fn migrate_unified_non_working_dates(conn: &Connection) -> Result<()> {
+    let table_exists: bool = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='calendar_non_working_dates'",
+        [],
+        |r| r.get::<_, i64>(0),
+    )? > 0;
+    if !table_exists {
+        return Ok(());
+    }
+
+    let has_resource_id: bool = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('calendar_non_working_dates') WHERE name='resource_id'",
+        [],
+        |r| r.get::<_, i64>(0),
+    )? > 0;
+    if has_resource_id {
+        return Ok(());
+    }
+
+    // Recreate with unified schema, preserving existing global rows.
+    conn.execute_batch(
+        "ALTER TABLE calendar_non_working_dates RENAME TO _calendar_nwd_old;
+         CREATE TABLE calendar_non_working_dates (
+             date        TEXT    NOT NULL,
+             description TEXT    NOT NULL DEFAULT '',
+             resource_id INTEGER REFERENCES resource_blocks(id)
+         );
+         INSERT INTO calendar_non_working_dates (date, description, resource_id)
+             SELECT date, description, NULL FROM _calendar_nwd_old;
+         DROP TABLE _calendar_nwd_old;",
+    )?;
+
+    let resource_table_exists: bool = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='resource_non_working_dates'",
+        [],
+        |r| r.get::<_, i64>(0),
+    )? > 0;
+    if resource_table_exists {
+        conn.execute_batch(
+            "INSERT INTO calendar_non_working_dates (date, description, resource_id)
+                 SELECT date, description, resource_id FROM resource_non_working_dates;
+             DROP TABLE resource_non_working_dates;",
+        )?;
+    }
+
     Ok(())
 }
 
@@ -54,7 +115,6 @@ pub fn save_model(conn: &Connection, model: &Model) -> Result<()> {
     tx.execute_batch(
         "DELETE FROM plan_blocks;
          DELETE FROM calendar_non_working_dates;
-         DELETE FROM resource_non_working_dates;
          DELETE FROM t_shirt_sizes;
          DELETE FROM quarter_colors;",
     )?;
@@ -223,7 +283,8 @@ pub fn save_model(conn: &Connection, model: &Model) -> Result<()> {
 
     for nwd in &model.calendar.non_working_dates {
         tx.execute(
-            "INSERT INTO calendar_non_working_dates (date, description) VALUES (?1, ?2)",
+            "INSERT INTO calendar_non_working_dates (date, description, resource_id)
+             VALUES (?1, ?2, NULL)",
             (&nwd.date.format("%Y-%m-%d").to_string(), &nwd.description),
         )?;
     }
@@ -231,12 +292,12 @@ pub fn save_model(conn: &Connection, model: &Model) -> Result<()> {
     for rb in model.resource_blocks.values() {
         for nwd in &rb.non_working_dates {
             tx.execute(
-                "INSERT INTO resource_non_working_dates (resource_id, date, description)
+                "INSERT INTO calendar_non_working_dates (date, description, resource_id)
                  VALUES (?1, ?2, ?3)",
                 (
-                    rb.id.0 as i64,
                     &nwd.date.format("%Y-%m-%d").to_string(),
                     &nwd.description,
+                    rb.id.0 as i64,
                 ),
             )?;
         }
@@ -384,34 +445,6 @@ pub fn load_model(conn: &Connection) -> Result<Model> {
                     non_working_dates: vec![],
                 },
             );
-        }
-    }
-
-    // resource_non_working_dates
-    {
-        let mut stmt = conn.prepare(
-            "SELECT resource_id, date, description
-             FROM resource_non_working_dates
-             ORDER BY resource_id, date",
-        )?;
-        let rows = stmt.query_map([], |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-            ))
-        })?;
-        for row in rows {
-            let (resource_id, date_str, description) = row?;
-            if let Ok(date) = NaiveDate::parse_from_str(&date_str, "%Y-%m-%d") {
-                if let Some(rb) = model
-                    .resource_blocks
-                    .get_mut(&ResourceBlockId(resource_id as u64))
-                {
-                    rb.non_working_dates
-                        .push(NonWorkingDate { date, description });
-                }
-            }
         }
     }
 
@@ -607,20 +640,40 @@ pub fn load_model(conn: &Connection) -> Result<Model> {
         }
     }
 
-    // calendar_non_working_dates
+    // calendar_non_working_dates — unified table for global (resource_id IS NULL)
+    // and per-resource (resource_id IS NOT NULL) non-working dates.
     {
-        let mut stmt =
-            conn.prepare("SELECT date, description FROM calendar_non_working_dates ORDER BY date")?;
+        let mut stmt = conn.prepare(
+            "SELECT date, description, resource_id
+             FROM calendar_non_working_dates
+             ORDER BY resource_id, date",
+        )?;
         let rows = stmt.query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<i64>>(2)?,
+            ))
         })?;
         for row in rows {
-            let (date_str, description) = row?;
+            let (date_str, description, resource_id) = row?;
             if let Ok(date) = NaiveDate::parse_from_str(&date_str, "%Y-%m-%d") {
-                model
-                    .calendar
-                    .non_working_dates
-                    .push(NonWorkingDate { date, description });
+                match resource_id {
+                    None => {
+                        model
+                            .calendar
+                            .non_working_dates
+                            .push(NonWorkingDate { date, description });
+                    }
+                    Some(rid) => {
+                        if let Some(rb) =
+                            model.resource_blocks.get_mut(&ResourceBlockId(rid as u64))
+                        {
+                            rb.non_working_dates
+                                .push(NonWorkingDate { date, description });
+                        }
+                    }
+                }
             }
         }
     }
@@ -1151,6 +1204,93 @@ mod tests {
     }
 
     #[test]
+    fn global_and_resource_non_working_dates_coexist_in_unified_table() {
+        // Same date can appear as a global holiday AND a per-resource entry.
+        let conn = open_in_memory();
+        let mut m = Model::default();
+        let rb_id = m.create_resource_block("Alice", ResourceType::Engineer);
+        // Global holiday
+        m.calendar.non_working_dates.push(NonWorkingDate {
+            date: NaiveDate::from_ymd_opt(2025, 7, 4).unwrap(),
+            description: "Independence Day".to_string(),
+        });
+        // Resource PTO on a different date
+        m.resource_blocks
+            .get_mut(&rb_id)
+            .unwrap()
+            .non_working_dates
+            .push(NonWorkingDate {
+                date: NaiveDate::from_ymd_opt(2025, 8, 1).unwrap(),
+                description: "Alice PTO".to_string(),
+            });
+
+        save_model(&conn, &m).unwrap();
+        let loaded = load_model(&conn).unwrap();
+
+        assert_eq!(loaded.calendar.non_working_dates.len(), 1);
+        assert_eq!(
+            loaded.calendar.non_working_dates[0].date,
+            NaiveDate::from_ymd_opt(2025, 7, 4).unwrap()
+        );
+        assert_eq!(loaded.resource_blocks[&rb_id].non_working_dates.len(), 1);
+        assert_eq!(
+            loaded.resource_blocks[&rb_id].non_working_dates[0].date,
+            NaiveDate::from_ymd_opt(2025, 8, 1).unwrap()
+        );
+    }
+
+    #[test]
+    fn migration_from_old_schema_preserves_all_non_working_dates() {
+        // Simulate an old-schema database: calendar_non_working_dates without
+        // resource_id, and a separate resource_non_working_dates table.
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+        conn.execute_batch(
+            "CREATE TABLE resource_blocks (
+                 id            INTEGER PRIMARY KEY,
+                 name          TEXT    NOT NULL,
+                 resource_type TEXT    NOT NULL
+             );
+             INSERT INTO resource_blocks (id, name, resource_type)
+                 VALUES (1, 'Alice', 'Engineer');
+             CREATE TABLE calendar_non_working_dates (
+                 date        TEXT PRIMARY KEY,
+                 description TEXT NOT NULL DEFAULT ''
+             );
+             INSERT INTO calendar_non_working_dates (date, description)
+                 VALUES ('2025-07-04', 'Independence Day');
+             CREATE TABLE resource_non_working_dates (
+                 resource_id  INTEGER NOT NULL REFERENCES resource_blocks(id),
+                 date         TEXT    NOT NULL,
+                 description  TEXT    NOT NULL DEFAULT '',
+                 PRIMARY KEY (resource_id, date)
+             );
+             INSERT INTO resource_non_working_dates (resource_id, date, description)
+                 VALUES (1, '2025-08-11', 'Alice PTO');",
+        )
+        .unwrap();
+
+        // Running create_tables should migrate the old schema.
+        create_tables(&conn).unwrap();
+
+        // After migration the unified table holds both rows; the old separate
+        // table is gone (load_model must succeed without it).
+        let loaded = load_model(&conn).unwrap();
+        assert_eq!(loaded.calendar.non_working_dates.len(), 1);
+        assert_eq!(
+            loaded.calendar.non_working_dates[0].date,
+            NaiveDate::from_ymd_opt(2025, 7, 4).unwrap()
+        );
+        let rb = loaded.resource_blocks.values().next().unwrap();
+        assert_eq!(rb.non_working_dates.len(), 1);
+        assert_eq!(
+            rb.non_working_dates[0].date,
+            NaiveDate::from_ymd_opt(2025, 8, 11).unwrap()
+        );
+        assert_eq!(rb.non_working_dates[0].description, "Alice PTO");
+    }
+
+    #[test]
     fn calendar_non_working_dates_round_trip() {
         let conn = open_in_memory();
         let mut m = Model::default();
@@ -1214,12 +1354,6 @@ CREATE TABLE IF NOT EXISTS resource_blocks (
     resource_type TEXT    NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS resource_non_working_dates (
-    resource_id  INTEGER NOT NULL REFERENCES resource_blocks(id),
-    date         TEXT    NOT NULL,
-    description  TEXT    NOT NULL DEFAULT '',
-    PRIMARY KEY (resource_id, date)
-);
 
 CREATE TABLE IF NOT EXISTS work_blocks (
     id                   INTEGER PRIMARY KEY,
@@ -1266,8 +1400,9 @@ CREATE TABLE IF NOT EXISTS calendar_config (
 );
 
 CREATE TABLE IF NOT EXISTS calendar_non_working_dates (
-    date        TEXT PRIMARY KEY,
-    description TEXT NOT NULL DEFAULT ''
+    date        TEXT    NOT NULL,
+    description TEXT    NOT NULL DEFAULT '',
+    resource_id INTEGER REFERENCES resource_blocks(id)
 );
 
 CREATE TABLE IF NOT EXISTS t_shirt_sizes (
