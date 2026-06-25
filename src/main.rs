@@ -55,6 +55,7 @@ fn main() {
         .insert_resource(SelectedPlan::default())
         .insert_resource(RowRename::default())
         .insert_resource(SettingsState::default())
+        .insert_resource(ImportState::default())
         .insert_resource(bands::BandEntities::default())
         .insert_resource(bands::PlanRenameState::default())
         .insert_resource(bands::LaneSelection::default())
@@ -248,6 +249,7 @@ fn main() {
         .add_systems(EguiPrimaryContextPass, top_bar_ui)
         .add_systems(EguiPrimaryContextPass, calendar_ruler_ui.after(top_bar_ui))
         .add_systems(EguiPrimaryContextPass, settings_flyout_ui.after(top_bar_ui))
+        .add_systems(EguiPrimaryContextPass, import_modal_ui.after(top_bar_ui))
         .add_systems(
             EguiPrimaryContextPass,
             blocks::block_inspector_flyout_ui.after(settings_flyout_ui),
@@ -2058,6 +2060,7 @@ fn top_bar_ui(
     mut schedule: ResMut<schedule::Schedule>,
     mut drill: ResMut<schedule::DrillScope>,
     mut settings: ResMut<SettingsState>,
+    mut import_state: ResMut<ImportState>,
     selected_plan: Res<SelectedPlan>,
     windows: Query<&Window>,
     today: Res<schedule::TodayMarker>,
@@ -2066,6 +2069,7 @@ fn top_bar_ui(
     let Ok(ctx) = contexts.ctx_mut() else { return };
     let mut clear_all = false;
     let mut export_csv = false;
+    let mut import_csv = false;
     // Breadcrumb path (block ids) to optionally truncate to, and a rollup toggle.
     let mut jump_to: Option<usize> = None; // new path length
     let mut toggle_rollup: Option<model::WorkBlockId> = None;
@@ -2157,6 +2161,12 @@ fn top_bar_ui(
                     {
                         export_csv = true;
                     }
+                    if tool_button(ui, "⬆ Import", false)
+                        .on_hover_text("Import blocks from CSV")
+                        .clicked()
+                    {
+                        import_csv = true;
+                    }
                     ui.add_space(8.0);
                     if tool_button(ui, "→ Today", false).clicked() {
                         target.pos.x = calendar::day_to_x(
@@ -2207,6 +2217,22 @@ fn top_bar_ui(
             });
         });
 
+    if import_csv && import_state.pending.is_none() {
+        if let Some(path) = rfd::FileDialog::new()
+            .add_filter("CSV", &["csv"])
+            .pick_file()
+        {
+            match std::fs::read_to_string(&path) {
+                Ok(content) => {
+                    import_state.pending = Some(content);
+                    import_state.errors.clear();
+                    // Default replace plan = selected branch or main.
+                    import_state.replace_plan_id = selected_plan.0.or_else(|| model.main_plan_id());
+                }
+                Err(e) => error!("CSV read failed: {e}"),
+            }
+        }
+    }
     if export_csv {
         let plan_id = selected_plan.0.or_else(|| model.main_plan_id());
         if let Some(pid) = plan_id {
@@ -2270,6 +2296,152 @@ pub struct SettingsState {
     pub start_input: String,
     /// Per-resource add-row buffers: resource name → (date_input, desc_input).
     pub resource_date_inputs: std::collections::HashMap<String, (String, String)>,
+}
+
+/// Transient state for the CSV import modal.
+#[derive(Resource, Default)]
+struct ImportState {
+    /// CSV text content loaded from a file, awaiting mode selection.
+    pending: Option<String>,
+    /// True = create a new plan; false = replace an existing plan.
+    is_new: bool,
+    /// Name buffer for the "new plan" branch.
+    new_plan_name: String,
+    /// Which existing plan to replace (defaults to selected branch / main).
+    replace_plan_id: Option<model::PlanId>,
+    /// Validation or IO errors to surface in the modal.
+    errors: Vec<String>,
+}
+
+/// Shows the CSV import modal when a file has been chosen but the user has not
+/// yet confirmed the import mode.  Runs every frame while `ImportState.pending`
+/// is `Some`.
+fn import_modal_ui(
+    mut contexts: EguiContexts,
+    mut import_state: ResMut<ImportState>,
+    mut model: ResMut<model::Model>,
+    mut schedule: ResMut<schedule::Schedule>,
+    conn: NonSend<rusqlite::Connection>,
+) {
+    if import_state.pending.is_none() {
+        return;
+    }
+    let Ok(ctx) = contexts.ctx_mut() else { return };
+
+    let mut do_import = false;
+    let mut do_cancel = false;
+
+    egui::Window::new("Import CSV")
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .show(ctx, |ui| {
+            ui.radio_value(&mut import_state.is_new, true, "Create new plan");
+            if import_state.is_new {
+                ui.horizontal(|ui| {
+                    ui.label("Plan name:");
+                    ui.text_edit_singleline(&mut import_state.new_plan_name);
+                });
+            }
+
+            ui.radio_value(&mut import_state.is_new, false, "Replace existing plan");
+            if !import_state.is_new {
+                // Dropdown of all plans by name.
+                let plans: Vec<(model::PlanId, String)> = model
+                    .plans
+                    .values()
+                    .map(|p| (p.id, p.name.clone()))
+                    .collect();
+                let selected_name = import_state
+                    .replace_plan_id
+                    .and_then(|id| model.plans.get(&id))
+                    .map(|p| p.name.clone())
+                    .unwrap_or_default();
+                egui::ComboBox::from_id_salt("import_plan_combo")
+                    .selected_text(&selected_name)
+                    .show_ui(ui, |ui| {
+                        for (pid, name) in &plans {
+                            ui.selectable_value(
+                                &mut import_state.replace_plan_id,
+                                Some(*pid),
+                                name,
+                            );
+                        }
+                    });
+                ui.colored_label(
+                    egui::Color32::from_rgb(228, 132, 122),
+                    "⚠ This will permanently replace all blocks in the selected plan.",
+                );
+            }
+
+            if !import_state.errors.is_empty() {
+                ui.separator();
+                ui.colored_label(egui::Color32::from_rgb(228, 132, 122), "Import errors:");
+                for e in &import_state.errors {
+                    ui.label(e);
+                }
+            }
+
+            ui.separator();
+            ui.horizontal(|ui| {
+                if ui.button("Import").clicked() {
+                    do_import = true;
+                }
+                if ui.button("Cancel").clicked() {
+                    do_cancel = true;
+                }
+            });
+        });
+
+    if do_cancel {
+        *import_state = ImportState::default();
+        return;
+    }
+
+    if do_import {
+        let csv = import_state.pending.clone().unwrap_or_default();
+        let rows = match csv_export::parse_csv(&csv) {
+            Ok(rows) => rows,
+            Err(errors) => {
+                import_state.errors = errors;
+                return;
+            }
+        };
+
+        if import_state.is_new {
+            let name = import_state.new_plan_name.trim().to_string();
+            let name = if name.is_empty() {
+                "Imported".to_string()
+            } else {
+                name
+            };
+            let plan_id = model.create_plan(&name, None);
+            let errors = csv_export::populate_plan(&rows, plan_id, &mut model);
+            if !errors.is_empty() {
+                import_state.errors = errors;
+                // Roll back: drop the newly created plan.
+                model.delete_plan(plan_id);
+                return;
+            }
+        } else {
+            let Some(plan_id) = import_state.replace_plan_id else {
+                import_state.errors = vec!["No plan selected to replace.".to_string()];
+                return;
+            };
+            csv_export::clear_plan_blocks(&mut model, plan_id);
+            let errors = csv_export::populate_plan(&rows, plan_id, &mut model);
+            if !errors.is_empty() {
+                import_state.errors = errors;
+                return;
+            }
+        }
+
+        *schedule = schedule::Schedule::default();
+        if let Err(e) = db::save_model(&conn, &model) {
+            error!("save_model after import failed: {e}");
+        }
+        *import_state = ImportState::default();
+    }
 }
 
 /// Returns the non-active forked plan whose branch marker is within `hit_world`
