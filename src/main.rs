@@ -1874,14 +1874,17 @@ fn settings_flyout_ui(
                     .hint_text("YYYY-MM-DD")
                     .desired_width(f32::INFINITY),
             );
+            // Right-to-left so "Add" pins to the right edge and the label
+            // field fills the remaining width (INFINITY after a button would
+            // consume all space and push the button off-screen).
             let (resp_desc, submit) = ui
-                .horizontal(|ui| {
+                .with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let btn = ui.button("Add").clicked();
                     let rd = ui.add(
                         egui::TextEdit::singleline(&mut settings.holiday_desc_input)
                             .hint_text("Label (optional)")
                             .desired_width(f32::INFINITY),
                     );
-                    let btn = ui.button("Add").clicked();
                     (rd, btn)
                 })
                 .inner;
