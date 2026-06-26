@@ -1765,290 +1765,298 @@ fn settings_flyout_ui(
             });
             ui.add_space(10.0);
 
-            ui.label(
-                egui::RichText::new("CALENDAR")
-                    .size(11.0)
-                    .color(egui::Color32::from_rgb(150, 130, 96)),
-            );
-            ui.separator();
-            ui.add_space(4.0);
-
-            // Working days per week.
-            ui.horizontal(|ui| {
-                ui.label("Working days / week");
-                let mut wdpw = model.calendar.working_days_per_week as i32;
-                if ui
-                    .add(egui::DragValue::new(&mut wdpw).range(1..=7).speed(0.05))
-                    .changed()
-                {
-                    model.calendar.working_days_per_week = wdpw.clamp(1, 7) as u8;
-                    changed = true;
-                }
-            });
-
-            // Start date.
-            ui.add_space(6.0);
-            ui.horizontal(|ui| {
-                ui.label("Start date");
+            egui::ScrollArea::vertical().show(ui, |ui| {
                 ui.label(
-                    egui::RichText::new(model.calendar.start_date.format("%Y-%m-%d").to_string())
+                    egui::RichText::new("CALENDAR")
+                        .size(11.0)
+                        .color(egui::Color32::from_rgb(150, 130, 96)),
+                );
+                ui.separator();
+                ui.add_space(4.0);
+
+                // Working days per week.
+                ui.horizontal(|ui| {
+                    ui.label("Working days / week");
+                    let mut wdpw = model.calendar.working_days_per_week as i32;
+                    if ui
+                        .add(egui::DragValue::new(&mut wdpw).range(1..=7).speed(0.05))
+                        .changed()
+                    {
+                        model.calendar.working_days_per_week = wdpw.clamp(1, 7) as u8;
+                        changed = true;
+                    }
+                });
+
+                // Start date.
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    ui.label("Start date");
+                    ui.label(
+                        egui::RichText::new(
+                            model.calendar.start_date.format("%Y-%m-%d").to_string(),
+                        )
                         .color(egui::Color32::from_rgb(206, 190, 164)),
-                );
-            });
-            ui.horizontal(|ui| {
-                let resp = ui.add(
-                    egui::TextEdit::singleline(&mut settings.start_input)
-                        .hint_text("YYYY-MM-DD")
-                        .desired_width(110.0),
-                );
-                let submit = ui.button("Set").clicked()
-                    || (resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)));
-                if submit {
-                    if let Ok(d) =
-                        chrono::NaiveDate::parse_from_str(settings.start_input.trim(), "%Y-%m-%d")
-                    {
-                        model.calendar.start_date = d;
-                        settings.start_input.clear();
-                        changed = true;
-                    }
-                }
-            });
-
-            // Holidays / non-working dates.
-            ui.add_space(14.0);
-            ui.label(
-                egui::RichText::new("HOLIDAYS")
-                    .size(11.0)
-                    .color(egui::Color32::from_rgb(150, 130, 96)),
-            );
-            ui.separator();
-            ui.add_space(4.0);
-
-            let mut dates = model.calendar.non_working_dates.clone();
-            dates.sort_by_key(|nwd| nwd.date);
-            if dates.is_empty() {
-                ui.label(
-                    egui::RichText::new("None set")
-                        .italics()
-                        .color(egui::Color32::from_rgb(120, 110, 96)),
-                );
-            }
-            let mut remove: Option<chrono::NaiveDate> = None;
-            for nwd in &dates {
-                ui.horizontal(|ui| {
-                    ui.label(
-                        egui::RichText::new(nwd.date.format("%Y-%m-%d  %a").to_string())
-                            .color(egui::Color32::from_rgb(206, 190, 164)),
                     );
-                    if !nwd.description.is_empty() {
-                        ui.label(
-                            egui::RichText::new(&nwd.description)
-                                .color(egui::Color32::from_rgb(160, 148, 128))
-                                .italics(),
-                        );
-                    }
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui
-                            .small_button(
-                                egui::RichText::new("✕")
-                                    .color(egui::Color32::from_rgb(210, 130, 124)),
-                            )
-                            .clicked()
-                        {
-                            remove = Some(nwd.date);
-                        }
-                    });
                 });
-            }
-            if let Some(d) = remove {
-                model.calendar.non_working_dates.retain(|x| x.date != d);
-                changed = true;
-            }
-
-            ui.add_space(6.0);
-            // Two-row layout so all three controls fit in the 272px panel.
-            // Row 1: date field (full available width).
-            // Row 2: optional label field + "Add" button.
-            let resp = ui.add(
-                egui::TextEdit::singleline(&mut settings.holiday_input)
-                    .hint_text("YYYY-MM-DD")
-                    .desired_width(f32::INFINITY),
-            );
-            // Right-to-left so "Add" pins to the right edge and the label
-            // field fills the remaining width (INFINITY after a button would
-            // consume all space and push the button off-screen).
-            let (resp_desc, submit) = ui
-                .with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let btn = ui.button("Add").clicked();
-                    let rd = ui.add(
-                        egui::TextEdit::singleline(&mut settings.holiday_desc_input)
-                            .hint_text("Label (optional)")
-                            .desired_width(f32::INFINITY),
-                    );
-                    (rd, btn)
-                })
-                .inner;
-            let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
-            let submit = submit || ((resp.lost_focus() || resp_desc.lost_focus()) && enter);
-            if submit {
-                if let Ok(date) =
-                    chrono::NaiveDate::parse_from_str(settings.holiday_input.trim(), "%Y-%m-%d")
-                {
-                    if !model
-                        .calendar
-                        .non_working_dates
-                        .iter()
-                        .any(|x| x.date == date)
-                    {
-                        model
-                            .calendar
-                            .non_working_dates
-                            .push(model::NonWorkingDate {
-                                date,
-                                description: settings.holiday_desc_input.trim().to_string(),
-                            });
-                        changed = true;
-                    }
-                    settings.holiday_input.clear();
-                    settings.holiday_desc_input.clear();
-                }
-            }
-
-            // ── Resources ──────────────────────────────────────────────────
-            ui.add_space(16.0);
-            ui.label(
-                egui::RichText::new("RESOURCES")
-                    .size(11.0)
-                    .color(egui::Color32::from_rgb(150, 130, 96)),
-            );
-            ui.separator();
-            ui.add_space(4.0);
-
-            let names = model.named_resources();
-            if names.is_empty() {
-                ui.label(
-                    egui::RichText::new("Name rows in the gutter to add resources")
-                        .italics()
-                        .color(egui::Color32::from_rgb(120, 110, 96)),
-                );
-            }
-            for name in &names {
                 ui.horizontal(|ui| {
-                    let kind = model.resource_kind(name);
-                    if let Some(k) = kind {
-                        let dot = ui.allocate_space(egui::vec2(9.0, 9.0)).1;
-                        draw_resource_dot(ui.painter(), dot.center(), k);
-                    }
-                    ui.label(
-                        egui::RichText::new(name).color(egui::Color32::from_rgb(206, 190, 164)),
+                    let resp = ui.add(
+                        egui::TextEdit::singleline(&mut settings.start_input)
+                            .hint_text("YYYY-MM-DD")
+                            .desired_width(110.0),
                     );
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        egui::ComboBox::from_id_salt(format!("restype:{name}"))
-                            .selected_text(kind.map(|k| k.label()).unwrap_or("—"))
-                            .width(96.0)
-                            .show_ui(ui, |ui| {
-                                for k in model::ResourceType::ALL {
-                                    if ui.selectable_label(kind == Some(k), k.label()).clicked() {
-                                        model.set_resource_kind(name, k);
-                                        changed = true;
-                                    }
-                                }
-                            });
-                    });
-                });
-
-                // Per-resource non-working dates — only for typed resources.
-                let rb_id = model
-                    .resource_blocks
-                    .values()
-                    .find(|r| r.name.eq_ignore_ascii_case(name))
-                    .map(|r| r.id);
-                if let Some(rb_id) = rb_id {
-                    let mut sorted_dates: Vec<model::NonWorkingDate> =
-                        model.resource_blocks[&rb_id].non_working_dates.to_vec();
-                    sorted_dates.sort_by_key(|nwd| nwd.date);
-
-                    let mut remove_date: Option<chrono::NaiveDate> = None;
-                    for nwd in &sorted_dates {
-                        ui.horizontal(|ui| {
-                            ui.add_space(12.0);
-                            ui.label(
-                                egui::RichText::new(nwd.date.format("%Y-%m-%d  %a").to_string())
-                                    .size(11.0)
-                                    .color(egui::Color32::from_rgb(180, 168, 148)),
-                            );
-                            if !nwd.description.is_empty() {
-                                ui.label(
-                                    egui::RichText::new(&nwd.description)
-                                        .size(11.0)
-                                        .color(egui::Color32::from_rgb(140, 128, 108))
-                                        .italics(),
-                                );
-                            }
-                            ui.with_layout(
-                                egui::Layout::right_to_left(egui::Align::Center),
-                                |ui| {
-                                    if ui
-                                        .small_button(
-                                            egui::RichText::new("✕")
-                                                .color(egui::Color32::from_rgb(210, 130, 124)),
-                                        )
-                                        .clicked()
-                                    {
-                                        remove_date = Some(nwd.date);
-                                    }
-                                },
-                            );
-                        });
-                    }
-                    if let Some(d) = remove_date {
-                        if let Some(rb) = model.resource_blocks.get_mut(&rb_id) {
-                            rb.non_working_dates.retain(|x| x.date != d);
+                    let submit = ui.button("Set").clicked()
+                        || (resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)));
+                    if submit {
+                        if let Ok(d) = chrono::NaiveDate::parse_from_str(
+                            settings.start_input.trim(),
+                            "%Y-%m-%d",
+                        ) {
+                            model.calendar.start_date = d;
+                            settings.start_input.clear();
                             changed = true;
                         }
                     }
+                });
 
-                    // Add-row: date + optional label.
-                    let (date_in, desc_in) = settings
-                        .resource_date_inputs
-                        .entry(name.clone())
-                        .or_default();
+                // Holidays / non-working dates.
+                ui.add_space(14.0);
+                ui.label(
+                    egui::RichText::new("HOLIDAYS")
+                        .size(11.0)
+                        .color(egui::Color32::from_rgb(150, 130, 96)),
+                );
+                ui.separator();
+                ui.add_space(4.0);
+
+                let mut dates = model.calendar.non_working_dates.clone();
+                dates.sort_by_key(|nwd| nwd.date);
+                if dates.is_empty() {
+                    ui.label(
+                        egui::RichText::new("None set")
+                            .italics()
+                            .color(egui::Color32::from_rgb(120, 110, 96)),
+                    );
+                }
+                let mut remove: Option<chrono::NaiveDate> = None;
+                for nwd in &dates {
                     ui.horizontal(|ui| {
-                        ui.add_space(12.0);
-                        let resp = ui.add(
-                            egui::TextEdit::singleline(date_in)
-                                .hint_text("YYYY-MM-DD")
-                                .desired_width(100.0),
+                        ui.label(
+                            egui::RichText::new(nwd.date.format("%Y-%m-%d  %a").to_string())
+                                .color(egui::Color32::from_rgb(206, 190, 164)),
                         );
-                        let resp_desc = ui.add(
-                            egui::TextEdit::singleline(desc_in)
-                                .hint_text("Reason")
-                                .desired_width(70.0),
-                        );
-                        let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
-                        let submit = ui.button("Add").clicked()
-                            || ((resp.lost_focus() || resp_desc.lost_focus()) && enter);
-                        if submit {
-                            if let Ok(date) =
-                                chrono::NaiveDate::parse_from_str(date_in.trim(), "%Y-%m-%d")
-                            {
-                                if let Some(rb) = model.resource_blocks.get_mut(&rb_id) {
-                                    if !rb.non_working_dates.iter().any(|x| x.date == date) {
-                                        rb.non_working_dates.push(model::NonWorkingDate {
-                                            date,
-                                            description: desc_in.trim().to_string(),
-                                        });
-                                        changed = true;
-                                    }
-                                }
-                                date_in.clear();
-                                desc_in.clear();
-                            }
+                        if !nwd.description.is_empty() {
+                            ui.label(
+                                egui::RichText::new(&nwd.description)
+                                    .color(egui::Color32::from_rgb(160, 148, 128))
+                                    .italics(),
+                            );
                         }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui
+                                .small_button(
+                                    egui::RichText::new("✕")
+                                        .color(egui::Color32::from_rgb(210, 130, 124)),
+                                )
+                                .clicked()
+                            {
+                                remove = Some(nwd.date);
+                            }
+                        });
                     });
                 }
+                if let Some(d) = remove {
+                    model.calendar.non_working_dates.retain(|x| x.date != d);
+                    changed = true;
+                }
+
+                ui.add_space(6.0);
+                // Two-row layout so all three controls fit in the 272px panel.
+                // Row 1: date field (full available width).
+                // Row 2: optional label field + "Add" button.
+                let resp = ui.add(
+                    egui::TextEdit::singleline(&mut settings.holiday_input)
+                        .hint_text("YYYY-MM-DD")
+                        .desired_width(f32::INFINITY),
+                );
+                // Right-to-left so "Add" pins to the right edge and the label
+                // field fills the remaining width (INFINITY after a button would
+                // consume all space and push the button off-screen).
+                let (resp_desc, submit) = ui
+                    .with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let btn = ui.button("Add").clicked();
+                        let rd = ui.add(
+                            egui::TextEdit::singleline(&mut settings.holiday_desc_input)
+                                .hint_text("Label (optional)")
+                                .desired_width(f32::INFINITY),
+                        );
+                        (rd, btn)
+                    })
+                    .inner;
+                let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
+                let submit = submit || ((resp.lost_focus() || resp_desc.lost_focus()) && enter);
+                if submit {
+                    if let Ok(date) =
+                        chrono::NaiveDate::parse_from_str(settings.holiday_input.trim(), "%Y-%m-%d")
+                    {
+                        if !model
+                            .calendar
+                            .non_working_dates
+                            .iter()
+                            .any(|x| x.date == date)
+                        {
+                            model
+                                .calendar
+                                .non_working_dates
+                                .push(model::NonWorkingDate {
+                                    date,
+                                    description: settings.holiday_desc_input.trim().to_string(),
+                                });
+                            changed = true;
+                        }
+                        settings.holiday_input.clear();
+                        settings.holiday_desc_input.clear();
+                    }
+                }
+
+                // ── Resources ──────────────────────────────────────────────────
+                ui.add_space(16.0);
+                ui.label(
+                    egui::RichText::new("RESOURCES")
+                        .size(11.0)
+                        .color(egui::Color32::from_rgb(150, 130, 96)),
+                );
+                ui.separator();
                 ui.add_space(4.0);
-            }
+
+                let names = model.named_resources();
+                if names.is_empty() {
+                    ui.label(
+                        egui::RichText::new("Name rows in the gutter to add resources")
+                            .italics()
+                            .color(egui::Color32::from_rgb(120, 110, 96)),
+                    );
+                }
+                for name in &names {
+                    ui.horizontal(|ui| {
+                        let kind = model.resource_kind(name);
+                        if let Some(k) = kind {
+                            let dot = ui.allocate_space(egui::vec2(9.0, 9.0)).1;
+                            draw_resource_dot(ui.painter(), dot.center(), k);
+                        }
+                        ui.label(
+                            egui::RichText::new(name).color(egui::Color32::from_rgb(206, 190, 164)),
+                        );
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            egui::ComboBox::from_id_salt(format!("restype:{name}"))
+                                .selected_text(kind.map(|k| k.label()).unwrap_or("—"))
+                                .width(96.0)
+                                .show_ui(ui, |ui| {
+                                    for k in model::ResourceType::ALL {
+                                        if ui.selectable_label(kind == Some(k), k.label()).clicked()
+                                        {
+                                            model.set_resource_kind(name, k);
+                                            changed = true;
+                                        }
+                                    }
+                                });
+                        });
+                    });
+
+                    // Per-resource non-working dates — only for typed resources.
+                    let rb_id = model
+                        .resource_blocks
+                        .values()
+                        .find(|r| r.name.eq_ignore_ascii_case(name))
+                        .map(|r| r.id);
+                    if let Some(rb_id) = rb_id {
+                        let mut sorted_dates: Vec<model::NonWorkingDate> =
+                            model.resource_blocks[&rb_id].non_working_dates.to_vec();
+                        sorted_dates.sort_by_key(|nwd| nwd.date);
+
+                        let mut remove_date: Option<chrono::NaiveDate> = None;
+                        for nwd in &sorted_dates {
+                            ui.horizontal(|ui| {
+                                ui.add_space(12.0);
+                                ui.label(
+                                    egui::RichText::new(
+                                        nwd.date.format("%Y-%m-%d  %a").to_string(),
+                                    )
+                                    .size(11.0)
+                                    .color(egui::Color32::from_rgb(180, 168, 148)),
+                                );
+                                if !nwd.description.is_empty() {
+                                    ui.label(
+                                        egui::RichText::new(&nwd.description)
+                                            .size(11.0)
+                                            .color(egui::Color32::from_rgb(140, 128, 108))
+                                            .italics(),
+                                    );
+                                }
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        if ui
+                                            .small_button(
+                                                egui::RichText::new("✕")
+                                                    .color(egui::Color32::from_rgb(210, 130, 124)),
+                                            )
+                                            .clicked()
+                                        {
+                                            remove_date = Some(nwd.date);
+                                        }
+                                    },
+                                );
+                            });
+                        }
+                        if let Some(d) = remove_date {
+                            if let Some(rb) = model.resource_blocks.get_mut(&rb_id) {
+                                rb.non_working_dates.retain(|x| x.date != d);
+                                changed = true;
+                            }
+                        }
+
+                        // Add-row: date + optional label.
+                        let (date_in, desc_in) = settings
+                            .resource_date_inputs
+                            .entry(name.clone())
+                            .or_default();
+                        ui.horizontal(|ui| {
+                            ui.add_space(12.0);
+                            let resp = ui.add(
+                                egui::TextEdit::singleline(date_in)
+                                    .hint_text("YYYY-MM-DD")
+                                    .desired_width(100.0),
+                            );
+                            let resp_desc = ui.add(
+                                egui::TextEdit::singleline(desc_in)
+                                    .hint_text("Reason")
+                                    .desired_width(70.0),
+                            );
+                            let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
+                            let submit = ui.button("Add").clicked()
+                                || ((resp.lost_focus() || resp_desc.lost_focus()) && enter);
+                            if submit {
+                                if let Ok(date) =
+                                    chrono::NaiveDate::parse_from_str(date_in.trim(), "%Y-%m-%d")
+                                {
+                                    if let Some(rb) = model.resource_blocks.get_mut(&rb_id) {
+                                        if !rb.non_working_dates.iter().any(|x| x.date == date) {
+                                            rb.non_working_dates.push(model::NonWorkingDate {
+                                                date,
+                                                description: desc_in.trim().to_string(),
+                                            });
+                                            changed = true;
+                                        }
+                                    }
+                                    date_in.clear();
+                                    desc_in.clear();
+                                }
+                            }
+                        });
+                    }
+                    ui.add_space(4.0);
+                }
+            }); // ScrollArea::vertical
         });
 
     if close {
