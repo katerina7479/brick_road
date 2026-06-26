@@ -1866,44 +1866,50 @@ fn settings_flyout_ui(
             }
 
             ui.add_space(6.0);
-            ui.horizontal(|ui| {
-                let resp = ui.add(
-                    egui::TextEdit::singleline(&mut settings.holiday_input)
-                        .hint_text("YYYY-MM-DD")
-                        .desired_width(110.0),
-                );
-                let resp_desc = ui.add(
-                    egui::TextEdit::singleline(&mut settings.holiday_desc_input)
-                        .hint_text("Label (optional)")
-                        .desired_width(120.0),
-                );
-                let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
-                let submit = ui.button("Add").clicked()
-                    || ((resp.lost_focus() || resp_desc.lost_focus()) && enter);
-                if submit {
-                    if let Ok(date) =
-                        chrono::NaiveDate::parse_from_str(settings.holiday_input.trim(), "%Y-%m-%d")
+            // Two-row layout so all three controls fit in the 272px panel.
+            // Row 1: date field (full available width).
+            // Row 2: optional label field + "Add" button.
+            let resp = ui.add(
+                egui::TextEdit::singleline(&mut settings.holiday_input)
+                    .hint_text("YYYY-MM-DD")
+                    .desired_width(f32::INFINITY),
+            );
+            let (resp_desc, submit) = ui
+                .horizontal(|ui| {
+                    let rd = ui.add(
+                        egui::TextEdit::singleline(&mut settings.holiday_desc_input)
+                            .hint_text("Label (optional)")
+                            .desired_width(f32::INFINITY),
+                    );
+                    let btn = ui.button("Add").clicked();
+                    (rd, btn)
+                })
+                .inner;
+            let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
+            let submit = submit || ((resp.lost_focus() || resp_desc.lost_focus()) && enter);
+            if submit {
+                if let Ok(date) =
+                    chrono::NaiveDate::parse_from_str(settings.holiday_input.trim(), "%Y-%m-%d")
+                {
+                    if !model
+                        .calendar
+                        .non_working_dates
+                        .iter()
+                        .any(|x| x.date == date)
                     {
-                        if !model
+                        model
                             .calendar
                             .non_working_dates
-                            .iter()
-                            .any(|x| x.date == date)
-                        {
-                            model
-                                .calendar
-                                .non_working_dates
-                                .push(model::NonWorkingDate {
-                                    date,
-                                    description: settings.holiday_desc_input.trim().to_string(),
-                                });
-                            changed = true;
-                        }
-                        settings.holiday_input.clear();
-                        settings.holiday_desc_input.clear();
+                            .push(model::NonWorkingDate {
+                                date,
+                                description: settings.holiday_desc_input.trim().to_string(),
+                            });
+                        changed = true;
                     }
+                    settings.holiday_input.clear();
+                    settings.holiday_desc_input.clear();
                 }
-            });
+            }
 
             // ── Resources ──────────────────────────────────────────────────
             ui.add_space(16.0);
