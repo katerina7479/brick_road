@@ -8,6 +8,23 @@ use crate::model::{
 
 pub fn create_tables(conn: &Connection) -> Result<()> {
     conn.execute_batch("PRAGMA foreign_keys = ON;")?;
+    // SQLite has no ADD COLUMN IF NOT EXISTS. Run each migration and swallow
+    // "duplicate column name" (already applied) and "no such table" (fresh DB
+    // — CREATE_TABLES_SQL below will create the column in the initial schema).
+    for sql in [
+        "ALTER TABLE calendar_non_working_dates ADD COLUMN description TEXT NOT NULL DEFAULT ''",
+    ] {
+        match conn.execute_batch(sql) {
+            Ok(()) => {}
+            Err(e)
+                if e.to_string().contains("duplicate column name")
+                    || e.to_string().contains("no such table") => {}
+            Err(e) => return Err(e),
+        }
+    }
+    // Table-recreation migration: unify calendar and per-resource non-working
+    // dates into a single table with a nullable resource_id column (br-227).
+    migrate_unified_non_working_dates(conn)?;
     conn.execute_batch(CREATE_TABLES_SQL)?;
     // Seed default t-shirt sizes on first use (table created above).
     let count: i64 = conn.query_row("SELECT COUNT(*) FROM t_shirt_sizes", [], |r| r.get(0))?;
@@ -26,6 +43,74 @@ pub fn create_tables(conn: &Connection) -> Result<()> {
              INSERT INTO t_shirt_sizes (label, days, sort_order) VALUES ('4XL', 100, 8);",
         )?;
     }
+    Ok(())
+}
+
+/// One-time schema migration: merge `resource_non_working_dates` into
+/// `calendar_non_working_dates` (adding a nullable `resource_id` column).
+///
+/// Runs before `CREATE_TABLES_SQL` on every open, so it is a no-op for:
+/// - Fresh databases: table doesn't exist yet → returns immediately.
+/// - Already-migrated databases: column already present → returns immediately.
+///
+/// For old databases it:
+/// 1. Renames the old table.
+/// 2. Recreates it with the unified schema (date, description, resource_id).
+/// 3. Copies global rows (resource_id = NULL) from the renamed table.
+/// 4. Copies per-resource rows from `resource_non_working_dates` if present.
+/// 5. Drops both old tables.
+///
+/// The description ALTER in `create_tables` runs before this function, so
+/// the renamed old table is guaranteed to have a description column.
+fn migrate_unified_non_working_dates(conn: &Connection) -> Result<()> {
+    let table_exists: bool = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='calendar_non_working_dates'",
+        [],
+        |r| r.get::<_, i64>(0),
+    )? > 0;
+    if !table_exists {
+        return Ok(());
+    }
+
+    let has_resource_id: bool = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('calendar_non_working_dates') WHERE name='resource_id'",
+        [],
+        |r| r.get::<_, i64>(0),
+    )? > 0;
+    if has_resource_id {
+        return Ok(());
+    }
+
+    // Disable FK enforcement for this batch: CREATE_TABLES_SQL may not have
+    // run yet so resource_blocks (the FK parent) might not exist.
+    conn.execute_batch("PRAGMA foreign_keys = OFF;")?;
+    // Recreate with unified schema, preserving existing global rows.
+    conn.execute_batch(
+        "ALTER TABLE calendar_non_working_dates RENAME TO _calendar_nwd_old;
+         CREATE TABLE calendar_non_working_dates (
+             date        TEXT    NOT NULL,
+             description TEXT    NOT NULL DEFAULT '',
+             resource_id INTEGER REFERENCES resource_blocks(id)
+         );
+         INSERT INTO calendar_non_working_dates (date, description, resource_id)
+             SELECT date, description, NULL FROM _calendar_nwd_old;
+         DROP TABLE _calendar_nwd_old;",
+    )?;
+    conn.execute_batch("PRAGMA foreign_keys = ON;")?;
+
+    let resource_table_exists: bool = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='resource_non_working_dates'",
+        [],
+        |r| r.get::<_, i64>(0),
+    )? > 0;
+    if resource_table_exists {
+        conn.execute_batch(
+            "INSERT INTO calendar_non_working_dates (date, description, resource_id)
+                 SELECT date, description, resource_id FROM resource_non_working_dates;
+             DROP TABLE resource_non_working_dates;",
+        )?;
+    }
+
     Ok(())
 }
 
@@ -1276,6 +1361,104 @@ mod tests {
         let loaded = load_model(&conn).unwrap();
         assert_eq!(loaded.calendar.non_working_dates.len(), 1);
         assert_eq!(loaded.calendar.non_working_dates[0].description, "");
+    }
+
+    #[test]
+    fn create_tables_twice_is_idempotent() {
+        // All guards (duplicate-column-name, no-such-table, has_resource_id)
+        // must make create_tables a clean no-op when called on an already-
+        // migrated DB.
+        let conn = open_in_memory();
+        let mut m = Model::default();
+        m.calendar.non_working_dates.push(NonWorkingDate {
+            date: NaiveDate::from_ymd_opt(2025, 7, 4).unwrap(),
+            description: "Independence Day".to_string(),
+        });
+        save_model(&conn, &m).unwrap();
+
+        create_tables(&conn).unwrap();
+
+        let loaded = load_model(&conn).unwrap();
+        assert_eq!(loaded.calendar.non_working_dates.len(), 1);
+        assert_eq!(
+            loaded.calendar.non_working_dates[0].description,
+            "Independence Day"
+        );
+    }
+
+    #[test]
+    fn migration_adds_description_to_calendar_non_working_dates() {
+        // Simulate a pre-br-195 DB: calendar_non_working_dates has only a
+        // date column (TEXT PRIMARY KEY, no description).
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys = OFF;").unwrap();
+        conn.execute_batch(
+            "CREATE TABLE calendar_non_working_dates (date TEXT PRIMARY KEY);
+             INSERT INTO calendar_non_working_dates (date) VALUES ('2025-07-04');",
+        )
+        .unwrap();
+
+        create_tables(&conn).unwrap();
+
+        let loaded = load_model(&conn).unwrap();
+        assert_eq!(loaded.calendar.non_working_dates.len(), 1);
+        assert_eq!(
+            loaded.calendar.non_working_dates[0].date,
+            NaiveDate::from_ymd_opt(2025, 7, 4).unwrap()
+        );
+        assert_eq!(loaded.calendar.non_working_dates[0].description, "");
+    }
+
+    #[test]
+    fn migration_from_old_schema_preserves_all_non_working_dates() {
+        // Simulate a pre-br-227 DB: calendar_non_working_dates with description
+        // but no resource_id, and a separate resource_non_working_dates table.
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+        conn.execute_batch(
+            "CREATE TABLE resource_blocks (
+                 id            INTEGER PRIMARY KEY,
+                 name          TEXT    NOT NULL,
+                 resource_type TEXT    NOT NULL
+             );
+             INSERT INTO resource_blocks (id, name, resource_type)
+                 VALUES (1, 'Alice', 'Engineer');
+             CREATE TABLE calendar_non_working_dates (
+                 date        TEXT PRIMARY KEY,
+                 description TEXT NOT NULL DEFAULT ''
+             );
+             INSERT INTO calendar_non_working_dates (date, description)
+                 VALUES ('2025-07-04', 'Independence Day');
+             CREATE TABLE resource_non_working_dates (
+                 resource_id  INTEGER NOT NULL REFERENCES resource_blocks(id),
+                 date         TEXT    NOT NULL,
+                 description  TEXT    NOT NULL DEFAULT '',
+                 PRIMARY KEY (resource_id, date)
+             );
+             INSERT INTO resource_non_working_dates (resource_id, date, description)
+                 VALUES (1, '2025-08-11', 'Alice PTO');",
+        )
+        .unwrap();
+
+        create_tables(&conn).unwrap();
+
+        let loaded = load_model(&conn).unwrap();
+        assert_eq!(loaded.calendar.non_working_dates.len(), 1);
+        assert_eq!(
+            loaded.calendar.non_working_dates[0].date,
+            NaiveDate::from_ymd_opt(2025, 7, 4).unwrap()
+        );
+        assert_eq!(
+            loaded.calendar.non_working_dates[0].description,
+            "Independence Day"
+        );
+        let rb = loaded.resource_blocks.values().next().unwrap();
+        assert_eq!(rb.non_working_dates.len(), 1);
+        assert_eq!(
+            rb.non_working_dates[0].date,
+            NaiveDate::from_ymd_opt(2025, 8, 11).unwrap()
+        );
+        assert_eq!(rb.non_working_dates[0].description, "Alice PTO");
     }
 }
 
