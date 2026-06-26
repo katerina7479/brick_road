@@ -1364,6 +1364,29 @@ mod tests {
     }
 
     #[test]
+    fn create_tables_twice_is_idempotent() {
+        // All guards (duplicate-column-name, no-such-table, has_resource_id)
+        // must make create_tables a clean no-op when called on an already-
+        // migrated DB.
+        let conn = open_in_memory();
+        let mut m = Model::default();
+        m.calendar.non_working_dates.push(NonWorkingDate {
+            date: NaiveDate::from_ymd_opt(2025, 7, 4).unwrap(),
+            description: "Independence Day".to_string(),
+        });
+        save_model(&conn, &m).unwrap();
+
+        create_tables(&conn).unwrap();
+
+        let loaded = load_model(&conn).unwrap();
+        assert_eq!(loaded.calendar.non_working_dates.len(), 1);
+        assert_eq!(
+            loaded.calendar.non_working_dates[0].description,
+            "Independence Day"
+        );
+    }
+
+    #[test]
     fn migration_adds_description_to_calendar_non_working_dates() {
         // Simulate a pre-br-195 DB: calendar_non_working_dates has only a
         // date column (TEXT PRIMARY KEY, no description).
