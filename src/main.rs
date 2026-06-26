@@ -42,7 +42,6 @@ fn main() {
         .insert_resource(blocks::DepDragState::default())
         .insert_resource(blocks::UndoStack::default())
         .insert_resource(blocks::CreateModeState::default())
-        .insert_resource(blocks::SizePickerState::default())
         .insert_resource(blocks::BlockInspectorState::default())
         .insert_resource(schedule::VisibleBlocks::default())
         .insert_resource(schedule::DrillScope::default())
@@ -261,7 +260,6 @@ fn main() {
         .add_systems(EguiPrimaryContextPass, blocks::draw_name_edit_overlay)
         .add_systems(EguiPrimaryContextPass, blocks::draw_create_mode_overlay)
         .add_systems(EguiPrimaryContextPass, blocks::draw_block_tooltip)
-        .add_systems(EguiPrimaryContextPass, blocks::draw_size_settings_popup)
         .add_systems(EguiPrimaryContextPass, bands::draw_plan_rename_overlay)
         .add_systems(
             EguiPrimaryContextPass,
@@ -2055,6 +2053,65 @@ fn settings_flyout_ui(
                         });
                     }
                     ui.add_space(4.0);
+                }
+                // ── Sizes ──────────────────────────────────────────────────────
+                ui.add_space(16.0);
+                ui.label(
+                    egui::RichText::new("SIZES")
+                        .size(11.0)
+                        .color(egui::Color32::from_rgb(150, 130, 96)),
+                );
+                ui.separator();
+                ui.add_space(4.0);
+
+                // The t-shirt size → working-days map (XS/S/M/L…). Edits persist
+                // immediately; the per-block size picker reads this map.
+                let mut remove_size: Option<usize> = None;
+                for (i, size) in model.t_shirt_sizes.iter_mut().enumerate() {
+                    ui.horizontal(|ui| {
+                        if ui
+                            .add(egui::TextEdit::singleline(&mut size.label).desired_width(52.0))
+                            .changed()
+                        {
+                            changed = true;
+                        }
+                        if ui
+                            .add(
+                                egui::DragValue::new(&mut size.days)
+                                    .range(1..=400)
+                                    .suffix(" d"),
+                            )
+                            .changed()
+                        {
+                            changed = true;
+                        }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui
+                                .small_button(
+                                    egui::RichText::new("✕")
+                                        .color(egui::Color32::from_rgb(210, 130, 124)),
+                                )
+                                .on_hover_text("Remove")
+                                .clicked()
+                            {
+                                remove_size = Some(i);
+                            }
+                        });
+                    });
+                }
+                if let Some(i) = remove_size {
+                    if i < model.t_shirt_sizes.len() {
+                        model.t_shirt_sizes.remove(i);
+                        changed = true;
+                    }
+                }
+                ui.add_space(2.0);
+                if ui.button("＋ Add size").clicked() {
+                    model.t_shirt_sizes.push(model::TShirtSize {
+                        label: "New".to_string(),
+                        days: 5,
+                    });
+                    changed = true;
                 }
             }); // ScrollArea::vertical
         });

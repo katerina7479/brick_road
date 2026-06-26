@@ -25,6 +25,9 @@ pub fn create_tables(conn: &Connection) -> Result<()> {
     // Table-recreation migration: unify calendar and per-resource non-working
     // dates into a single table with a nullable resource_id column (br-227).
     migrate_unified_non_working_dates(conn)?;
+    // Table-recreation migration: give t_shirt_sizes an integer PK so labels
+    // can be freely edited/duplicated without PRIMARY KEY collisions (br-232).
+    migrate_t_shirt_sizes_integer_pk(conn)?;
     conn.execute_batch(CREATE_TABLES_SQL)?;
     // Seed default t-shirt sizes on first use (table created above).
     let count: i64 = conn.query_row("SELECT COUNT(*) FROM t_shirt_sizes", [], |r| r.get(0))?;
@@ -110,6 +113,48 @@ fn migrate_unified_non_working_dates(conn: &Connection) -> Result<()> {
              DROP TABLE resource_non_working_dates;",
         )?;
     }
+
+    Ok(())
+}
+
+/// One-time schema migration: give `t_shirt_sizes` an integer primary key and
+/// demote `label` to a plain `TEXT` column so labels can be edited/duplicated.
+///
+/// Runs before `CREATE_TABLES_SQL` on every open — no-op for fresh DBs (table
+/// doesn't exist yet) and already-migrated DBs (id column already present).
+fn migrate_t_shirt_sizes_integer_pk(conn: &Connection) -> Result<()> {
+    let table_exists: bool = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='t_shirt_sizes'",
+        [],
+        |r| r.get::<_, i64>(0),
+    )? > 0;
+    if !table_exists {
+        return Ok(());
+    }
+
+    let has_integer_pk: bool = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('t_shirt_sizes') WHERE name='id' AND pk=1",
+        [],
+        |r| r.get::<_, i64>(0),
+    )? > 0;
+    if has_integer_pk {
+        return Ok(());
+    }
+
+    conn.execute_batch("PRAGMA foreign_keys = OFF;")?;
+    conn.execute_batch(
+        "ALTER TABLE t_shirt_sizes RENAME TO _t_shirt_sizes_old;
+         CREATE TABLE t_shirt_sizes (
+             id         INTEGER PRIMARY KEY,
+             label      TEXT    NOT NULL,
+             days       INTEGER NOT NULL,
+             sort_order INTEGER NOT NULL DEFAULT 0
+         );
+         INSERT INTO t_shirt_sizes (label, days, sort_order)
+             SELECT label, days, sort_order FROM _t_shirt_sizes_old ORDER BY sort_order;
+         DROP TABLE _t_shirt_sizes_old;",
+    )?;
+    conn.execute_batch("PRAGMA foreign_keys = ON;")?;
 
     Ok(())
 }
@@ -1410,6 +1455,61 @@ mod tests {
     }
 
     #[test]
+    fn t_shirt_sizes_round_trip() {
+        // Verify custom sizes (including duplicate labels) survive save→load.
+        let conn = open_in_memory();
+        let mut m = Model::default();
+        m.t_shirt_sizes = vec![
+            TShirtSize {
+                label: "S".to_string(),
+                days: 5,
+            },
+            TShirtSize {
+                label: "S".to_string(), // duplicate label must not collide
+                days: 10,
+            },
+            TShirtSize {
+                label: "L".to_string(),
+                days: 25,
+            },
+        ];
+        save_model(&conn, &m).unwrap();
+        let loaded = load_model(&conn).unwrap();
+        assert_eq!(loaded.t_shirt_sizes.len(), 3);
+        assert_eq!(loaded.t_shirt_sizes[0].label, "S");
+        assert_eq!(loaded.t_shirt_sizes[0].days, 5);
+        assert_eq!(loaded.t_shirt_sizes[1].label, "S");
+        assert_eq!(loaded.t_shirt_sizes[1].days, 10);
+        assert_eq!(loaded.t_shirt_sizes[2].label, "L");
+        assert_eq!(loaded.t_shirt_sizes[2].days, 25);
+    }
+
+    #[test]
+    fn migration_t_shirt_sizes_old_schema_upgraded() {
+        // Simulate a pre-br-232 DB: t_shirt_sizes with label TEXT PRIMARY KEY.
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE t_shirt_sizes (
+                 label      TEXT    PRIMARY KEY,
+                 days       INTEGER NOT NULL,
+                 sort_order INTEGER NOT NULL DEFAULT 0
+             );
+             INSERT INTO t_shirt_sizes (label, days, sort_order) VALUES ('S',  5, 0);
+             INSERT INTO t_shirt_sizes (label, days, sort_order) VALUES ('M', 15, 1);",
+        )
+        .unwrap();
+
+        create_tables(&conn).unwrap();
+
+        let loaded = load_model(&conn).unwrap();
+        assert_eq!(loaded.t_shirt_sizes.len(), 2);
+        assert_eq!(loaded.t_shirt_sizes[0].label, "S");
+        assert_eq!(loaded.t_shirt_sizes[0].days, 5);
+        assert_eq!(loaded.t_shirt_sizes[1].label, "M");
+        assert_eq!(loaded.t_shirt_sizes[1].days, 15);
+    }
+
+    #[test]
     fn migration_from_old_schema_preserves_all_non_working_dates() {
         // Simulate a pre-br-227 DB: calendar_non_working_dates with description
         // but no resource_id, and a separate resource_non_working_dates table.
@@ -1526,7 +1626,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS uix_calendar_nwd_resource
     ON calendar_non_working_dates (resource_id, date) WHERE resource_id IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS t_shirt_sizes (
-    label      TEXT    PRIMARY KEY,
+    id         INTEGER PRIMARY KEY,
+    label      TEXT    NOT NULL,
     days       INTEGER NOT NULL,
     sort_order INTEGER NOT NULL DEFAULT 0
 );
