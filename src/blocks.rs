@@ -3309,15 +3309,7 @@ pub fn draw_block_tooltip(
     }
 }
 
-// ── T-shirt size picker ──────────────────────────────────────────────────────
-
-/// State for the editable size-map settings window: whether it is showing. The
-/// window is launched from the block inspector fly-out's SIZE section and edits
-/// the global `t_shirt_sizes` table.
-#[derive(Resource, Default)]
-pub struct SizePickerState {
-    pub settings_open: bool,
-}
+// ── Block inspector fly-out ──────────────────────────────────────────────────
 
 /// Edit buffers backing the block inspector fly-out. `bound` is the block the
 /// buffers currently mirror; when the selection changes the fly-out flushes the
@@ -3405,7 +3397,6 @@ pub fn block_inspector_flyout_ui(
     mut contexts: EguiContexts,
     mut selected: ResMut<SelectedBlock>,
     mut state: ResMut<BlockInspectorState>,
-    mut picker: ResMut<SizePickerState>,
     mut model: ResMut<model::Model>,
     settings: Res<crate::SettingsState>,
     keys: Res<ButtonInput<KeyCode>>,
@@ -3474,10 +3465,11 @@ pub fn block_inspector_flyout_ui(
 
     let mut commit_name = false;
     let mut commit_desc = false;
+    // (size-map editing lives in the settings fly-out's SIZES section; the
+    // inspector only selects a size, writing chosen_size.)
     let mut chosen_size: Option<(String, Day)> = None;
     let mut chosen_priority: Option<u8> = None;
     let mut chosen_color: Option<Option<[f32; 3]>> = None;
-    let mut edit_sizes = false;
     let mut close = false;
     let mut reparent_to: Option<Option<model::WorkBlockId>> = None;
     let mut open_reparent = false;
@@ -3540,17 +3532,10 @@ pub fn block_inspector_flyout_ui(
                 }
             });
             ui.add_space(2.0);
-            ui.horizontal(|ui| {
-                ui.label(
-                    egui::RichText::new(format!("{duration_days} working days"))
-                        .color(egui::Color32::from_rgb(150, 130, 96)),
-                );
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.small_button("⚙ Edit sizes…").clicked() {
-                        edit_sizes = true;
-                    }
-                });
-            });
+            ui.label(
+                egui::RichText::new(format!("{duration_days} working days"))
+                    .color(egui::Color32::from_rgb(150, 130, 96)),
+            );
 
             // ── Priority ───────────────────────────────────────────────────
             inspector_section(ui, "PRIORITY");
@@ -3731,93 +3716,10 @@ pub fn block_inspector_flyout_ui(
         state.reparent_open = false;
         state.reparent_plan_id = None;
     }
-    if edit_sizes {
-        picker.settings_open = true;
-    }
     if close {
         let (n, d) = (state.name_buf.clone(), state.desc_buf.clone());
         flush_inspector_buffers(&mut model, id, &n, &d, &conn);
         selected.0 = None;
         state.bound = None;
-    }
-}
-
-/// Editable size-map window: rename, set days, add and remove sizes. Persists on
-/// every change so the picker reflects edits immediately.
-pub fn draw_size_settings_popup(
-    mut contexts: EguiContexts,
-    mut picker: ResMut<SizePickerState>,
-    mut model: ResMut<model::Model>,
-    conn: NonSend<rusqlite::Connection>,
-) {
-    if !picker.settings_open {
-        return;
-    }
-    let Ok(ctx) = contexts.ctx_mut() else { return };
-
-    let mut changed = false;
-    let mut remove: Option<usize> = None;
-    let mut add = false;
-    let mut done = false;
-
-    egui::Window::new("Edit sizes")
-        .collapsible(false)
-        .resizable(false)
-        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-        .show(ctx, |ui| {
-            for (i, size) in model.t_shirt_sizes.iter_mut().enumerate() {
-                ui.horizontal(|ui| {
-                    if ui
-                        .add(egui::TextEdit::singleline(&mut size.label).desired_width(52.0))
-                        .changed()
-                    {
-                        changed = true;
-                    }
-                    if ui
-                        .add(
-                            egui::DragValue::new(&mut size.days)
-                                .range(1..=400)
-                                .suffix(" d"),
-                        )
-                        .changed()
-                    {
-                        changed = true;
-                    }
-                    if ui.small_button("×").on_hover_text("Remove").clicked() {
-                        remove = Some(i);
-                    }
-                });
-            }
-            ui.separator();
-            ui.horizontal(|ui| {
-                if ui.button("＋ Add size").clicked() {
-                    add = true;
-                }
-                if ui.button("Done").clicked() {
-                    done = true;
-                }
-            });
-        });
-
-    if let Some(i) = remove {
-        if i < model.t_shirt_sizes.len() {
-            model.t_shirt_sizes.remove(i);
-            changed = true;
-        }
-    }
-    if add {
-        model.t_shirt_sizes.push(model::TShirtSize {
-            label: "New".to_string(),
-            days: 5,
-        });
-        changed = true;
-    }
-    if changed {
-        if let Err(e) = db::save_model(&conn, &model) {
-            error!("save_model failed: {e}");
-        }
-    }
-    if done {
-        picker.settings_open = false;
     }
 }
