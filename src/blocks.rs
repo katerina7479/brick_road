@@ -3522,15 +3522,23 @@ pub fn block_inspector_flyout_ui(
 
             // ── Size ───────────────────────────────────────────────────────
             inspector_section(ui, "SIZE");
-            ui.horizontal_wrapped(|ui| {
-                for size in &sizes {
-                    let is_cur = cur_size.as_deref() == Some(size.label.as_str());
-                    let text = format!("{} · {}d", size.label, size.days);
-                    if ui.selectable_label(is_cur, text).clicked() {
-                        chosen_size = Some((size.label.clone(), size.days));
+            let sel_text = cur_size
+                .as_deref()
+                .and_then(|lbl| sizes.iter().find(|s| s.label == lbl))
+                .map(|s| format!("{} · {}d", s.label, s.days))
+                .unwrap_or_else(|| "—".to_string());
+            egui::ComboBox::from_id_salt("block_size_picker")
+                .selected_text(sel_text)
+                .width(f32::INFINITY)
+                .show_ui(ui, |ui| {
+                    for size in &sizes {
+                        let is_cur = cur_size.as_deref() == Some(size.label.as_str());
+                        let text = format!("{} · {}d", size.label, size.days);
+                        if ui.selectable_label(is_cur, text).clicked() {
+                            chosen_size = Some((size.label.clone(), size.days));
+                        }
                     }
-                }
-            });
+                });
             ui.add_space(2.0);
             ui.label(
                 egui::RichText::new(format!("{duration_days} working days"))
