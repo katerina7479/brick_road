@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  pull_request:
+
+jobs:
+  # ── Schema-change guard ───────────────────────────────────────────────────────
+  # Mirrors the .githooks/pre-push check: fails if src/db.rs schema surface is
+  # modified without an approval marker in the commit messages. Uses fetch-depth:0
+  # so both the PR base and head commits are available for git diff.
+  schema-guard:
+    name: Schema change guard
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Run schema-guard
+        run: |
+          scripts/check-schema-guard.sh \
+            ${{ github.event.pull_request.base.sha }} \
+            ${{ github.sha }}
+
+  # ── Formatting ────────────────────────────────────────────────────────────────
+  # Fast check: no compile required. Uses the 1.96.0 toolchain pinned in
+  # rust-toolchain.toml so the result is identical to `cargo fmt` locally.
+  fmt:
+    name: Formatting (cargo fmt --check)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust 1.96.0 + rustfmt
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.96.0
+          components: rustfmt
+      - name: Check formatting
+        run: cargo fmt --check
+
+  # ── Lints ─────────────────────────────────────────────────────────────────────
+  # Full Bevy compile — slow, so cache the build artifacts. -D warnings means
+  # any clippy warning fails the job, preventing silent lint accumulation.
+  clippy:
+    name: Lints (cargo clippy -D warnings)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust 1.96.0 + clippy
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.96.0
+          components: clippy
+      - name: Cache build artifacts
+        uses: Swatinem/rust-cache@v2
+      - name: Run clippy (deny warnings)
+        run: cargo clippy -- -D warnings
