@@ -3529,7 +3529,7 @@ pub fn block_inspector_flyout_ui(
                 .unwrap_or_else(|| "—".to_string());
             egui::ComboBox::from_id_salt("block_size_picker")
                 .selected_text(sel_text)
-                .width(f32::INFINITY)
+                .width(ui.available_width())
                 .show_ui(ui, |ui| {
                     for size in &sizes {
                         let is_cur = cur_size.as_deref() == Some(size.label.as_str());
