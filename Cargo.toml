@@ -24,6 +24,7 @@ name = "Brick Road"
 identifier = "com.katerina7479.brickroad"
 version = "0.1.0"
 category = "public.app-category.productivity"
+icon = ["assets/icon.icns"]
 
 [profile.dev]
 opt-level = 1
