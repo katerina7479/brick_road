@@ -1963,6 +1963,12 @@ fn settings_flyout_ui(
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
+                    // Constrain content to leave room for the scrollbar gutter and
+                    // right breathing room so the bar never overlays controls.
+                    let gutter =
+                        ui.spacing().scroll.bar_width + ui.spacing().scroll.bar_inner_margin;
+                    ui.set_max_width(ui.available_width() - gutter - 6.0);
+
                     theme::section_header(ui, "CALENDAR", None);
 
                     settings_row(ui, "Days / week", |ui| {
