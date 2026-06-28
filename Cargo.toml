@@ -11,6 +11,7 @@ dev = ["bevy/dynamic_linking"]
 [dependencies]
 bevy = "0.18.0"
 bevy_egui = "0.39.1"
+egui_extras = { version = "0.33", default-features = false, features = ["datepicker"] }
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 directories = "5"
