@@ -861,6 +861,85 @@ fn dependency_type_str(dt: DependencyType) -> &'static str {
     }
 }
 
+const CREATE_TABLES_SQL: &str = "
+CREATE TABLE IF NOT EXISTS resource_blocks (
+    id            INTEGER PRIMARY KEY,
+    name          TEXT    NOT NULL,
+    resource_type TEXT    NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS work_blocks (
+    id                   INTEGER PRIMARY KEY,
+    name                 TEXT    NOT NULL,
+    start_day            INTEGER NOT NULL DEFAULT 0,
+    duration_days        INTEGER NOT NULL DEFAULT 0,
+    color_r              REAL,
+    color_g              REAL,
+    color_b              REAL,
+    description          TEXT    NOT NULL DEFAULT '',
+    priority             INTEGER NOT NULL DEFAULT 1,
+    t_shirt_size         TEXT,
+    parent_id            INTEGER,
+    rollup               INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS dependencies (
+    id              INTEGER PRIMARY KEY,
+    plan_id         INTEGER,
+    predecessor_id  INTEGER NOT NULL REFERENCES work_blocks(id),
+    successor_id    INTEGER NOT NULL REFERENCES work_blocks(id),
+    dependency_type TEXT    NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS plans (
+    id                INTEGER PRIMARY KEY,
+    name              TEXT    NOT NULL,
+    branch_start_day  INTEGER,
+    row_names         TEXT    NOT NULL DEFAULT '',
+    block_rows        TEXT    NOT NULL DEFAULT ''
+);
+
+CREATE TABLE IF NOT EXISTS plan_blocks (
+    plan_id       INTEGER NOT NULL REFERENCES plans(id),
+    work_block_id INTEGER NOT NULL REFERENCES work_blocks(id),
+    sort_order    INTEGER NOT NULL,
+    PRIMARY KEY (plan_id, sort_order)
+);
+
+CREATE TABLE IF NOT EXISTS calendar_config (
+    id                    INTEGER PRIMARY KEY CHECK (id = 1),
+    start_date            TEXT    NOT NULL DEFAULT '2025-01-01',
+    working_days_per_week INTEGER NOT NULL DEFAULT 5
+);
+
+CREATE TABLE IF NOT EXISTS calendar_non_working_dates (
+    date        TEXT    NOT NULL,
+    description TEXT    NOT NULL DEFAULT '',
+    resource_id INTEGER REFERENCES resource_blocks(id)
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uix_calendar_nwd_global
+    ON calendar_non_working_dates (date) WHERE resource_id IS NULL;
+
+CREATE UNIQUE INDEX IF NOT EXISTS uix_calendar_nwd_resource
+    ON calendar_non_working_dates (resource_id, date) WHERE resource_id IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS t_shirt_sizes (
+    id         INTEGER PRIMARY KEY,
+    label      TEXT    NOT NULL,
+    days       INTEGER NOT NULL,
+    sort_order INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS quarter_colors (
+    quarter INTEGER PRIMARY KEY,
+    color_r REAL    NOT NULL,
+    color_g REAL    NOT NULL,
+    color_b REAL    NOT NULL,
+    color_a REAL    NOT NULL
+);
+";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1561,82 +1640,3 @@ mod tests {
         assert_eq!(rb.non_working_dates[0].description, "Alice PTO");
     }
 }
-
-const CREATE_TABLES_SQL: &str = "
-CREATE TABLE IF NOT EXISTS resource_blocks (
-    id            INTEGER PRIMARY KEY,
-    name          TEXT    NOT NULL,
-    resource_type TEXT    NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS work_blocks (
-    id                   INTEGER PRIMARY KEY,
-    name                 TEXT    NOT NULL,
-    start_day            INTEGER NOT NULL DEFAULT 0,
-    duration_days        INTEGER NOT NULL DEFAULT 0,
-    color_r              REAL,
-    color_g              REAL,
-    color_b              REAL,
-    description          TEXT    NOT NULL DEFAULT '',
-    priority             INTEGER NOT NULL DEFAULT 1,
-    t_shirt_size         TEXT,
-    parent_id            INTEGER,
-    rollup               INTEGER NOT NULL DEFAULT 0
-);
-
-CREATE TABLE IF NOT EXISTS dependencies (
-    id              INTEGER PRIMARY KEY,
-    plan_id         INTEGER,
-    predecessor_id  INTEGER NOT NULL REFERENCES work_blocks(id),
-    successor_id    INTEGER NOT NULL REFERENCES work_blocks(id),
-    dependency_type TEXT    NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS plans (
-    id                INTEGER PRIMARY KEY,
-    name              TEXT    NOT NULL,
-    branch_start_day  INTEGER,
-    row_names         TEXT    NOT NULL DEFAULT '',
-    block_rows        TEXT    NOT NULL DEFAULT ''
-);
-
-CREATE TABLE IF NOT EXISTS plan_blocks (
-    plan_id       INTEGER NOT NULL REFERENCES plans(id),
-    work_block_id INTEGER NOT NULL REFERENCES work_blocks(id),
-    sort_order    INTEGER NOT NULL,
-    PRIMARY KEY (plan_id, sort_order)
-);
-
-CREATE TABLE IF NOT EXISTS calendar_config (
-    id                    INTEGER PRIMARY KEY CHECK (id = 1),
-    start_date            TEXT    NOT NULL DEFAULT '2025-01-01',
-    working_days_per_week INTEGER NOT NULL DEFAULT 5
-);
-
-CREATE TABLE IF NOT EXISTS calendar_non_working_dates (
-    date        TEXT    NOT NULL,
-    description TEXT    NOT NULL DEFAULT '',
-    resource_id INTEGER REFERENCES resource_blocks(id)
-);
-
-CREATE UNIQUE INDEX IF NOT EXISTS uix_calendar_nwd_global
-    ON calendar_non_working_dates (date) WHERE resource_id IS NULL;
-
-CREATE UNIQUE INDEX IF NOT EXISTS uix_calendar_nwd_resource
-    ON calendar_non_working_dates (resource_id, date) WHERE resource_id IS NOT NULL;
-
-CREATE TABLE IF NOT EXISTS t_shirt_sizes (
-    id         INTEGER PRIMARY KEY,
-    label      TEXT    NOT NULL,
-    days       INTEGER NOT NULL,
-    sort_order INTEGER NOT NULL DEFAULT 0
-);
-
-CREATE TABLE IF NOT EXISTS quarter_colors (
-    quarter INTEGER PRIMARY KEY,
-    color_r REAL    NOT NULL,
-    color_g REAL    NOT NULL,
-    color_b REAL    NOT NULL,
-    color_a REAL    NOT NULL
-);
-";

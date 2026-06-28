@@ -19,6 +19,13 @@ rfd = "0.15"
 [dev-dependencies]
 tempfile = "3"
 
+[package.metadata.bundle]
+name = "Brick Road"
+identifier = "com.katerina7479.brickroad"
+version = "0.1.0"
+category = "public.app-category.productivity"
+icon = ["assets/icon.icns"]
+
 [profile.dev]
 opt-level = 1
 # Level 1 debug info is enough for backtraces; full (2) bloats link time.
