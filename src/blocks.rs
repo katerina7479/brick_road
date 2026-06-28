@@ -1067,9 +1067,13 @@ pub fn handle_block_selection(
                 selected.0 = Some(id);
             }
         } else {
-            // Plain click: replace selection with just this block.
-            set.0.clear();
-            set.0.insert(id);
+            // Plain click: replace selection with just this block — UNLESS the
+            // block is already part of a multi-selection, in which case we keep
+            // the whole set so that handle_block_drag can move the group.
+            if !(set.0.len() > 1 && set.0.contains(&id)) {
+                set.0.clear();
+                set.0.insert(id);
+            }
             selected.0 = Some(id);
         }
         selected_dep.0 = None;
@@ -1203,6 +1207,12 @@ pub struct DragState {
     /// click without moving (important for tall multi-row roll-up parents — a
     /// click on the lower part must not snap the whole block to that row).
     dragging: Option<(WorkBlockId, f32, i32)>,
+    /// Blocks that move with the anchor during a group drag.
+    /// `(id, day_offset_from_anchor, row_offset_from_anchor)` captured at press.
+    group_offsets: Vec<(WorkBlockId, i32, i32)>,
+    /// Pre-drag positions saved at press, used to populate the undo slot on
+    /// release. `(id, start_day_before, row_before)` for anchor + all peers.
+    pre_drag_snapshot: Vec<(WorkBlockId, i32, i32)>,
 }
 
 /// Tracks an in-progress right-edge resize drag.
@@ -1346,6 +1356,8 @@ pub fn handle_block_drag(
     block_query: Query<(&BlockSprite, &Transform, &Sprite)>,
     resize: Res<ResizeDragState>,
     dep_drag: Res<DepDragState>,
+    set: Res<SelectedBlocks>,
+    mut undo: ResMut<UndoStack>,
 ) {
     if dep_drag.from.is_some() {
         drag.dragging = None;
@@ -1374,6 +1386,8 @@ pub fn handle_block_drag(
     // Press: hit-test and start drag. Skip if a resize is already in progress.
     if mouse.just_pressed(MouseButton::Left) {
         drag.dragging = None;
+        drag.group_offsets.clear();
+        drag.pre_drag_snapshot.clear();
         if resize.dragging.is_some() {
             return;
         }
@@ -1386,14 +1400,41 @@ pub fn handle_block_drag(
                     .get(&id)
                     .map(|wb| crate::calendar::day_to_x(wb.start_day, &off, &model.calendar))
                     .unwrap_or(0.0);
-                let block_row = model
-                    .main_plan_id()
-                    .map(|p| model.block_row(p, id))
-                    .unwrap_or(0);
+                let plan_id = model.main_plan_id();
+                let block_row = plan_id.map(|p| model.block_row(p, id)).unwrap_or(0);
                 let cursor_row = (-world_pos.y / ROW_HEIGHT).round() as i32;
                 // Offsets preserve where within the block the user grabbed, in x
                 // and in rows — so a click without dragging never moves it.
                 drag.dragging = Some((id, world_pos.x - start_px, block_row - cursor_row));
+
+                // Record pre-drag position for the anchor.
+                let anchor_day = model
+                    .work_blocks
+                    .get(&id)
+                    .map(|wb| wb.start_day)
+                    .unwrap_or(0);
+                drag.pre_drag_snapshot.push((id, anchor_day, block_row));
+
+                // If this block is in a multi-selection, set up group move.
+                if set.0.len() > 1 && set.0.contains(&id) {
+                    for &peer_id in &set.0 {
+                        if peer_id == id {
+                            continue;
+                        }
+                        if let Some(wb) = model.work_blocks.get(&peer_id) {
+                            let peer_day = wb.start_day;
+                            let peer_row =
+                                plan_id.map(|p| model.block_row(p, peer_id)).unwrap_or(0);
+                            drag.pre_drag_snapshot.push((peer_id, peer_day, peer_row));
+                            drag.group_offsets.push((
+                                peer_id,
+                                peer_day - anchor_day,
+                                peer_row - block_row,
+                            ));
+                        }
+                    }
+                }
+
                 // Selection is owned by handle_block_selection (which toggles on
                 // re-click); don't re-select here or a second click can't deselect.
                 break;
@@ -1444,6 +1485,22 @@ pub fn handle_block_drag(
                     model.set_block_row(p, id, new_row);
                 }
             }
+            // Move all co-selected blocks by the same delta.
+            let group: Vec<(WorkBlockId, i32, i32)> = drag.group_offsets.clone();
+            for (peer_id, day_off, row_off) in group {
+                let peer_start = (new_start + day_off).max(0).max(branch_min);
+                let peer_row = new_row + row_off;
+                if model.work_blocks.get(&peer_id).map(|wb| wb.start_day) != Some(peer_start) {
+                    if let Some(wb) = model.work_blocks.get_mut(&peer_id) {
+                        wb.start_day = peer_start;
+                    }
+                }
+                if let Some(p) = model.main_plan_id() {
+                    if model.block_row(p, peer_id) != peer_row {
+                        model.set_block_row(p, peer_id, peer_row);
+                    }
+                }
+            }
         }
         return;
     }
@@ -1451,10 +1508,26 @@ pub fn handle_block_drag(
     // Release: cascade dependencies and persist.
     if mouse.just_released(MouseButton::Left) {
         if let Some((id, _, _)) = drag.dragging.take() {
+            // Save pre-drag positions for undo; overwrite any previous undo slot.
+            let snapshot = std::mem::take(&mut drag.pre_drag_snapshot);
+            if !snapshot.is_empty() {
+                undo.last_move = Some(snapshot);
+                undo.last_deletion = None;
+            }
+
             schedule::cascade_dependencies(&mut model, id);
-            // Moving a child may change its parent's rolled-up extent.
             if let Some(parent) = model.work_blocks.get(&id).and_then(|wb| wb.parent) {
                 model.recompute_rollup(parent);
+            }
+            // Cascade for each co-moved block.
+            let group_ids: Vec<WorkBlockId> =
+                drag.group_offsets.iter().map(|(gid, _, _)| *gid).collect();
+            drag.group_offsets.clear();
+            for peer_id in group_ids {
+                schedule::cascade_dependencies(&mut model, peer_id);
+                if let Some(parent) = model.work_blocks.get(&peer_id).and_then(|wb| wb.parent) {
+                    model.recompute_rollup(parent);
+                }
             }
             if let Err(e) = db::save_model(&conn, &model) {
                 error!("save_model failed: {e}");
@@ -2326,11 +2399,15 @@ struct DeletedBlockSnapshot {
     reparented_children: Vec<WorkBlockId>,
 }
 
-/// Single-slot undo buffer for block deletions. Holds the most recent deletion
-/// batch (one or more blocks); overwritten on each delete; consumed by undo.
+/// Single-slot undo buffer. Holds the most recent destructive action: either a
+/// deletion batch or a move (group or single). At most one slot is populated at
+/// any time; the newer action always overwrites the older.
 #[derive(Resource, Default)]
 pub struct UndoStack {
     last_deletion: Option<Vec<DeletedBlockSnapshot>>,
+    /// Pre-drag positions for the most recent completed drag.
+    /// `(id, start_day_before, row_before)`.
+    last_move: Option<Vec<(WorkBlockId, i32, i32)>>,
 }
 
 fn build_deletion_snapshot(model: &model::Model, id: WorkBlockId) -> DeletedBlockSnapshot {
@@ -2438,6 +2515,7 @@ pub fn handle_block_delete(
                 .map(|&id| build_deletion_snapshot(&model, id))
                 .collect();
             undo.last_deletion = Some(snaps);
+            undo.last_move = None;
             for id in ids {
                 delete_work_block(&mut model, id);
             }
@@ -2473,6 +2551,18 @@ pub fn handle_undo(
         if let Some(snaps) = undo.last_deletion.take() {
             for snap in snaps {
                 restore_deletion_snapshot(&mut model, snap);
+            }
+            if let Err(e) = db::save_model(&conn, &model) {
+                error!("save_model failed: {e}");
+            }
+        } else if let Some(moves) = undo.last_move.take() {
+            if let Some(plan_id) = model.main_plan_id() {
+                for (id, prev_start, prev_row) in moves {
+                    if let Some(wb) = model.work_blocks.get_mut(&id) {
+                        wb.start_day = prev_start;
+                    }
+                    model.set_block_row(plan_id, id, prev_row);
+                }
             }
             if let Err(e) = db::save_model(&conn, &model) {
                 error!("save_model failed: {e}");
