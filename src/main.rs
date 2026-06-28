@@ -1303,15 +1303,23 @@ fn calendar_ruler_ui(
                 // Holiday columns carry their own greyed date number, so the
                 // date doesn't disappear from the header where work skips it.
                 let holiday_num = egui::Color32::from_rgb(120, 122, 134);
+                // Multi-day labeled holidays get one label over the whole run
+                // (drawn below); suppress the per-column numbers those cover.
+                let label_spans = calendar::holiday_label_spans(&off, config, day_max);
                 for (left_x, date, desc) in calendar::holiday_columns(&off, config, day_max) {
                     let sx = world_to_screen_x(left_x);
                     let cx = sx + day_w * 0.5;
                     if cx < rect.left() || cx > rect.right() {
                         continue;
                     }
+                    let in_label_span = label_spans
+                        .iter()
+                        .any(|(l, r, _)| left_x >= *l - 0.5 && left_x < *r - 0.5);
                     // Thin holiday numbers consistently with the regular days,
                     // keyed off the holiday's own day index.
-                    if calendar::date_to_day(date, config).rem_euclid(label_stride) == 0 {
+                    if !in_label_span
+                        && calendar::date_to_day(date, config).rem_euclid(label_stride) == 0
+                    {
                         painter.text(
                             egui::Pos2::new(cx, day_y),
                             egui::Align2::CENTER_CENTER,
@@ -1328,6 +1336,12 @@ fn calendar_ruler_ui(
                         ui.allocate_rect(col_rect, egui::Sense::hover())
                             .on_hover_text(&desc);
                     }
+                }
+                // Draw each multi-day holiday's label once, centered over its run
+                // in place of the suppressed per-column numbers.
+                let holiday_label_color = egui::Color32::from_rgb(170, 152, 176);
+                for (l, r, desc) in &label_spans {
+                    period(*l, *r, desc, day_y, 10.0, holiday_label_color);
                 }
             }
 
