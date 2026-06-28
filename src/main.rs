@@ -1816,40 +1816,6 @@ fn quarter_start_x(y: i32, q: i32, config: &model::CalendarConfig) -> f32 {
     )
 }
 
-/// Applies the Aurora cyan-HUD theme to the current `ui`'s button widget states
-/// so every `tool_button` in the row gets a consistent fill, rounded corner, and
-/// hover/active feedback instead of egui's flat grey default.
-fn style_tool_buttons(ui: &mut egui::Ui) {
-    let r = egui::CornerRadius::same(6);
-    let w = &mut ui.visuals_mut().widgets;
-    w.inactive.weak_bg_fill = theme::PANEL_HI;
-    w.inactive.bg_stroke = egui::Stroke::new(1.0, theme::STROKE);
-    w.inactive.fg_stroke.color = theme::TEXT;
-    w.inactive.corner_radius = r;
-    w.hovered.weak_bg_fill = egui::Color32::from_rgb(24, 40, 46);
-    w.hovered.bg_stroke = egui::Stroke::new(1.0, theme::STROKE_HI);
-    w.hovered.fg_stroke.color = theme::TEXT;
-    w.hovered.corner_radius = r;
-    w.active.weak_bg_fill = egui::Color32::from_rgb(28, 50, 58);
-    w.active.corner_radius = r;
-}
-
-/// A themed top-bar action button. `active` highlights it (e.g. the settings
-/// gear while the panel is open). Expects `style_tool_buttons` already applied.
-fn tool_button(ui: &mut egui::Ui, label: &str, active: bool) -> egui::Response {
-    let mut text = egui::RichText::new(label).size(12.5);
-    if active {
-        text = text.color(theme::ACCENT);
-    }
-    let mut btn = egui::Button::new(text);
-    if active {
-        btn = btn
-            .fill(theme::PANEL_HI)
-            .stroke(egui::Stroke::new(1.0, theme::ACCENT));
-    }
-    ui.add(btn)
-}
-
 /// Right-side settings fly-out. Toggled by the top-bar gear. Holds general
 /// settings; the first section is the calendar (working days per week, the
 /// holiday list, and the start date). Edits write straight to `model.calendar`
@@ -2359,17 +2325,7 @@ fn top_bar_ui(
                     if plan_is_acceptable(&model, bid) {
                         ui.separator();
                         let name = model.plans[&bid].name.clone();
-                        if ui
-                            .add(
-                                egui::Button::new(
-                                    egui::RichText::new("▲ Accept as main")
-                                        .size(12.5)
-                                        .color(theme::ACCENT),
-                                )
-                                .fill(theme::PANEL_HI)
-                                .stroke(egui::Stroke::new(1.0, theme::STROKE_HI))
-                                .corner_radius(6.0),
-                            )
+                        if theme::pill_button(ui, "▲ ACCEPT AS MAIN", true)
                             .on_hover_text(format!(
                                 "Rewrite main to adopt \"{name}\" and delete this branch"
                             ))
@@ -2381,36 +2337,36 @@ fn top_bar_ui(
                 }
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    style_tool_buttons(ui);
-                    // Far right: the settings gear (highlighted when open).
-                    if tool_button(ui, "⚙", settings.open)
+                    // Far right: the settings gear (lit while the panel is open).
+                    if theme::pill_button(ui, "⚙", settings.open)
                         .on_hover_text("Settings")
                         .clicked()
                     {
                         settings.open = !settings.open;
                     }
                     ui.add_space(8.0);
-                    if tool_button(ui, "⬇ Export", false)
+                    if theme::pill_button(ui, "⬇ EXPORT", false)
                         .on_hover_text("Export plan blocks to CSV")
                         .clicked()
                     {
                         export_csv = true;
                     }
-                    if tool_button(ui, "⬆ Import", false)
+                    if theme::pill_button(ui, "⬆ IMPORT", false)
                         .on_hover_text("Import blocks from CSV")
                         .clicked()
                     {
                         import_csv = true;
                     }
                     ui.add_space(8.0);
-                    if tool_button(ui, "→ Today", false).clicked() {
+                    // TODAY is the lit/primary control in the Aurora reference.
+                    if theme::pill_button(ui, "→ TODAY", true).clicked() {
                         target.pos.x = calendar::day_to_x(
                             today.day,
                             &model.calendar.global_off_days(),
                             &model.calendar,
                         );
                     }
-                    if tool_button(ui, "⤢ Fit", false)
+                    if theme::pill_button(ui, "⤢ FIT", false)
                         .on_hover_text("Fit to view [F]")
                         .clicked()
                     {
@@ -2421,7 +2377,7 @@ fn top_bar_ui(
                             *target = new_target;
                         }
                     }
-                    if tool_button(ui, "⌂ Home", false)
+                    if theme::pill_button(ui, "⌂ HOME", false)
                         .on_hover_text("Re-center [Home]")
                         .clicked()
                     {
@@ -2431,17 +2387,17 @@ fn top_bar_ui(
                     }
                     ui.add_space(8.0);
                     // Dev: wipe all blocks, branches, and links; keep one empty
-                    // main plan to start fresh from.
+                    // main plan to start fresh from. Coral-red DANGER pill.
                     if ui
                         .add(
                             egui::Button::new(
-                                egui::RichText::new("⌫ Clear")
+                                egui::RichText::new("⌫ CLEAR")
                                     .size(12.5)
                                     .color(theme::DANGER),
                             )
-                            .fill(theme::PANEL_HI)
+                            .fill(egui::Color32::TRANSPARENT)
                             .stroke(egui::Stroke::new(1.0, theme::DANGER))
-                            .corner_radius(6.0),
+                            .corner_radius(10.0),
                         )
                         .on_hover_text("Dev: delete all blocks, branches, and links")
                         .clicked()
