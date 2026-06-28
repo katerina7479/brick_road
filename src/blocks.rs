@@ -2747,6 +2747,67 @@ pub fn handle_copy(
     clipboard.deps = deps;
 }
 
+/// Pure paste kernel: allocates new `WorkBlockId`s for each entry in `cb_blocks`,
+/// remaps parent links and internal deps, places blocks relative to `paste_day` /
+/// `paste_row`, and returns the new IDs in insertion order. Does **not** touch the
+/// undo stack, selection, or persistence — callers handle those.
+pub(crate) fn paste_clipboard(
+    model: &mut model::Model,
+    plan_id: PlanId,
+    cb_blocks: &[(model::WorkBlock, i32)],
+    cb_deps: &[model::Dependency],
+    paste_day: i32,
+    paste_row: i32,
+) -> Vec<WorkBlockId> {
+    let old_ids: HashSet<WorkBlockId> = cb_blocks.iter().map(|(wb, _)| wb.id).collect();
+    let min_start = cb_blocks
+        .iter()
+        .map(|(wb, _)| wb.start_day)
+        .min()
+        .unwrap_or(0);
+    let min_row = cb_blocks.iter().map(|(_, row)| *row).min().unwrap_or(0);
+
+    let id_map: HashMap<WorkBlockId, WorkBlockId> = cb_blocks
+        .iter()
+        .map(|(wb, _)| (wb.id, model.create_work_block(wb.name.as_str())))
+        .collect();
+
+    let mut new_ids = Vec::new();
+    for (wb, orig_row) in cb_blocks {
+        let new_id = id_map[&wb.id];
+        let new_parent = wb.parent.and_then(|p| id_map.get(&p).copied());
+        let new_start = paste_day + (wb.start_day - min_start);
+        let new_row = paste_row + (orig_row - min_row);
+        if let Some(entry) = model.work_blocks.get_mut(&new_id) {
+            entry.parent = new_parent;
+            entry.start_day = new_start;
+            entry.duration_days = wb.duration_days;
+            entry.color = wb.color;
+            entry.description = wb.description.clone();
+            entry.priority = wb.priority;
+            entry.t_shirt_size = wb.t_shirt_size.clone();
+            entry.rollup = wb.rollup;
+        }
+        if wb.parent.is_none_or(|p| !old_ids.contains(&p)) {
+            if let Some(plan) = model.plans.get_mut(&plan_id) {
+                if !plan.root_blocks.contains(&new_id) {
+                    plan.root_blocks.push(new_id);
+                }
+            }
+        }
+        model.set_block_row(plan_id, new_id, new_row);
+        new_ids.push(new_id);
+    }
+    for dep in cb_deps {
+        if let (Some(&new_pred), Some(&new_succ)) =
+            (id_map.get(&dep.predecessor), id_map.get(&dep.successor))
+        {
+            model.create_dependency_in(plan_id, new_pred, new_succ, dep.dependency_type);
+        }
+    }
+    new_ids
+}
+
 /// Ctrl+V / Cmd+V: pastes clipboard blocks as new owned copies into the current
 /// (main) plan. Placed at the canvas cursor when on-canvas, or +5 days from the
 /// original min start_day otherwise. Internal deps are duplicated; deps that
@@ -2800,7 +2861,6 @@ pub fn handle_paste(
     let cb_blocks = clipboard.blocks.clone();
     let cb_deps = clipboard.deps.clone();
 
-    let old_ids: HashSet<WorkBlockId> = cb_blocks.iter().map(|(wb, _)| wb.id).collect();
     let min_start = cb_blocks
         .iter()
         .map(|(wb, _)| wb.start_day)
@@ -2810,53 +2870,9 @@ pub fn handle_paste(
     let paste_day = cursor_day.unwrap_or(min_start + 5);
     let paste_row = cursor_row.unwrap_or(min_row);
 
-    // Allocate a fresh WorkBlockId for each clipboard entry via create_work_block
-    // (which inserts a placeholder that we overwrite immediately below).
-    let id_map: HashMap<WorkBlockId, WorkBlockId> = cb_blocks
-        .iter()
-        .map(|(wb, _)| {
-            let new_id = model.create_work_block(wb.name.as_str());
-            (wb.id, new_id)
-        })
-        .collect();
-
-    let mut new_ids: Vec<WorkBlockId> = Vec::new();
-    for (wb, orig_row) in &cb_blocks {
-        let new_id = id_map[&wb.id];
-        let new_parent = wb.parent.and_then(|p| id_map.get(&p).copied());
-        let new_start = paste_day + (wb.start_day - min_start);
-        let new_row = paste_row + (orig_row - min_row);
-
-        if let Some(entry) = model.work_blocks.get_mut(&new_id) {
-            entry.parent = new_parent;
-            entry.start_day = new_start;
-            entry.duration_days = wb.duration_days;
-            entry.color = wb.color;
-            entry.description = wb.description.clone();
-            entry.priority = wb.priority;
-            entry.t_shirt_size = wb.t_shirt_size.clone();
-            entry.rollup = wb.rollup;
-        }
-        // A block is a plan root if its original parent was not in the copied set.
-        if wb.parent.is_none_or(|p| !old_ids.contains(&p)) {
-            if let Some(plan) = model.plans.get_mut(&plan_id) {
-                if !plan.root_blocks.contains(&new_id) {
-                    plan.root_blocks.push(new_id);
-                }
-            }
-        }
-        model.set_block_row(plan_id, new_id, new_row);
-        new_ids.push(new_id);
-    }
-
-    // Duplicate internal deps (both endpoints in copied set) into the target plan.
-    for dep in &cb_deps {
-        if let (Some(&new_pred), Some(&new_succ)) =
-            (id_map.get(&dep.predecessor), id_map.get(&dep.successor))
-        {
-            model.create_dependency_in(plan_id, new_pred, new_succ, dep.dependency_type);
-        }
-    }
+    let new_ids = paste_clipboard(
+        &mut model, plan_id, &cb_blocks, &cb_deps, paste_day, paste_row,
+    );
 
     // Record paste for undo (Ctrl+Z deletes the pasted blocks).
     undo.last_paste = Some(new_ids.clone());
@@ -3699,64 +3715,6 @@ mod tests {
     }
 
     // ── copy/paste helpers ───────────────────────────────────────────────────
-
-    fn paste_clipboard(
-        m: &mut Model,
-        plan_id: crate::model::PlanId,
-        cb_blocks: &[(model::WorkBlock, i32)],
-        cb_deps: &[model::Dependency],
-        paste_day: i32,
-        paste_row: i32,
-    ) -> Vec<WorkBlockId> {
-        use std::collections::HashSet;
-        let old_ids: HashSet<WorkBlockId> = cb_blocks.iter().map(|(wb, _)| wb.id).collect();
-        let min_start = cb_blocks
-            .iter()
-            .map(|(wb, _)| wb.start_day)
-            .min()
-            .unwrap_or(0);
-        let min_row = cb_blocks.iter().map(|(_, row)| *row).min().unwrap_or(0);
-
-        let id_map: HashMap<WorkBlockId, WorkBlockId> = cb_blocks
-            .iter()
-            .map(|(wb, _)| (wb.id, m.create_work_block(wb.name.as_str())))
-            .collect();
-
-        let mut new_ids = Vec::new();
-        for (wb, orig_row) in cb_blocks {
-            let new_id = id_map[&wb.id];
-            let new_parent = wb.parent.and_then(|p| id_map.get(&p).copied());
-            let new_start = paste_day + (wb.start_day - min_start);
-            let new_row = paste_row + (orig_row - min_row);
-            if let Some(entry) = m.work_blocks.get_mut(&new_id) {
-                entry.parent = new_parent;
-                entry.start_day = new_start;
-                entry.duration_days = wb.duration_days;
-                entry.color = wb.color;
-                entry.description = wb.description.clone();
-                entry.priority = wb.priority;
-                entry.t_shirt_size = wb.t_shirt_size.clone();
-                entry.rollup = wb.rollup;
-            }
-            if wb.parent.is_none_or(|p| !old_ids.contains(&p)) {
-                if let Some(plan) = m.plans.get_mut(&plan_id) {
-                    if !plan.root_blocks.contains(&new_id) {
-                        plan.root_blocks.push(new_id);
-                    }
-                }
-            }
-            m.set_block_row(plan_id, new_id, new_row);
-            new_ids.push(new_id);
-        }
-        for dep in cb_deps {
-            if let (Some(&new_pred), Some(&new_succ)) =
-                (id_map.get(&dep.predecessor), id_map.get(&dep.successor))
-            {
-                m.create_dependency_in(plan_id, new_pred, new_succ, dep.dependency_type);
-            }
-        }
-        new_ids
-    }
 
     #[test]
     fn paste_single_block_creates_new_id() {
