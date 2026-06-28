@@ -1336,6 +1336,40 @@ pub fn handle_block_resize(
     }
 }
 
+/// Computes target positions for a uniform group drag, capping the delta so
+/// that no member falls below `floor` while relative day-offsets are preserved.
+///
+/// * `anchor_pre_day` — the anchor block's start_day before the drag began.
+/// * `anchor_raw_day` — cursor-derived target day (before any floor clamping).
+/// * `anchor_new_row` — cursor-derived target row (rows are never clamped).
+/// * `offsets` — `(id, day_off, row_off)` per peer, where
+///   `day_off = peer_pre_day − anchor_pre_day`.
+/// * `floor` — minimum allowed `start_day` (0 for main plan, `branch_start_day`
+///   for branch plans).
+///
+/// Returns `(anchor_day, peer_targets)` where `peer_targets` is
+/// `(id, new_day, new_row)` for each entry in `offsets`.
+pub(crate) fn group_targets(
+    anchor_pre_day: i32,
+    anchor_raw_day: i32,
+    anchor_new_row: i32,
+    offsets: &[(WorkBlockId, i32, i32)],
+    floor: i32,
+) -> (i32, Vec<(WorkBlockId, i32, i32)>) {
+    // The tightest floor constraint comes from the member with the most-negative
+    // day offset (furthest left in the group).
+    let min_day_off = offsets.iter().map(|(_, d, _)| *d).min().unwrap_or(0).min(0); // include anchor (offset 0) via the .min(0)
+    let raw_delta = anchor_raw_day - anchor_pre_day;
+    // Cap the delta so that `anchor_pre_day + min_day_off + capped_delta >= floor`.
+    let capped_delta = raw_delta.max(floor - anchor_pre_day - min_day_off);
+    let anchor_day = anchor_pre_day + capped_delta;
+    let peers = offsets
+        .iter()
+        .map(|(id, d, r)| (*id, anchor_day + d, anchor_new_row + r))
+        .collect();
+    (anchor_day, peers)
+}
+
 /// Center-drag a block left or right to reposition its `start_day`.
 ///
 /// - Press: hit-test blocks, record offset from left edge, set selection.
@@ -1458,20 +1492,33 @@ pub fn handle_block_drag(
                 .and_then(|p| p.branch_start_day)
                 .unwrap_or(0);
             let off = model.calendar.global_off_days();
-            let new_start = crate::calendar::x_to_day(
+            // Raw cursor day — floor clamping is handled by group_targets so that
+            // the delta is capped uniformly across all group members.
+            let raw_day = crate::calendar::x_to_day(
                 world_pos.x - offset_px + PIXELS_PER_DAY * 0.5,
                 &off,
                 &model.calendar,
-            )
-            .max(0);
-            // Dependencies don't constrain a drag — you can place a block into a
-            // violation; the offending edge just turns red. (Only >= 0 / the
-            // fork day are enforced.)
-            let new_start = new_start.max(branch_min);
+            );
             // Row follows the cursor but offset by where you grabbed, so a tall
             // block keeps its top row when clicked without moving.
             let cursor_row = (-world_pos.y / ROW_HEIGHT).round() as i32;
             let new_row = cursor_row + grab_row_delta;
+            // Anchor's pre-drag day (needed by group_targets to compute the delta).
+            let anchor_pre_day = drag
+                .pre_drag_snapshot
+                .iter()
+                .find(|(sid, _, _)| *sid == id)
+                .map(|(_, d, _)| *d)
+                .unwrap_or(raw_day.max(branch_min));
+            // Compute uniformly-clamped positions for anchor + all peers so that
+            // dragging into the day-0/fork floor never deforms relative offsets.
+            let (new_start, peer_targets) = group_targets(
+                anchor_pre_day,
+                raw_day,
+                new_row,
+                &drag.group_offsets,
+                branch_min,
+            );
             // Only write when values changed — avoids tripping is_changed() every
             // held frame when the cursor hasn't moved.
             let cur_start = model.work_blocks.get(&id).map(|wb| wb.start_day);
@@ -1485,11 +1532,8 @@ pub fn handle_block_drag(
                     model.set_block_row(p, id, new_row);
                 }
             }
-            // Move all co-selected blocks by the same delta.
-            let group: Vec<(WorkBlockId, i32, i32)> = drag.group_offsets.clone();
-            for (peer_id, day_off, row_off) in group {
-                let peer_start = (new_start + day_off).max(0).max(branch_min);
-                let peer_row = new_row + row_off;
+            // Apply uniformly-clamped positions to co-selected peers.
+            for (peer_id, peer_start, peer_row) in peer_targets {
                 if model.work_blocks.get(&peer_id).map(|wb| wb.start_day) != Some(peer_start) {
                     if let Some(wb) = model.work_blocks.get_mut(&peer_id) {
                         wb.start_day = peer_start;
@@ -1508,13 +1552,15 @@ pub fn handle_block_drag(
     // Release: cascade dependencies and persist.
     if mouse.just_released(MouseButton::Left) {
         if let Some((id, _, _)) = drag.dragging.take() {
-            // Save pre-drag positions for undo; overwrite any previous undo slot.
-            let snapshot = std::mem::take(&mut drag.pre_drag_snapshot);
-            if !snapshot.is_empty() {
-                undo.last_move = Some(snapshot);
-                undo.last_deletion = None;
-                undo.last_batch_edit = None;
-            }
+            let direct_snapshot = std::mem::take(&mut drag.pre_drag_snapshot);
+
+            // Snapshot all start_days before cascade so ripple-moved dependents
+            // can be included in the undo record.
+            let pre_cascade: HashMap<WorkBlockId, i32> = model
+                .work_blocks
+                .iter()
+                .map(|(bid, wb)| (*bid, wb.start_day))
+                .collect();
 
             schedule::cascade_dependencies(&mut model, id);
             if let Some(parent) = model.work_blocks.get(&id).and_then(|wb| wb.parent) {
@@ -1530,6 +1576,30 @@ pub fn handle_block_drag(
                     model.recompute_rollup(parent);
                 }
             }
+
+            // Build the full undo snapshot: direct moves + any blocks that cascade
+            // pushed. This ensures Ctrl+Z fully reverses the drag and its ripple.
+            let direct_ids: HashSet<WorkBlockId> =
+                direct_snapshot.iter().map(|(id, _, _)| *id).collect();
+            let mut full_snapshot = direct_snapshot;
+            let plan_id = model.main_plan_id();
+            for (bid, pre_day) in &pre_cascade {
+                if direct_ids.contains(bid) {
+                    continue; // already captured as a directly-moved block
+                }
+                if let Some(wb) = model.work_blocks.get(bid) {
+                    if wb.start_day != *pre_day {
+                        let row = plan_id.map(|p| model.block_row(p, *bid)).unwrap_or(0);
+                        full_snapshot.push((*bid, *pre_day, row));
+                    }
+                }
+            }
+            if !full_snapshot.is_empty() {
+                undo.last_move = Some(full_snapshot);
+                undo.last_deletion = None;
+                undo.last_batch_edit = None;
+            }
+
             if let Err(e) = db::save_model(&conn, &model) {
                 error!("save_model failed: {e}");
             }
@@ -4678,5 +4748,115 @@ pub fn block_inspector_flyout_ui(
         flush_inspector_buffers(&mut model, id, &n, &d, &conn);
         selected.0 = None;
         state.bound = None;
+    }
+}
+
+#[cfg(test)]
+mod group_targets_tests {
+    use super::*;
+
+    fn id(n: u64) -> WorkBlockId {
+        WorkBlockId(n)
+    }
+
+    // ── Single block (no offsets) ────────────────────────────────────────────
+
+    #[test]
+    fn single_block_free_move() {
+        let (day, peers) = group_targets(5, 10, 0, &[], 0);
+        assert_eq!(day, 10);
+        assert!(peers.is_empty());
+    }
+
+    #[test]
+    fn single_block_clamped_at_floor() {
+        // Cursor says move to day -3, floor is 0.
+        let (day, peers) = group_targets(5, -3, 0, &[], 0);
+        assert_eq!(day, 0);
+        assert!(peers.is_empty());
+    }
+
+    #[test]
+    fn single_block_branch_floor() {
+        // Branch floor at day 10; cursor tries to move block to day 7.
+        let (day, _) = group_targets(15, 7, 0, &[], 10);
+        assert_eq!(day, 10);
+    }
+
+    // ── Group: uniform delta, no boundary ────────────────────────────────────
+
+    #[test]
+    fn group_moves_by_same_delta() {
+        // Anchor at 5, peer at 3 (day_off = -2). Move anchor to 8 (delta +3).
+        let offsets = [(id(2), -2, 0)];
+        let (anchor, peers) = group_targets(5, 8, 0, &offsets, 0);
+        assert_eq!(anchor, 8);
+        assert_eq!(peers[0], (id(2), 6, 0)); // 8 + (-2) = 6
+    }
+
+    #[test]
+    fn group_rows_shifted_uniformly() {
+        // Row offsets should pass through unchanged.
+        let offsets = [(id(1), 0, -1), (id(2), 0, 2)];
+        let (_, peers) = group_targets(0, 0, 3, &offsets, 0);
+        assert_eq!(peers[0].2, 2); // 3 + (-1)
+        assert_eq!(peers[1].2, 5); // 3 + 2
+    }
+
+    // ── Group: uniform clamp at boundary ─────────────────────────────────────
+
+    #[test]
+    fn group_clamped_by_leftmost_peer() {
+        // Anchor at 5, peer at 2 (day_off = -3). Floor = 0.
+        // Cursor says move anchor to -1 (raw_delta = -6).
+        // Minimum allowed delta = floor - anchor_pre - min_off = 0 - 5 - (-3) = -2.
+        // So capped_delta = max(-6, -2) = -2.
+        let offsets = [(id(2), -3, 0)];
+        let (anchor, peers) = group_targets(5, -1, 0, &offsets, 0);
+        assert_eq!(anchor, 3); // 5 + (-2)
+        assert_eq!(peers[0].1, 0); // 3 + (-3) = 0, exactly at floor
+    }
+
+    #[test]
+    fn group_clamped_when_anchor_itself_is_leftmost() {
+        // Anchor at 2, peer at 5 (day_off = +3). Floor = 0.
+        // Cursor says move anchor to -4 (raw_delta = -6).
+        // min_day_off = min(3, 0) = 0 (anchor is leftmost).
+        // Minimum allowed delta = 0 - 2 - 0 = -2.
+        let offsets = [(id(2), 3, 0)];
+        let (anchor, peers) = group_targets(2, -4, 0, &offsets, 0);
+        assert_eq!(anchor, 0); // 2 + (-2) = 0
+        assert_eq!(peers[0].1, 3); // 0 + 3
+    }
+
+    #[test]
+    fn group_no_clamp_when_moving_right() {
+        // Moving away from boundary — no clamping should occur.
+        let offsets = [(id(2), -3, 0)];
+        let (anchor, peers) = group_targets(5, 20, 0, &offsets, 0);
+        assert_eq!(anchor, 20);
+        assert_eq!(peers[0].1, 17); // 20 + (-3)
+    }
+
+    #[test]
+    fn group_already_at_floor_no_movement() {
+        // Anchor at 2, leftmost peer at 0 (day_off = -2). Floor = 0.
+        // Trying to move left further — delta must be 0.
+        let offsets = [(id(2), -2, 0)];
+        let (anchor, peers) = group_targets(2, -5, 0, &offsets, 0);
+        assert_eq!(anchor, 2); // no movement
+        assert_eq!(peers[0].1, 0); // peer stays at floor
+    }
+
+    #[test]
+    fn group_multiple_peers_tightest_wins() {
+        // Anchor at 10, peers at 7 (off -3) and 4 (off -6). Floor = 0.
+        // Minimum allowed delta = 0 - 10 - (-6) = -4.
+        // Try to move to day 2 (raw_delta = -8 → clamped to -4).
+        let offsets = [(id(2), -3, 0), (id(3), -6, 0)];
+        let (anchor, peers) = group_targets(10, 2, 0, &offsets, 0);
+        assert_eq!(anchor, 6); // 10 + (-4)
+        assert_eq!(peers[0].1, 3); // 6 + (-3)
+        assert_eq!(peers[1].1, 0); // 6 + (-6) = 0, at floor
     }
 }
