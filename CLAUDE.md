@@ -16,6 +16,15 @@ cargo test calendar::   # run tests in one module (e.g. calendar)
 cargo build        # compile without running
 ```
 
+### macOS .app bundle
+
+```bash
+cargo install cargo-bundle   # one-time; installs the bundler
+cargo bundle --release       # produces target/release/bundle/osx/Brick Road.app
+```
+
+The resulting `.app` is **unsigned**. On first launch on a new Mac, right-click → Open to bypass Gatekeeper. The DB is stored in `~/Library/Application Support/brick_road/brick_road.db` (not inside the bundle), so replacing the `.app` with a new build never clobbers user data. Code-signing + notarization for wider distribution is a separate future step.
+
 There is no CI. The Rust toolchain is pinned via `rust-toolchain.toml` (1.96.0, with the `rustfmt` and `clippy` components) and `rustfmt.toml` pins `edition`/`style_edition` to 2021, so `cargo fmt` and `cargo clippy` produce identical output on every host (no cross-version formatting churn). Keep everything else at `cargo fmt` / `cargo clippy` defaults.
 
 Two repo-tracked hooks live in `.githooks/` — **not active until you enable them once per checkout/worktree**: `git config core.hooksPath .githooks`.
