@@ -59,6 +59,7 @@ fn main() {
         .insert_resource(SelectedPlan::default())
         .insert_resource(RowRename::default())
         .insert_resource(SettingsState::default())
+        .insert_resource(HelpState::default())
         .insert_resource(ImportState::default())
         .insert_resource(bands::BandEntities::default())
         .insert_resource(bands::PlanRenameState::default())
@@ -263,6 +264,7 @@ fn main() {
         .add_systems(EguiPrimaryContextPass, top_bar_ui)
         .add_systems(EguiPrimaryContextPass, calendar_ruler_ui.after(top_bar_ui))
         .add_systems(EguiPrimaryContextPass, settings_flyout_ui.after(top_bar_ui))
+        .add_systems(EguiPrimaryContextPass, help_modal_ui.after(top_bar_ui))
         .add_systems(EguiPrimaryContextPass, import_modal_ui.after(top_bar_ui))
         .add_systems(
             EguiPrimaryContextPass,
@@ -2689,6 +2691,7 @@ fn top_bar_ui(
     mut schedule: ResMut<schedule::Schedule>,
     mut drill: ResMut<schedule::DrillScope>,
     mut settings: ResMut<SettingsState>,
+    mut help: ResMut<HelpState>,
     mut import_state: ResMut<ImportState>,
     mut selected_plan: ResMut<SelectedPlan>,
     windows: Query<&Window>,
@@ -2802,6 +2805,13 @@ fn top_bar_ui(
                         .clicked()
                     {
                         settings.open = !settings.open;
+                    }
+                    // Just left of the gear: keyboard-shortcuts help.
+                    if theme::pill_button(ui, "?", help.open)
+                        .on_hover_text("Keyboard shortcuts")
+                        .clicked()
+                    {
+                        help.open = !help.open;
                     }
                     ui.add_space(8.0);
                     if theme::pill_button(ui, "⬇ EXPORT", false)
@@ -2971,7 +2981,111 @@ enum SettingsEdit {
     ResourceDate(String, chrono::NaiveDate),
 }
 
-/// State for the right-side settings fly-out.
+/// Whether the keyboard-shortcuts help modal is open. Mirrors `SettingsState.open`.
+#[derive(Resource, Default)]
+pub struct HelpState {
+    pub open: bool,
+}
+
+/// The keyboard/mouse reference shown by `help_modal_ui` — one source of truth,
+/// grouped `(section, &[(key, description)])`. Keep in sync with real bindings.
+const HELP_KEYMAP: &[(&str, &[(&str, &str)])] = &[
+    (
+        "NAVIGATION",
+        &[
+            ("Home", "Recenter / home view"),
+            ("F", "Fit all blocks in view"),
+            ("Esc", "Drill out one level"),
+            ("2-finger / middle / right drag", "Pan the canvas"),
+            ("Pinch · Ctrl/Cmd + scroll", "Zoom"),
+        ],
+    ),
+    (
+        "BLOCKS",
+        &[
+            ("Double-click canvas", "Create a block"),
+            ("Double-click block", "Drill into it"),
+            ("N", "Toggle create mode"),
+            ("Drag block", "Move it (the whole selection if several)"),
+            ("Type a letter", "Rename the selected block"),
+            ("Enter · Esc", "Commit · cancel an edit"),
+        ],
+    ),
+    (
+        "SELECTION",
+        &[
+            ("Left-drag canvas", "Marquee select"),
+            ("Shift/Ctrl-click", "Add / remove from selection"),
+            ("Delete · Backspace", "Delete the selection"),
+        ],
+    ),
+    (
+        "EDIT",
+        &[
+            ("Ctrl/Cmd + C", "Copy selection"),
+            ("Ctrl/Cmd + V", "Paste at cursor"),
+            ("Ctrl/Cmd + Z", "Undo"),
+        ],
+    ),
+];
+
+/// Centered, Aurora-styled modal listing the keyboard & mouse shortcuts. Toggled
+/// by the top-bar `?`; dismissed via the ✕, Esc, or a click on the dim backdrop.
+fn help_modal_ui(mut contexts: EguiContexts, mut help: ResMut<HelpState>) {
+    if !help.open {
+        return;
+    }
+    let Ok(ctx) = contexts.ctx_mut() else { return };
+    let mut close = false;
+    let resp = egui::Modal::new(egui::Id::new("help_modal"))
+        .frame(
+            egui::Frame::new()
+                .fill(theme::PANEL)
+                .stroke(egui::Stroke::new(1.0, theme::STROKE))
+                .corner_radius(egui::CornerRadius::same(10))
+                .inner_margin(egui::Margin::same(18)),
+        )
+        .show(ctx, |ui| {
+            ui.set_max_width(390.0);
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new("Keyboard & Mouse")
+                        .size(17.0)
+                        .strong()
+                        .color(theme::ACCENT),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui
+                        .button(egui::RichText::new("✕").size(14.0).color(theme::TEXT_MUTED))
+                        .clicked()
+                    {
+                        close = true;
+                    }
+                });
+            });
+            ui.add_space(10.0);
+            for &(section, rows) in HELP_KEYMAP {
+                theme::section_header(ui, section, None);
+                egui::Grid::new(("help_grid", section))
+                    .num_columns(2)
+                    .spacing([14.0, 5.0])
+                    .show(ui, |ui| {
+                        for &(key, desc) in rows {
+                            theme::chip(ui, key);
+                            ui.label(egui::RichText::new(desc).color(theme::TEXT));
+                            ui.end_row();
+                        }
+                    });
+                ui.add_space(8.0);
+            }
+        });
+    if close || resp.should_close() {
+        help.open = false;
+    }
+}
+
+/// State for the right-side settings fly-out: which field (if any) is being
+/// edited in-place, plus the shared edit buffer.
 #[derive(Resource, Default)]
 pub struct SettingsState {
     pub open: bool,
@@ -3277,6 +3391,19 @@ mod tests {
         assert_eq!(xmas.end, d(12, 26));
         assert_eq!(xmas.dates.len(), 3);
         assert_eq!(xmas.description, "Christmas");
+    }
+
+    #[test]
+    fn help_keymap_is_well_formed() {
+        assert!(!HELP_KEYMAP.is_empty(), "the help modal needs sections");
+        for (section, rows) in HELP_KEYMAP {
+            assert!(!section.is_empty(), "section name must not be empty");
+            assert!(!rows.is_empty(), "section {section} has no rows");
+            for (key, desc) in *rows {
+                assert!(!key.is_empty(), "empty key in {section}");
+                assert!(!desc.is_empty(), "empty description in {section}");
+            }
+        }
     }
 
     #[test]
