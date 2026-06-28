@@ -2015,12 +2015,15 @@ fn settings_flyout_ui(
                     }
 
                     ui.add_space(SETTINGS_ROW_GAP);
-                    // Add-row 1: date field, full available width.
-                    let resp_date = ui.add(
-                        egui::TextEdit::singleline(&mut settings.holiday_input)
-                            .hint_text("YYYY-MM-DD")
-                            .desired_width(ui.available_width()),
-                    );
+                    // Add-row 1: visual date picker (replaces YYYY-MM-DD typing).
+                    // Defaults to the plan start date until the user picks one.
+                    let mut picked = settings.holiday_date.unwrap_or(model.calendar.start_date);
+                    if ui
+                        .add(egui_extras::DatePickerButton::new(&mut picked))
+                        .changed()
+                    {
+                        settings.holiday_date = Some(picked);
+                    }
                     // Add-row 2: description (constrained fraction) + add_button.
                     let (resp_desc, submit) = ui
                         .horizontal(|ui| {
@@ -2035,13 +2038,9 @@ fn settings_flyout_ui(
                         })
                         .inner;
                     let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
-                    let submit =
-                        submit || ((resp_date.lost_focus() || resp_desc.lost_focus()) && enter);
+                    let submit = submit || (resp_desc.lost_focus() && enter);
                     if submit {
-                        if let Ok(date) = chrono::NaiveDate::parse_from_str(
-                            settings.holiday_input.trim(),
-                            "%Y-%m-%d",
-                        ) {
+                        if let Some(date) = settings.holiday_date {
                             if !model
                                 .calendar
                                 .non_working_dates
@@ -2057,7 +2056,7 @@ fn settings_flyout_ui(
                                     });
                                 changed = true;
                             }
-                            settings.holiday_input.clear();
+                            settings.holiday_date = None;
                             settings.holiday_desc_input.clear();
                         }
                     }
@@ -2571,12 +2570,13 @@ pub struct RowRename {
     pub picker_open: Option<(model::PlanId, Option<model::WorkBlockId>, i32)>,
 }
 
-/// State for the right-side settings fly-out: whether it's open, plus the text
-/// buffers for the "add holiday" and "start date" inputs.
+/// State for the right-side settings fly-out: whether it's open, the picked
+/// holiday date, and the text buffers for the holiday label / start-date inputs.
 #[derive(Resource, Default)]
 pub struct SettingsState {
     pub open: bool,
-    pub holiday_input: String,
+    /// The date currently selected in the HOLIDAYS date-picker, if any.
+    pub holiday_date: Option<chrono::NaiveDate>,
     pub holiday_desc_input: String,
     pub start_input: String,
     /// Per-resource add-row buffers: resource name → (date_input, desc_input).
