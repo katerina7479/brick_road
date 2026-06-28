@@ -387,9 +387,21 @@ mod tests {
     #[test]
     fn day_label_stride_thins_as_columns_narrow() {
         assert_eq!(day_label_stride(30.0), 1, "wide columns show every day");
-        assert_eq!(day_label_stride(22.0), 1, "at the min spacing, still every day");
-        assert_eq!(day_label_stride(13.0), 2, "cramped columns show every other day");
-        assert_eq!(day_label_stride(7.0), 4, "very narrow columns show every fourth day");
+        assert_eq!(
+            day_label_stride(22.0),
+            1,
+            "at the min spacing, still every day"
+        );
+        assert_eq!(
+            day_label_stride(13.0),
+            2,
+            "cramped columns show every other day"
+        );
+        assert_eq!(
+            day_label_stride(7.0),
+            4,
+            "very narrow columns show every fourth day"
+        );
     }
 
     // ── compute_day_labels ───────────────────────────────────────────────────
