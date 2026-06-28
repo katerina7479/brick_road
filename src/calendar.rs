@@ -123,6 +123,28 @@ pub fn holiday_columns(
     out
 }
 
+/// `(left_x, right_x, description)` for each run of consecutive greyed holiday
+/// columns that share a non-empty description and span more than one day — the
+/// world-x range over which a multi-day holiday's label should be drawn once
+/// (instead of per column). Single-day and unlabeled holidays are omitted.
+pub fn holiday_label_spans(
+    non_working: &HashSet<NaiveDate>,
+    config: &CalendarConfig,
+    span_days: Day,
+) -> Vec<(f32, f32, String)> {
+    let mut runs: Vec<(f32, f32, String)> = Vec::new();
+    for (left_x, _date, desc) in holiday_columns(non_working, config, span_days) {
+        let right_x = left_x + PIXELS_PER_DAY;
+        match runs.last_mut() {
+            // Extend the run while columns abut and carry the same label.
+            Some(last) if last.2 == desc && (left_x - last.1).abs() < 0.5 => last.1 = right_x,
+            _ => runs.push((left_x, right_x, desc)),
+        }
+    }
+    runs.retain(|(l, r, desc)| !desc.is_empty() && r - l > PIXELS_PER_DAY + 0.5);
+    runs
+}
+
 /// Returns true if `date` is a working day under `config`.
 ///
 /// A day is non-working if:
@@ -436,6 +458,43 @@ mod tests {
         // Inverse: an x in the holiday column resolves to the prior working day.
         assert_eq!(x_to_day(2.5 * PIXELS_PER_DAY, &off, &cfg), 1);
         assert_eq!(x_to_day(3.0 * PIXELS_PER_DAY, &off, &cfg), 2);
+    }
+
+    #[test]
+    fn holiday_label_spans_fold_a_multi_day_run() {
+        // Wed–Fri (Jan 8–10) are a labeled break: three adjacent greyed columns
+        // fold into one span; a separate single-day holiday is omitted.
+        let cfg = CalendarConfig {
+            start_date: NaiveDate::from_ymd_opt(2025, 1, 6).unwrap(),
+            working_days_per_week: 5,
+            non_working_dates: vec![
+                NonWorkingDate {
+                    date: NaiveDate::from_ymd_opt(2025, 1, 8).unwrap(),
+                    description: "Break".to_string(),
+                },
+                NonWorkingDate {
+                    date: NaiveDate::from_ymd_opt(2025, 1, 9).unwrap(),
+                    description: "Break".to_string(),
+                },
+                NonWorkingDate {
+                    date: NaiveDate::from_ymd_opt(2025, 1, 10).unwrap(),
+                    description: "Break".to_string(),
+                },
+                NonWorkingDate {
+                    date: NaiveDate::from_ymd_opt(2025, 1, 20).unwrap(),
+                    description: "Solo".to_string(),
+                },
+            ],
+            ..Default::default()
+        };
+        let off = cfg.global_off_days();
+        let spans = holiday_label_spans(&off, &cfg, 40);
+        assert_eq!(spans.len(), 1, "only the multi-day run gets a span");
+        assert_eq!(spans[0].2, "Break");
+        assert!(
+            spans[0].1 - spans[0].0 > PIXELS_PER_DAY,
+            "the span covers more than one column"
+        );
     }
 
     #[test]
