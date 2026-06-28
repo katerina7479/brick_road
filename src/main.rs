@@ -1895,26 +1895,6 @@ fn group_holidays(dates: &[model::NonWorkingDate]) -> Vec<HolidayGroup> {
     groups
 }
 
-/// Expands [start, end] into a sorted `Vec<NaiveDate>`. `end` is coerced to
-/// `>= start` and capped at 366 days after `start` so a mis-pick can't insert
-/// thousands of rows. Includes both endpoints.
-fn expand_date_range(start: chrono::NaiveDate, end: chrono::NaiveDate) -> Vec<chrono::NaiveDate> {
-    let end = end.max(start).min(start + chrono::Duration::days(366));
-    let mut dates = Vec::new();
-    let mut d = start;
-    loop {
-        dates.push(d);
-        if d >= end {
-            break;
-        }
-        match d.succ_opt() {
-            Some(n) => d = n,
-            None => break,
-        }
-    }
-    dates
-}
-
 /// Right-side settings fly-out. Toggled by the top-bar gear. Holds general
 /// settings; the first section is the calendar (working days per week, the
 /// holiday list, and the start date). Edits write straight to `model.calendar`
@@ -1969,6 +1949,7 @@ fn settings_flyout_ui(
                         ui.spacing().scroll.bar_width + ui.spacing().scroll.bar_inner_margin;
                     ui.set_max_width(ui.available_width() - gutter - 6.0);
 
+                    // ── CALENDAR ─────────────────────────────────────────────
                     theme::section_header(ui, "CALENDAR", None);
 
                     settings_row(ui, "Days / week", |ui| {
@@ -1984,160 +1965,329 @@ fn settings_flyout_ui(
                     });
 
                     ui.add_space(SETTINGS_ROW_GAP);
+                    // Start date: click the chip to edit in place; no separate TextEdit + SET.
                     settings_row(ui, "Start date", |ui| {
-                        theme::chip(
-                            ui,
-                            &model.calendar.start_date.format("%Y · %m · %d").to_string(),
-                        );
-                    });
-                    ui.add_space(SETTINGS_ROW_GAP);
-                    // Input row: constrained field + SET button.
-                    ui.horizontal(|ui| {
-                        let set_btn = egui::Button::new(
-                            egui::RichText::new("SET").size(11.0).color(theme::ACCENT),
-                        )
-                        .fill(egui::Color32::TRANSPARENT)
-                        .stroke(egui::Stroke::new(1.0, theme::STROKE));
-                        let field_w = (ui.available_width() - 48.0).max(80.0);
-                        let resp = ui.add(
-                            egui::TextEdit::singleline(&mut settings.start_input)
-                                .hint_text("YYYY-MM-DD")
-                                .desired_width(field_w),
-                        );
-                        let submit = ui.add(set_btn).clicked()
-                            || (resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)));
-                        if submit {
-                            if let Ok(d) = chrono::NaiveDate::parse_from_str(
-                                settings.start_input.trim(),
-                                "%Y-%m-%d",
-                            ) {
-                                model.calendar.start_date = d;
-                                settings.start_input.clear();
-                                changed = true;
+                        if matches!(&settings.editing, Some(SettingsEdit::StartDate)) {
+                            let r = ui
+                                .scope(|ui| {
+                                    theme::style_inputs(ui);
+                                    ui.add(
+                                        egui::TextEdit::singleline(&mut settings.edit_buf)
+                                            .hint_text("YYYY-MM-DD")
+                                            .desired_width(100.0),
+                                    )
+                                })
+                                .inner;
+                            r.request_focus();
+                            let esc = ui.input(|i| i.key_pressed(egui::Key::Escape));
+                            if esc {
+                                settings.editing = None;
+                            } else if r.lost_focus()
+                                || ui.input(|i| i.key_pressed(egui::Key::Enter))
+                            {
+                                if let Ok(d) = chrono::NaiveDate::parse_from_str(
+                                    settings.edit_buf.trim(),
+                                    "%Y-%m-%d",
+                                ) {
+                                    model.calendar.start_date = d;
+                                    changed = true;
+                                }
+                                settings.editing = None;
+                            }
+                        } else {
+                            let resp = theme::date_chip(ui, model.calendar.start_date);
+                            if resp.clicked() {
+                                settings.editing = Some(SettingsEdit::StartDate);
+                                settings.edit_buf =
+                                    model.calendar.start_date.format("%Y-%m-%d").to_string();
                             }
                         }
                     });
 
-                    // Holidays / non-working dates.
+                    // ── HOLIDAYS ──────────────────────────────────────────────
+                    // Header inlined to accommodate the + add button on the right.
                     ui.add_space(SETTINGS_SECTION_GAP);
-                    let groups = group_holidays(&model.calendar.non_working_dates);
-                    theme::section_header(ui, "HOLIDAYS", Some(groups.len()));
+                    let holiday_groups = group_holidays(&model.calendar.non_working_dates);
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new("HOLIDAYS")
+                                .size(11.0)
+                                .color(theme::TEXT_MUTED),
+                        );
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if theme::add_button(ui).on_hover_text("Add holiday").clicked() {
+                                // Find a date not already in the list as a unique key.
+                                let mut new_date = model.calendar.start_date;
+                                for _ in 0..1000 {
+                                    if !model
+                                        .calendar
+                                        .non_working_dates
+                                        .iter()
+                                        .any(|x| x.date == new_date)
+                                    {
+                                        break;
+                                    }
+                                    new_date = new_date.succ_opt().unwrap_or(new_date);
+                                }
+                                model
+                                    .calendar
+                                    .non_working_dates
+                                    .push(model::NonWorkingDate {
+                                        date: new_date,
+                                        description: String::new(),
+                                    });
+                                changed = true;
+                                settings.editing = Some(SettingsEdit::HolidayLabel(new_date));
+                                settings.edit_buf = String::new();
+                            }
+                            if !holiday_groups.is_empty() {
+                                ui.label(
+                                    egui::RichText::new(holiday_groups.len().to_string())
+                                        .size(10.0)
+                                        .color(theme::ACCENT),
+                                );
+                            }
+                        });
+                    });
+                    // Section rule (same as theme::section_header draws).
+                    {
+                        let avail = ui.available_width();
+                        if avail > 0.0 {
+                            let (rect, _) = ui
+                                .allocate_exact_size(egui::vec2(avail, 1.0), egui::Sense::hover());
+                            ui.painter().hline(
+                                rect.x_range(),
+                                rect.center().y,
+                                egui::Stroke::new(1.0, theme::STROKE),
+                            );
+                        }
+                    }
+                    ui.add_space(4.0);
 
-                    if groups.is_empty() {
+                    if holiday_groups.is_empty() {
                         ui.label(
                             egui::RichText::new("None set")
                                 .italics()
                                 .color(theme::TEXT_MUTED),
                         );
                     }
-                    // Each run of consecutive same-label days shows and removes as
-                    // one entry (a multi-day holiday is stored as N daily rows).
-                    let mut remove_group: Option<Vec<chrono::NaiveDate>> = None;
-                    for g in &groups {
-                        theme::list_row(ui, |ui| {
+
+                    let mut remove_hol: Option<Vec<chrono::NaiveDate>> = None;
+                    for g in &holiday_groups {
+                        let ed_start = matches!(&settings.editing,
+                            Some(SettingsEdit::HolidayDate(d)) if *d == g.start);
+                        let ed_end = g.start != g.end
+                            && matches!(&settings.editing,
+                                Some(SettingsEdit::HolidayDate(d)) if *d == g.end);
+                        let ed_label = matches!(&settings.editing,
+                            Some(SettingsEdit::HolidayLabel(d)) if *d == g.start);
+
+                        let mut row_rm_rect = egui::Rect::NOTHING;
+                        let mut row_rm_clicked = false;
+                        let mut row_rm_hovered = false;
+
+                        let row = theme::list_row(ui, |ui| {
                             ui.horizontal(|ui| {
-                                let span = if g.start == g.end {
-                                    g.start.format("%m·%d").to_string()
-                                } else {
-                                    format!("{}–{}", g.start.format("%m·%d"), g.end.format("%m·%d"))
-                                };
-                                theme::chip(ui, &span);
-                                ui.add_space(4.0);
-                                let desc = if g.description.is_empty() {
-                                    "—"
-                                } else {
-                                    &g.description
-                                };
-                                ui.label(egui::RichText::new(desc).color(theme::TEXT_MUTED));
-                                ui.with_layout(
-                                    egui::Layout::right_to_left(egui::Align::Center),
-                                    |ui| {
-                                        if ui
-                                            .small_button(
-                                                egui::RichText::new("×").color(theme::DANGER),
+                                // Start date: chip or in-place TextEdit.
+                                if ed_start {
+                                    let r = ui
+                                        .scope(|ui| {
+                                            theme::style_inputs(ui);
+                                            ui.add(
+                                                egui::TextEdit::singleline(&mut settings.edit_buf)
+                                                    .desired_width(88.0)
+                                                    .hint_text("YYYY-MM-DD"),
                                             )
-                                            .clicked()
-                                        {
-                                            remove_group = Some(g.dates.clone());
+                                        })
+                                        .inner;
+                                    r.request_focus();
+                                    let esc = ui.input(|i| i.key_pressed(egui::Key::Escape));
+                                    if esc {
+                                        settings.editing = None;
+                                    } else if r.lost_focus()
+                                        || ui.input(|i| i.key_pressed(egui::Key::Enter))
+                                    {
+                                        if let Ok(nd) = chrono::NaiveDate::parse_from_str(
+                                            settings.edit_buf.trim(),
+                                            "%Y-%m-%d",
+                                        ) {
+                                            let old = g.start;
+                                            for nwd in &mut model.calendar.non_working_dates {
+                                                if nwd.date == old {
+                                                    nwd.date = nd;
+                                                    changed = true;
+                                                    break;
+                                                }
+                                            }
                                         }
-                                    },
-                                );
+                                        settings.editing = None;
+                                    }
+                                } else {
+                                    let cr = theme::date_chip(ui, g.start);
+                                    if cr.clicked() {
+                                        settings.editing = Some(SettingsEdit::HolidayDate(g.start));
+                                        settings.edit_buf = g.start.format("%Y-%m-%d").to_string();
+                                    }
+                                }
+                                // For ranges: also show end chip / editor.
+                                if g.start != g.end {
+                                    ui.label(egui::RichText::new("–").color(theme::TEXT_MUTED));
+                                    if ed_end {
+                                        let r = ui
+                                            .scope(|ui| {
+                                                theme::style_inputs(ui);
+                                                ui.add(
+                                                    egui::TextEdit::singleline(
+                                                        &mut settings.edit_buf,
+                                                    )
+                                                    .desired_width(88.0)
+                                                    .hint_text("YYYY-MM-DD"),
+                                                )
+                                            })
+                                            .inner;
+                                        r.request_focus();
+                                        let esc = ui.input(|i| i.key_pressed(egui::Key::Escape));
+                                        if esc {
+                                            settings.editing = None;
+                                        } else if r.lost_focus()
+                                            || ui.input(|i| i.key_pressed(egui::Key::Enter))
+                                        {
+                                            if let Ok(nd) = chrono::NaiveDate::parse_from_str(
+                                                settings.edit_buf.trim(),
+                                                "%Y-%m-%d",
+                                            ) {
+                                                let old = g.end;
+                                                for nwd in &mut model.calendar.non_working_dates {
+                                                    if nwd.date == old {
+                                                        nwd.date = nd;
+                                                        changed = true;
+                                                        break;
+                                                    }
+                                                }
+                                            }
+                                            settings.editing = None;
+                                        }
+                                    } else {
+                                        let cr = theme::date_chip(ui, g.end);
+                                        if cr.clicked() {
+                                            settings.editing =
+                                                Some(SettingsEdit::HolidayDate(g.end));
+                                            settings.edit_buf =
+                                                g.end.format("%Y-%m-%d").to_string();
+                                        }
+                                    }
+                                }
+
+                                ui.add_space(4.0);
+
+                                // Label: clickable text or in-place TextEdit.
+                                // Reserve remove-slot width so the label doesn't overlap it.
+                                let remove_w = 20.0;
+                                let label_avail =
+                                    (ui.available_width() - remove_w - ui.spacing().item_spacing.x)
+                                        .max(20.0);
+                                if ed_label {
+                                    let r = ui
+                                        .scope(|ui| {
+                                            theme::style_inputs(ui);
+                                            ui.add(
+                                                egui::TextEdit::singleline(&mut settings.edit_buf)
+                                                    .desired_width(label_avail)
+                                                    .hint_text("Label"),
+                                            )
+                                        })
+                                        .inner;
+                                    r.request_focus();
+                                    let esc = ui.input(|i| i.key_pressed(egui::Key::Escape));
+                                    if esc {
+                                        settings.editing = None;
+                                    } else if r.lost_focus()
+                                        || ui.input(|i| i.key_pressed(egui::Key::Enter))
+                                    {
+                                        let new_desc = settings.edit_buf.trim().to_string();
+                                        let grp_dates = g.dates.clone();
+                                        for nwd in &mut model.calendar.non_working_dates {
+                                            if grp_dates.contains(&nwd.date) {
+                                                nwd.description = new_desc.clone();
+                                                changed = true;
+                                            }
+                                        }
+                                        settings.editing = None;
+                                    }
+                                } else {
+                                    let desc = if g.description.is_empty() {
+                                        "—"
+                                    } else {
+                                        g.description.as_str()
+                                    };
+                                    let lr = ui.add(
+                                        egui::Label::new(
+                                            egui::RichText::new(desc).color(theme::TEXT_MUTED),
+                                        )
+                                        .sense(egui::Sense::click()),
+                                    );
+                                    if lr.clicked() {
+                                        settings.editing =
+                                            Some(SettingsEdit::HolidayLabel(g.start));
+                                        settings.edit_buf = g.description.clone();
+                                    }
+                                }
+
+                                // Always allocate the × slot to prevent layout shift on hover.
+                                let (rr, rresp) = ui
+                                    .with_layout(
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| {
+                                            ui.allocate_exact_size(
+                                                egui::vec2(remove_w, 14.0),
+                                                egui::Sense::click(),
+                                            )
+                                        },
+                                    )
+                                    .inner;
+                                row_rm_rect = rr;
+                                row_rm_clicked = rresp.clicked();
+                                row_rm_hovered = rresp.hovered();
                             });
                         });
+
+                        // Paint × only when row hovered; click detection is always registered.
+                        let ptr = ui.ctx().input(|i| i.pointer.hover_pos());
+                        if ptr.is_some_and(|p| row.response.rect.contains(p)) {
+                            ui.painter().text(
+                                row_rm_rect.center(),
+                                egui::Align2::CENTER_CENTER,
+                                "×",
+                                egui::FontId::proportional(14.0),
+                                if row_rm_hovered {
+                                    theme::DANGER
+                                } else {
+                                    theme::TEXT_MUTED
+                                },
+                            );
+                            if row_rm_clicked {
+                                remove_hol = Some(g.dates.clone());
+                            }
+                        }
                         ui.add_space(2.0);
                     }
-                    if let Some(dts) = remove_group {
+                    if let Some(dts) = remove_hol {
                         model
                             .calendar
                             .non_working_dates
                             .retain(|x| !dts.contains(&x.date));
                         changed = true;
-                    }
-
-                    ui.add_space(SETTINGS_ROW_GAP);
-                    // Add-row 1: start–end pickers. End defaults to start, so just
-                    // picking a start adds one day; pick a later end for a range
-                    // (e.g. Christmas Dec 24–26, or a shutdown week).
-                    let mut start = settings.holiday_date.unwrap_or(model.calendar.start_date);
-                    let mut end = settings.holiday_end_date.unwrap_or(start);
-                    ui.horizontal(|ui| {
-                        if ui
-                            .add(
-                                egui_extras::DatePickerButton::new(&mut start)
-                                    .id_salt("holiday_start"),
-                            )
-                            .changed()
-                        {
-                            settings.holiday_date = Some(start);
-                        }
-                        ui.label(egui::RichText::new("→").color(theme::TEXT_MUTED));
-                        if ui
-                            .add(
-                                egui_extras::DatePickerButton::new(&mut end).id_salt("holiday_end"),
-                            )
-                            .changed()
-                        {
-                            settings.holiday_end_date = Some(end);
-                        }
-                    });
-                    // Add-row 2: description (constrained fraction) + add_button.
-                    let (resp_desc, submit) = ui
-                        .horizontal(|ui| {
-                            let desc_w = (ui.available_width() - 32.0).max(60.0);
-                            let rd = ui.add(
-                                egui::TextEdit::singleline(&mut settings.holiday_desc_input)
-                                    .hint_text("Label (optional)")
-                                    .desired_width(desc_w),
-                            );
-                            let btn = theme::add_button(ui).clicked();
-                            (rd, btn)
-                        })
-                        .inner;
-                    let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
-                    let submit = submit || (resp_desc.lost_focus() && enter);
-                    if submit {
-                        if let Some(start) = settings.holiday_date {
-                            let end = settings.holiday_end_date.unwrap_or(start);
-                            let desc = settings.holiday_desc_input.trim().to_string();
-                            for d in expand_date_range(start, end) {
-                                if !model.calendar.non_working_dates.iter().any(|x| x.date == d) {
-                                    model
-                                        .calendar
-                                        .non_working_dates
-                                        .push(model::NonWorkingDate {
-                                            date: d,
-                                            description: desc.clone(),
-                                        });
-                                    changed = true;
-                                }
-                            }
-                            settings.holiday_date = None;
-                            settings.holiday_end_date = None;
-                            settings.holiday_desc_input.clear();
+                        let stale = match &settings.editing {
+                            Some(SettingsEdit::HolidayLabel(d))
+                            | Some(SettingsEdit::HolidayDate(d)) => dts.contains(d),
+                            _ => false,
+                        };
+                        if stale {
+                            settings.editing = None;
                         }
                     }
 
-                    // ── Resources ──────────────────────────────────────────────────
+                    // ── RESOURCES ─────────────────────────────────────────────
                     ui.add_space(SETTINGS_SECTION_GAP);
                     let resource_count = model.named_resources().len();
                     theme::section_header(ui, "RESOURCES", Some(resource_count));
@@ -2179,178 +2329,275 @@ fn settings_flyout_ui(
                             );
                         });
 
-                        // Per-resource non-working dates — only for typed resources.
+                        // Per-resource time-off — in-place edit, hover-only × remove.
                         let rb_id = model
                             .resource_blocks
                             .values()
                             .find(|r| r.name.eq_ignore_ascii_case(name))
                             .map(|r| r.id);
                         if let Some(rb_id) = rb_id {
-                            let sorted_dates =
-                                model.resource_blocks[&rb_id].non_working_dates.to_vec();
-                            let groups = group_holidays(&sorted_dates);
+                            let sorted = model.resource_blocks[&rb_id].non_working_dates.to_vec();
+                            let to_groups = group_holidays(&sorted);
 
-                            let mut remove_dates: Option<Vec<chrono::NaiveDate>> = None;
-                            for g in &groups {
+                            let mut remove_to: Option<Vec<chrono::NaiveDate>> = None;
+                            for g in &to_groups {
+                                let ed_date = matches!(&settings.editing,
+                                    Some(SettingsEdit::ResourceDate(rn, d))
+                                    if rn.as_str() == name.as_str() && *d == g.start);
+                                let ed_lbl = matches!(&settings.editing,
+                                    Some(SettingsEdit::ResourceLabel(rn, d))
+                                    if rn.as_str() == name.as_str() && *d == g.start);
+
+                                let mut row_rm_rect = egui::Rect::NOTHING;
+                                let mut row_rm_clicked = false;
+                                let mut row_rm_hovered = false;
+
                                 ui.add_space(2.0);
-                                theme::list_row(ui, |ui| {
+                                let row = theme::list_row(ui, |ui| {
                                     ui.horizontal(|ui| {
                                         ui.add_space(4.0);
-                                        let span = if g.start == g.end {
-                                            g.start.format("%m·%d").to_string()
-                                        } else {
-                                            format!(
-                                                "{}–{}",
-                                                g.start.format("%m·%d"),
-                                                g.end.format("%m·%d")
-                                            )
-                                        };
-                                        theme::chip(ui, &span);
-                                        ui.add_space(4.0);
-                                        let desc = if g.description.is_empty() {
-                                            "—"
-                                        } else {
-                                            &g.description
-                                        };
-                                        ui.label(
-                                            egui::RichText::new(desc)
-                                                .size(11.0)
-                                                .color(theme::TEXT_MUTED),
-                                        );
-                                        ui.with_layout(
-                                            egui::Layout::right_to_left(egui::Align::Center),
-                                            |ui| {
-                                                if ui
-                                                    .small_button(
-                                                        egui::RichText::new("×")
-                                                            .color(theme::DANGER),
+
+                                        // Date chip or in-place editor.
+                                        if ed_date {
+                                            let r = ui
+                                                .scope(|ui| {
+                                                    theme::style_inputs(ui);
+                                                    ui.add(
+                                                        egui::TextEdit::singleline(
+                                                            &mut settings.edit_buf,
+                                                        )
+                                                        .desired_width(88.0)
+                                                        .hint_text("YYYY-MM-DD"),
                                                     )
-                                                    .clicked()
-                                                {
-                                                    remove_dates = Some(g.dates.clone());
+                                                })
+                                                .inner;
+                                            r.request_focus();
+                                            let esc =
+                                                ui.input(|i| i.key_pressed(egui::Key::Escape));
+                                            if esc {
+                                                settings.editing = None;
+                                            } else if r.lost_focus()
+                                                || ui.input(|i| i.key_pressed(egui::Key::Enter))
+                                            {
+                                                if let Ok(nd) = chrono::NaiveDate::parse_from_str(
+                                                    settings.edit_buf.trim(),
+                                                    "%Y-%m-%d",
+                                                ) {
+                                                    let old = g.start;
+                                                    if let Some(rb) =
+                                                        model.resource_blocks.get_mut(&rb_id)
+                                                    {
+                                                        for nwd in &mut rb.non_working_dates {
+                                                            if nwd.date == old {
+                                                                nwd.date = nd;
+                                                                changed = true;
+                                                                break;
+                                                            }
+                                                        }
+                                                    }
                                                 }
-                                            },
-                                        );
+                                                settings.editing = None;
+                                            }
+                                        } else {
+                                            // Single date or range chips.
+                                            let cr = theme::date_chip(ui, g.start);
+                                            if g.start != g.end {
+                                                ui.label(
+                                                    egui::RichText::new("–")
+                                                        .color(theme::TEXT_MUTED),
+                                                );
+                                                theme::date_chip(ui, g.end);
+                                            }
+                                            if cr.clicked() {
+                                                settings.editing =
+                                                    Some(SettingsEdit::ResourceDate(
+                                                        name.clone(),
+                                                        g.start,
+                                                    ));
+                                                settings.edit_buf =
+                                                    g.start.format("%Y-%m-%d").to_string();
+                                            }
+                                        }
+
+                                        ui.add_space(4.0);
+
+                                        let remove_w = 20.0;
+                                        let label_avail = (ui.available_width()
+                                            - remove_w
+                                            - ui.spacing().item_spacing.x)
+                                            .max(20.0);
+
+                                        // Label or in-place label editor.
+                                        if ed_lbl {
+                                            let r = ui
+                                                .scope(|ui| {
+                                                    theme::style_inputs(ui);
+                                                    ui.add(
+                                                        egui::TextEdit::singleline(
+                                                            &mut settings.edit_buf,
+                                                        )
+                                                        .desired_width(label_avail)
+                                                        .hint_text("Reason"),
+                                                    )
+                                                })
+                                                .inner;
+                                            r.request_focus();
+                                            let esc =
+                                                ui.input(|i| i.key_pressed(egui::Key::Escape));
+                                            if esc {
+                                                settings.editing = None;
+                                            } else if r.lost_focus()
+                                                || ui.input(|i| i.key_pressed(egui::Key::Enter))
+                                            {
+                                                let new_desc = settings.edit_buf.trim().to_string();
+                                                let grp_dates = g.dates.clone();
+                                                if let Some(rb) =
+                                                    model.resource_blocks.get_mut(&rb_id)
+                                                {
+                                                    for nwd in &mut rb.non_working_dates {
+                                                        if grp_dates.contains(&nwd.date) {
+                                                            nwd.description = new_desc.clone();
+                                                            changed = true;
+                                                        }
+                                                    }
+                                                }
+                                                settings.editing = None;
+                                            }
+                                        } else {
+                                            let desc = if g.description.is_empty() {
+                                                "—"
+                                            } else {
+                                                g.description.as_str()
+                                            };
+                                            let lr = ui.add(
+                                                egui::Label::new(
+                                                    egui::RichText::new(desc)
+                                                        .size(11.0)
+                                                        .color(theme::TEXT_MUTED),
+                                                )
+                                                .sense(egui::Sense::click()),
+                                            );
+                                            if lr.clicked() {
+                                                settings.editing =
+                                                    Some(SettingsEdit::ResourceLabel(
+                                                        name.clone(),
+                                                        g.start,
+                                                    ));
+                                                settings.edit_buf = g.description.clone();
+                                            }
+                                        }
+
+                                        // Always allocate the × slot.
+                                        let (rr, rresp) = ui
+                                            .with_layout(
+                                                egui::Layout::right_to_left(egui::Align::Center),
+                                                |ui| {
+                                                    ui.allocate_exact_size(
+                                                        egui::vec2(remove_w, 14.0),
+                                                        egui::Sense::click(),
+                                                    )
+                                                },
+                                            )
+                                            .inner;
+                                        row_rm_rect = rr;
+                                        row_rm_clicked = rresp.clicked();
+                                        row_rm_hovered = rresp.hovered();
                                     });
                                 });
+
+                                let ptr = ui.ctx().input(|i| i.pointer.hover_pos());
+                                if ptr.is_some_and(|p| row.response.rect.contains(p)) {
+                                    ui.painter().text(
+                                        row_rm_rect.center(),
+                                        egui::Align2::CENTER_CENTER,
+                                        "×",
+                                        egui::FontId::proportional(14.0),
+                                        if row_rm_hovered {
+                                            theme::DANGER
+                                        } else {
+                                            theme::TEXT_MUTED
+                                        },
+                                    );
+                                    if row_rm_clicked {
+                                        remove_to = Some(g.dates.clone());
+                                    }
+                                }
                             }
-                            if let Some(dts) = remove_dates {
+                            if let Some(dts) = remove_to {
                                 if let Some(rb) = model.resource_blocks.get_mut(&rb_id) {
                                     rb.non_working_dates.retain(|x| !dts.contains(&x.date));
                                     changed = true;
                                 }
-                            }
-
-                            let is_expanded = settings.resource_expanded.contains(name);
-                            if is_expanded {
-                                // Extract current picker state into owned locals so we can
-                                // borrow settings fields independently below.
-                                let (init_start, init_end, init_desc) = settings
-                                    .resource_date_inputs
-                                    .entry(name.clone())
-                                    .or_default()
-                                    .clone();
-                                let mut start = init_start.unwrap_or(model.calendar.start_date);
-                                let mut end = init_end.unwrap_or(start);
-                                let mut desc = init_desc;
-
-                                let start_salt = format!("res_start:{name}");
-                                let end_salt = format!("res_end:{name}");
-                                ui.add_space(4.0);
-                                ui.horizontal(|ui| {
-                                    ui.add(
-                                        egui_extras::DatePickerButton::new(&mut start)
-                                            .id_salt(start_salt.as_str()),
-                                    );
-                                    ui.label(egui::RichText::new("→").color(theme::TEXT_MUTED));
-                                    ui.add(
-                                        egui_extras::DatePickerButton::new(&mut end)
-                                            .id_salt(end_salt.as_str()),
-                                    );
-                                });
-
-                                let (resp_desc, submit, cancel) = ui
-                                    .horizontal(|ui| {
-                                        let avail = ui.available_width();
-                                        let btn_w = 32.0 + 24.0 + ui.spacing().item_spacing.x * 2.0;
-                                        let desc_w = (avail - btn_w).max(60.0);
-                                        let rd = ui.add(
-                                            egui::TextEdit::singleline(&mut desc)
-                                                .hint_text("Reason")
-                                                .desired_width(desc_w),
-                                        );
-                                        let add = theme::add_button(ui).clicked();
-                                        let cancel = ui
-                                            .small_button(
-                                                egui::RichText::new("✕").color(theme::TEXT_MUTED),
-                                            )
-                                            .clicked();
-                                        (rd, add, cancel)
-                                    })
-                                    .inner;
-
-                                let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
-                                let submit = submit || (resp_desc.lost_focus() && enter);
-
-                                // Persist picker state for next frame.
-                                settings
-                                    .resource_date_inputs
-                                    .insert(name.clone(), (Some(start), Some(end), desc.clone()));
-
-                                if submit {
-                                    let description = desc.trim().to_string();
-                                    if let Some(rb) = model.resource_blocks.get_mut(&rb_id) {
-                                        for d in expand_date_range(start, end) {
-                                            if !rb.non_working_dates.iter().any(|x| x.date == d) {
-                                                rb.non_working_dates.push(model::NonWorkingDate {
-                                                    date: d,
-                                                    description: description.clone(),
-                                                });
-                                                changed = true;
-                                            }
-                                        }
+                                let stale = match &settings.editing {
+                                    Some(SettingsEdit::ResourceLabel(rn, d))
+                                    | Some(SettingsEdit::ResourceDate(rn, d)) => {
+                                        rn.as_str() == name.as_str() && dts.contains(d)
                                     }
-                                    settings.resource_date_inputs.remove(name);
-                                    settings.resource_expanded.remove(name);
-                                } else if cancel {
-                                    settings.resource_date_inputs.remove(name);
-                                    settings.resource_expanded.remove(name);
+                                    _ => false,
+                                };
+                                if stale {
+                                    settings.editing = None;
                                 }
-                            } else {
-                                // Collapsed: "+ Time off" affordance.
-                                ui.add_space(2.0);
-                                ui.horizontal(|ui| {
-                                    ui.add_space(4.0);
-                                    if ui
-                                        .small_button(
-                                            egui::RichText::new("+ Time off")
-                                                .size(11.0)
-                                                .color(theme::ACCENT),
-                                        )
-                                        .clicked()
-                                    {
-                                        settings.resource_expanded.insert(name.clone());
-                                    }
-                                });
                             }
+
+                            // + Time off: append a blank entry and enter label-edit mode.
+                            ui.add_space(2.0);
+                            ui.horizontal(|ui| {
+                                ui.add_space(4.0);
+                                if ui
+                                    .small_button(
+                                        egui::RichText::new("+ Time off")
+                                            .size(11.0)
+                                            .color(theme::ACCENT),
+                                    )
+                                    .clicked()
+                                {
+                                    let existing: Vec<_> = model
+                                        .resource_blocks
+                                        .get(&rb_id)
+                                        .map(|rb| {
+                                            rb.non_working_dates.iter().map(|x| x.date).collect()
+                                        })
+                                        .unwrap_or_default();
+                                    let mut new_date = model.calendar.start_date;
+                                    for _ in 0..1000 {
+                                        if !existing.contains(&new_date) {
+                                            break;
+                                        }
+                                        new_date = new_date.succ_opt().unwrap_or(new_date);
+                                    }
+                                    if let Some(rb) = model.resource_blocks.get_mut(&rb_id) {
+                                        rb.non_working_dates.push(model::NonWorkingDate {
+                                            date: new_date,
+                                            description: String::new(),
+                                        });
+                                        changed = true;
+                                    }
+                                    settings.editing =
+                                        Some(SettingsEdit::ResourceLabel(name.clone(), new_date));
+                                    settings.edit_buf = String::new();
+                                }
+                            });
                         }
                         ui.add_space(4.0);
                     }
-                    // ── Sizes ──────────────────────────────────────────────────────
+
+                    // ── SIZES ─────────────────────────────────────────────────
                     ui.add_space(SETTINGS_SECTION_GAP);
                     theme::section_header(ui, "SIZES", Some(model.t_shirt_sizes.len()));
 
-                    // t-shirt size → working-days map. Edits persist immediately;
-                    // the per-block size picker reads this map.
-                    // Display rows sorted smallest-to-largest by day count.
                     let mut sorted_indices: Vec<usize> = (0..model.t_shirt_sizes.len()).collect();
                     sorted_indices.sort_by_key(|&i| model.t_shirt_sizes[i].days);
 
                     let mut remove_size: Option<usize> = None;
                     for &idx in &sorted_indices {
-                        ui.horizontal(|ui| {
-                            // Right side: DragValue (~58px) + 🗑 (~22px) + spacing.
-                            let right_reserve = 58.0 + 22.0 + ui.spacing().item_spacing.x * 2.0;
+                        let mut trash_rect = egui::Rect::NOTHING;
+                        let mut trash_clicked = false;
+                        let mut trash_hovered = false;
+
+                        let row = ui.horizontal(|ui| {
+                            let trash_w = 22.0;
+                            let right_reserve = 58.0 + trash_w + ui.spacing().item_spacing.x * 2.0;
                             let label_w = (ui.available_width() - right_reserve).max(40.0);
                             if ui
                                 .add(
@@ -2371,19 +2618,33 @@ fn settings_flyout_ui(
                             {
                                 changed = true;
                             }
-                            ui.with_layout(
-                                egui::Layout::right_to_left(egui::Align::Center),
-                                |ui| {
-                                    if ui
-                                        .small_button(egui::RichText::new("🗑").color(theme::DANGER))
-                                        .on_hover_text("Remove")
-                                        .clicked()
-                                    {
-                                        remove_size = Some(idx);
-                                    }
+                            // Always allocate the 🗑 slot; only paint and act on hover.
+                            let (tr, tresp) = ui.allocate_exact_size(
+                                egui::vec2(trash_w, 16.0),
+                                egui::Sense::click(),
+                            );
+                            trash_rect = tr;
+                            trash_clicked = tresp.clicked();
+                            trash_hovered = tresp.hovered();
+                        });
+
+                        let ptr = ui.ctx().input(|i| i.pointer.hover_pos());
+                        if ptr.is_some_and(|p| row.response.rect.contains(p)) {
+                            ui.painter().text(
+                                trash_rect.center(),
+                                egui::Align2::CENTER_CENTER,
+                                "🗑",
+                                egui::FontId::proportional(14.0),
+                                if trash_hovered {
+                                    theme::DANGER
+                                } else {
+                                    theme::TEXT_MUTED
                                 },
                             );
-                        });
+                            if trash_clicked {
+                                remove_size = Some(idx);
+                            }
+                        }
                         ui.add_space(2.0);
                     }
                     if let Some(i) = remove_size {
@@ -2696,24 +2957,28 @@ pub struct RowRename {
     pub picker_open: Option<(model::PlanId, Option<model::WorkBlockId>, i32)>,
 }
 
-/// State for the right-side settings fly-out: whether it's open, the picked
-/// holiday date, and the text buffers for the holiday label / start-date inputs.
+/// Which settings field is currently being edited in-place (one at a time).
+#[derive(Clone, PartialEq)]
+enum SettingsEdit {
+    StartDate,
+    /// Holiday group's label — keyed by the group's start date (unique).
+    HolidayLabel(chrono::NaiveDate),
+    /// A single calendar date entry being moved to a new date.
+    HolidayDate(chrono::NaiveDate),
+    /// Per-resource time-off label — (resource name, group start date).
+    ResourceLabel(String, chrono::NaiveDate),
+    /// Per-resource time-off date being moved.
+    ResourceDate(String, chrono::NaiveDate),
+}
+
+/// State for the right-side settings fly-out.
 #[derive(Resource, Default)]
 pub struct SettingsState {
     pub open: bool,
-    /// Start date selected in the HOLIDAYS range picker, if any.
-    pub holiday_date: Option<chrono::NaiveDate>,
-    /// End date for a multi-day holiday range; single-day when `None`.
-    pub holiday_end_date: Option<chrono::NaiveDate>,
-    pub holiday_desc_input: String,
-    pub start_input: String,
-    /// Which resources have their "+ Time off" add-form expanded, keyed by name.
-    pub resource_expanded: std::collections::HashSet<String>,
-    /// Per-resource date-range picker buffers: name → (start, end, desc).
-    pub resource_date_inputs: std::collections::HashMap<
-        String,
-        (Option<chrono::NaiveDate>, Option<chrono::NaiveDate>, String),
-    >,
+    /// The field currently being edited in-place (one at a time).
+    editing: Option<SettingsEdit>,
+    /// Shared text buffer for whichever field is in `editing`.
+    edit_buf: String,
 }
 
 /// Transient state for the CSV import modal.
@@ -3177,60 +3442,6 @@ mod tests {
             m.plans[&plan_id].row_name(scope, 1),
             None,
             "source row name cleared"
-        );
-    }
-}
-
-#[cfg(test)]
-mod expand_date_range_tests {
-    use super::expand_date_range;
-    use chrono::NaiveDate;
-
-    fn d(y: i32, m: u32, day: u32) -> NaiveDate {
-        NaiveDate::from_ymd_opt(y, m, day).unwrap()
-    }
-
-    #[test]
-    fn single_day() {
-        let dates = expand_date_range(d(2025, 7, 4), d(2025, 7, 4));
-        assert_eq!(dates, vec![d(2025, 7, 4)]);
-    }
-
-    #[test]
-    fn two_day_range() {
-        let dates = expand_date_range(d(2025, 12, 24), d(2025, 12, 25));
-        assert_eq!(dates, vec![d(2025, 12, 24), d(2025, 12, 25)]);
-    }
-
-    #[test]
-    fn end_coerced_when_before_start() {
-        // end < start → treated as single day
-        let dates = expand_date_range(d(2025, 3, 10), d(2025, 3, 5));
-        assert_eq!(dates, vec![d(2025, 3, 10)]);
-    }
-
-    #[test]
-    fn clamped_at_366_days() {
-        let start = d(2025, 1, 1);
-        // Request 400 days past start; should be capped at 366.
-        let end = start + chrono::Duration::days(400);
-        let dates = expand_date_range(start, end);
-        assert_eq!(dates.len(), 367); // 366 days after start = 367 dates inclusive
-        assert_eq!(*dates.first().unwrap(), start);
-        assert_eq!(*dates.last().unwrap(), start + chrono::Duration::days(366));
-    }
-
-    #[test]
-    fn range_crosses_year_boundary() {
-        let dates = expand_date_range(d(2025, 12, 30), d(2026, 1, 2));
-        assert_eq!(
-            dates,
-            vec![
-                d(2025, 12, 30),
-                d(2025, 12, 31),
-                d(2026, 1, 1),
-                d(2026, 1, 2),
-            ]
         );
     }
 }

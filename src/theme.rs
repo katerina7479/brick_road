@@ -5,6 +5,7 @@
 //! (br-256 settings, br-257 top bar, br-258 inspector).
 
 use bevy_egui::egui;
+use chrono::NaiveDate;
 use egui::{Color32, Response, RichText, Stroke, Ui};
 
 // ── Aurora palette ────────────────────────────────────────────────────────────
@@ -96,4 +97,27 @@ pub fn list_row<R>(ui: &mut Ui, add_contents: impl FnOnce(&mut Ui) -> R) -> egui
         .corner_radius(egui::CornerRadius::same(4))
         .inner_margin(egui::Margin::symmetric(6, 3))
         .show(ui, add_contents)
+}
+
+/// Monospace date chip in `YYYY · MM · DD` style — the canonical date display
+/// used for start date, holidays, and per-resource time-off. Returns the chip
+/// `Response` so callers can check `.clicked()` for in-place edit entry.
+pub fn date_chip(ui: &mut Ui, date: NaiveDate) -> Response {
+    chip(ui, &date.format("%Y · %m · %d").to_string())
+}
+
+/// Apply Aurora input styling to the current `ui` scope so `TextEdit` widgets
+/// rendered within it get the PANEL_HI fill + STROKE border + ACCENT focus look.
+/// Call inside `ui.scope(|ui| { style_inputs(ui); ... })` to limit the effect.
+pub fn style_inputs(ui: &mut Ui) {
+    let v = ui.visuals_mut();
+    v.extreme_bg_color = PANEL_HI;
+    v.widgets.inactive.bg_fill = PANEL_HI;
+    v.widgets.inactive.bg_stroke = Stroke::new(1.0, STROKE);
+    v.widgets.hovered.bg_fill = PANEL_HI;
+    v.widgets.hovered.bg_stroke = Stroke::new(1.0, STROKE_HI);
+    v.widgets.active.bg_fill = PANEL_HI;
+    v.widgets.active.bg_stroke = Stroke::new(1.5, ACCENT);
+    v.selection.stroke = Stroke::new(1.5, ACCENT);
+    v.selection.bg_fill = ACCENT.gamma_multiply(0.25);
 }
