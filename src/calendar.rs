@@ -111,7 +111,7 @@ pub fn holiday_columns(
         if boundary >= 0 && boundary <= span_days + 1 {
             // The group occupies the columns immediately left of working day
             // `boundary`; earliest holiday leftmost.
-            let right = day_to_x(boundary, &non_working, config);
+            let right = day_to_x(boundary, non_working, config);
             let n = group.len();
             for (k, (date, desc)) in group.into_iter().enumerate() {
                 let left_x = right - (n - k) as f32 * PIXELS_PER_DAY;
