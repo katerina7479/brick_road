@@ -268,8 +268,52 @@ fn main() {
         .run();
 }
 
+/// Returns the path to `brick_road.db` in the per-user data directory,
+/// creating the directory if needed.
+///
+/// On macOS: `~/Library/Application Support/brick_road/brick_road.db`
+/// On Linux: `~/.local/share/brick_road/brick_road.db`
+/// On Windows: `%APPDATA%\katerina7479\brick_road\data\brick_road.db`
+///
+/// One-time migration: if `./brick_road.db` (legacy cwd path) exists and the
+/// new location is empty, the file is moved there so existing data carries over.
+/// Falls back to the cwd on the rare chance `ProjectDirs` cannot resolve a home
+/// directory (e.g. running as a service with no home).
+fn resolve_db_path() -> std::path::PathBuf {
+    let data_dir = directories::ProjectDirs::from("com", "katerina7479", "brick_road")
+        .map(|d| d.data_dir().to_path_buf())
+        .unwrap_or_else(|| {
+            eprintln!("warning: could not resolve user data directory — using cwd");
+            std::path::PathBuf::from(".")
+        });
+
+    if let Err(e) = std::fs::create_dir_all(&data_dir) {
+        eprintln!("warning: could not create data dir {data_dir:?}: {e}");
+    }
+
+    let new_db = data_dir.join("brick_road.db");
+    let cwd_db = std::path::Path::new("brick_road.db");
+
+    // One-time migration: move the legacy cwd DB to the new location so the
+    // user's data carries over on first launch after upgrading.
+    if cwd_db.exists() && !new_db.exists() {
+        // Try an atomic rename first (fast, same-FS); fall back to copy+remove.
+        let ok = std::fs::rename(cwd_db, &new_db).is_ok()
+            || std::fs::copy(cwd_db, &new_db)
+                .and_then(|_| std::fs::remove_file(cwd_db))
+                .is_ok();
+        if !ok {
+            eprintln!("warning: could not migrate {cwd_db:?} → {new_db:?}; continuing with new DB");
+        }
+    }
+
+    new_db
+}
+
 fn setup_db(world: &mut World) {
-    let conn = rusqlite::Connection::open("brick_road.db").expect("failed to open brick_road.db");
+    let db_path = resolve_db_path();
+    let conn = rusqlite::Connection::open(&db_path)
+        .unwrap_or_else(|e| panic!("failed to open DB at {db_path:?}: {e}"));
     db::create_tables(&conn).expect("failed to create DB tables");
     let model = db::load_model(&conn).expect("failed to load model");
     world.insert_resource(model);
