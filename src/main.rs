@@ -2170,22 +2170,31 @@ fn settings_flyout_ui(
                             .find(|r| r.name.eq_ignore_ascii_case(name))
                             .map(|r| r.id);
                         if let Some(rb_id) = rb_id {
-                            let mut sorted_dates: Vec<model::NonWorkingDate> =
+                            let sorted_dates =
                                 model.resource_blocks[&rb_id].non_working_dates.to_vec();
-                            sorted_dates.sort_by_key(|nwd| nwd.date);
+                            let groups = group_holidays(&sorted_dates);
 
-                            let mut remove_date: Option<chrono::NaiveDate> = None;
-                            for nwd in &sorted_dates {
+                            let mut remove_dates: Option<Vec<chrono::NaiveDate>> = None;
+                            for g in &groups {
                                 ui.add_space(2.0);
                                 theme::list_row(ui, |ui| {
                                     ui.horizontal(|ui| {
                                         ui.add_space(4.0);
-                                        theme::chip(ui, &nwd.date.format("%m·%d").to_string());
+                                        let span = if g.start == g.end {
+                                            g.start.format("%m·%d").to_string()
+                                        } else {
+                                            format!(
+                                                "{}–{}",
+                                                g.start.format("%m·%d"),
+                                                g.end.format("%m·%d")
+                                            )
+                                        };
+                                        theme::chip(ui, &span);
                                         ui.add_space(4.0);
-                                        let desc = if nwd.description.is_empty() {
+                                        let desc = if g.description.is_empty() {
                                             "—"
                                         } else {
-                                            &nwd.description
+                                            &g.description
                                         };
                                         ui.label(
                                             egui::RichText::new(desc)
@@ -2202,65 +2211,122 @@ fn settings_flyout_ui(
                                                     )
                                                     .clicked()
                                                 {
-                                                    remove_date = Some(nwd.date);
+                                                    remove_dates = Some(g.dates.clone());
                                                 }
                                             },
                                         );
                                     });
                                 });
                             }
-                            if let Some(d) = remove_date {
+                            if let Some(dts) = remove_dates {
                                 if let Some(rb) = model.resource_blocks.get_mut(&rb_id) {
-                                    rb.non_working_dates.retain(|x| x.date != d);
+                                    rb.non_working_dates.retain(|x| !dts.contains(&x.date));
                                     changed = true;
                                 }
                             }
 
-                            // Add-row: date + description (constrained fractions) + add_button.
-                            let (date_in, desc_in) = settings
-                                .resource_date_inputs
-                                .entry(name.clone())
-                                .or_default();
-                            ui.horizontal(|ui| {
+                            let is_expanded = settings.resource_expanded.contains(name);
+                            if is_expanded {
+                                // Extract current picker state into owned locals so we can
+                                // borrow settings fields independently below.
+                                let (init_start, init_end, init_desc) = settings
+                                    .resource_date_inputs
+                                    .entry(name.clone())
+                                    .or_default()
+                                    .clone();
+                                let mut start = init_start.unwrap_or(model.calendar.start_date);
+                                let mut end = init_end.unwrap_or(start);
+                                let mut desc = init_desc;
+
+                                let start_salt = format!("res_start:{name}");
+                                let end_salt = format!("res_end:{name}");
                                 ui.add_space(4.0);
-                                let btn_reserve = 32.0 + ui.spacing().item_spacing.x;
-                                let field_avail = (ui.available_width() - btn_reserve).max(80.0);
-                                let date_w = (field_avail * 0.55).floor();
-                                let desc_w =
-                                    (field_avail - date_w - ui.spacing().item_spacing.x).max(30.0);
-                                let resp = ui.add(
-                                    egui::TextEdit::singleline(date_in)
-                                        .hint_text("YYYY-MM-DD")
-                                        .desired_width(date_w),
-                                );
-                                let resp_desc = ui.add(
-                                    egui::TextEdit::singleline(desc_in)
-                                        .hint_text("Reason")
-                                        .desired_width(desc_w),
-                                );
+                                ui.horizontal(|ui| {
+                                    ui.add(
+                                        egui_extras::DatePickerButton::new(&mut start)
+                                            .id_salt(start_salt.as_str()),
+                                    );
+                                    ui.label(egui::RichText::new("→").color(theme::TEXT_MUTED));
+                                    ui.add(
+                                        egui_extras::DatePickerButton::new(&mut end)
+                                            .id_salt(end_salt.as_str()),
+                                    );
+                                });
+
+                                let (resp_desc, submit, cancel) = ui
+                                    .horizontal(|ui| {
+                                        let avail = ui.available_width();
+                                        let btn_w = 32.0 + 24.0 + ui.spacing().item_spacing.x * 2.0;
+                                        let desc_w = (avail - btn_w).max(60.0);
+                                        let rd = ui.add(
+                                            egui::TextEdit::singleline(&mut desc)
+                                                .hint_text("Reason")
+                                                .desired_width(desc_w),
+                                        );
+                                        let add = theme::add_button(ui).clicked();
+                                        let cancel = ui
+                                            .small_button(
+                                                egui::RichText::new("✕").color(theme::TEXT_MUTED),
+                                            )
+                                            .clicked();
+                                        (rd, add, cancel)
+                                    })
+                                    .inner;
+
                                 let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
-                                let submit = theme::add_button(ui).clicked()
-                                    || ((resp.lost_focus() || resp_desc.lost_focus()) && enter);
+                                let submit = submit || (resp_desc.lost_focus() && enter);
+
+                                // Persist picker state for next frame.
+                                settings
+                                    .resource_date_inputs
+                                    .insert(name.clone(), (Some(start), Some(end), desc.clone()));
+
                                 if submit {
-                                    if let Ok(date) = chrono::NaiveDate::parse_from_str(
-                                        date_in.trim(),
-                                        "%Y-%m-%d",
-                                    ) {
-                                        if let Some(rb) = model.resource_blocks.get_mut(&rb_id) {
-                                            if !rb.non_working_dates.iter().any(|x| x.date == date)
-                                            {
+                                    let end_clamped =
+                                        end.max(start).min(start + chrono::Duration::days(366));
+                                    let description = desc.trim().to_string();
+                                    if let Some(rb) = model.resource_blocks.get_mut(&rb_id) {
+                                        let mut d = start;
+                                        loop {
+                                            if !rb.non_working_dates.iter().any(|x| x.date == d) {
                                                 rb.non_working_dates.push(model::NonWorkingDate {
-                                                    date,
-                                                    description: desc_in.trim().to_string(),
+                                                    date: d,
+                                                    description: description.clone(),
                                                 });
                                                 changed = true;
                                             }
+                                            if d >= end_clamped {
+                                                break;
+                                            }
+                                            match d.succ_opt() {
+                                                Some(n) => d = n,
+                                                None => break,
+                                            }
                                         }
-                                        date_in.clear();
-                                        desc_in.clear();
                                     }
+                                    settings.resource_date_inputs.remove(name);
+                                    settings.resource_expanded.remove(name);
+                                } else if cancel {
+                                    settings.resource_date_inputs.remove(name);
+                                    settings.resource_expanded.remove(name);
                                 }
-                            });
+                            } else {
+                                // Collapsed: "+ Time off" affordance.
+                                ui.add_space(2.0);
+                                ui.horizontal(|ui| {
+                                    ui.add_space(4.0);
+                                    if ui
+                                        .small_button(
+                                            egui::RichText::new("+ Time off")
+                                                .size(11.0)
+                                                .color(theme::ACCENT),
+                                        )
+                                        .clicked()
+                                    {
+                                        settings.resource_expanded.insert(name.clone());
+                                    }
+                                });
+                            }
                         }
                         ui.add_space(4.0);
                     }
@@ -2635,8 +2701,13 @@ pub struct SettingsState {
     pub holiday_end_date: Option<chrono::NaiveDate>,
     pub holiday_desc_input: String,
     pub start_input: String,
-    /// Per-resource add-row buffers: resource name → (date_input, desc_input).
-    pub resource_date_inputs: std::collections::HashMap<String, (String, String)>,
+    /// Which resources have their "+ Time off" add-form expanded, keyed by name.
+    pub resource_expanded: std::collections::HashSet<String>,
+    /// Per-resource date-range picker buffers: name → (start, end, desc).
+    pub resource_date_inputs: std::collections::HashMap<
+        String,
+        (Option<chrono::NaiveDate>, Option<chrono::NaiveDate>, String),
+    >,
 }
 
 /// Transient state for the CSV import modal.
