@@ -1,0 +1,104 @@
+//! Aurora cyan-HUD design-system: palette constants + shared widget helpers.
+//!
+//! Import with `use crate::theme`. Color constants are used immediately by the
+//! base chrome flip; helpers are consumed by the per-surface restyle tickets
+//! (br-256 settings, br-257 top bar, br-258 inspector).
+
+use bevy_egui::egui;
+use egui::{Color32, Response, RichText, Stroke, Ui};
+
+// ── Aurora palette ────────────────────────────────────────────────────────────
+pub const BG: Color32 = Color32::from_rgb(10, 14, 16); // page / behind panels, near-black cool
+pub const PANEL: Color32 = Color32::from_rgb(14, 20, 24); // panel fill (settings, inspector, ruler)
+pub const PANEL_HI: Color32 = Color32::from_rgb(18, 28, 32); // raised row / chip background
+pub const STROKE: Color32 = Color32::from_rgb(40, 70, 80); // dim cyan borders / separators
+pub const STROKE_HI: Color32 = Color32::from_rgb(70, 120, 135); // brighter border (hover / focus)
+pub const ACCENT: Color32 = Color32::from_rgb(90, 225, 220); // primary cyan — active text, borders
+pub const ACCENT_GLOW: Color32 = Color32::from_rgb(130, 245, 235); // lit/active (TODAY, selected)
+pub const TEXT: Color32 = Color32::from_rgb(226, 236, 238); // primary text, cool near-white
+pub const TEXT_MUTED: Color32 = Color32::from_rgb(120, 140, 148); // section headers, secondary
+pub const DANGER: Color32 = Color32::from_rgb(220, 92, 80); // destructive (Clear), coral-red
+
+// ── Shared HUD widget helpers ─────────────────────────────────────────────────
+
+/// Section header: caps label in TEXT_MUTED + optional right-aligned count in
+/// ACCENT + a thin STROKE rule spanning the full row below.
+#[allow(dead_code)] // consumed by br-256/257/258
+pub fn section_header(ui: &mut Ui, title: &str, count: Option<usize>) {
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(title).size(11.0).color(TEXT_MUTED));
+        if let Some(n) = count {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.label(RichText::new(n.to_string()).size(10.0).color(ACCENT));
+            });
+        }
+    });
+    let avail = ui.available_width();
+    if avail > 0.0 {
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(avail, 1.0), egui::Sense::hover());
+        ui.painter()
+            .hline(rect.x_range(), rect.center().y, Stroke::new(1.0, STROKE));
+    }
+    ui.add_space(4.0);
+}
+
+/// Small monospace chip: PANEL_HI background, STROKE border, ACCENT text.
+/// Used for compact data labels (`5 / 7`, date chips `07·04`).
+#[allow(dead_code)] // consumed by br-256/257/258
+pub fn chip(ui: &mut Ui, text: &str) -> Response {
+    ui.add(
+        egui::Button::new(
+            RichText::new(text)
+                .font(egui::FontId::monospace(11.0))
+                .color(ACCENT),
+        )
+        .fill(PANEL_HI)
+        .stroke(Stroke::new(1.0, STROKE))
+        .corner_radius(4.0),
+    )
+}
+
+/// Bordered pill button for the top bar (TODAY, Fit, Home…).
+/// `active` → ACCENT_GLOW border + glow fill; inactive → dim STROKE border.
+#[allow(dead_code)] // consumed by br-257
+pub fn pill_button(ui: &mut Ui, label: &str, active: bool) -> Response {
+    let text = RichText::new(label)
+        .size(12.5)
+        .color(if active { ACCENT_GLOW } else { TEXT });
+    ui.add(
+        egui::Button::new(text)
+            .fill(if active {
+                PANEL_HI
+            } else {
+                Color32::TRANSPARENT
+            })
+            .stroke(Stroke::new(
+                if active { 1.5 } else { 1.0 },
+                if active { ACCENT_GLOW } else { STROKE },
+            ))
+            .corner_radius(10.0),
+    )
+}
+
+/// Compact cyan-bordered `+` add-button for add-rows (holidays, sizes, resources).
+#[allow(dead_code)] // consumed by br-256/257/258
+pub fn add_button(ui: &mut Ui) -> Response {
+    ui.add(
+        egui::Button::new(RichText::new("+").size(14.0).color(ACCENT))
+            .fill(Color32::TRANSPARENT)
+            .stroke(Stroke::new(1.0, STROKE))
+            .corner_radius(4.0),
+    )
+}
+
+/// Bordered PANEL_HI container row for list items (holidays, sizes, resources).
+/// Caller layouts content inside; returns `InnerResponse` for response chaining.
+#[allow(dead_code)] // consumed by br-256/257/258
+pub fn list_row<R>(ui: &mut Ui, add_contents: impl FnOnce(&mut Ui) -> R) -> egui::InnerResponse<R> {
+    egui::Frame::new()
+        .fill(PANEL_HI)
+        .stroke(Stroke::new(1.0, STROKE))
+        .corner_radius(egui::CornerRadius::same(4))
+        .inner_margin(egui::Margin::symmetric(6, 3))
+        .show(ui, add_contents)
+}

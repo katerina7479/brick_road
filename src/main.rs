@@ -16,6 +16,7 @@ pub mod graph;
 pub mod labels;
 pub mod model;
 pub mod schedule;
+pub mod theme;
 
 use camera::{camera_nav_keys, smooth_camera, update_camera_target, CameraTarget};
 use constants::PIXELS_PER_DAY;
@@ -32,7 +33,8 @@ fn main() {
             ..default()
         }))
         .add_plugins(EguiPlugin::default())
-        .insert_resource(ClearColor(Color::srgb(0.08, 0.07, 0.065)))
+        // BG: rgb(10, 14, 16) linearised for Bevy's sRGB colour space.
+        .insert_resource(ClearColor(Color::srgb(0.039, 0.055, 0.063)))
         .insert_resource(CameraTarget::default())
         .insert_resource(blocks::SelectedBlock::default())
         .insert_resource(blocks::SelectedDependency::default())
@@ -1168,7 +1170,7 @@ fn calendar_ruler_ui(
         .exact_height(64.0)
         .frame(
             egui::Frame::new()
-                .fill(egui::Color32::from_rgb(22, 17, 12))
+                .fill(theme::PANEL)
                 .inner_margin(egui::Margin::same(0)),
         )
         .show(ctx, |ui| {
@@ -1490,7 +1492,7 @@ fn resource_gutter_ui(
         .resizable(false)
         .frame(
             egui::Frame::new()
-                .fill(egui::Color32::from_rgba_unmultiplied(24, 18, 12, 96))
+                .fill(egui::Color32::from_rgba_unmultiplied(14, 20, 24, 96))
                 .inner_margin(egui::Margin::same(0)),
         )
         .show(ctx, |ui| {
@@ -1575,11 +1577,8 @@ fn resource_gutter_ui(
                             .order(egui::Order::Foreground)
                             .show(ui.ctx(), |ui| {
                                 egui::Frame::new()
-                                    .fill(egui::Color32::from_rgb(38, 32, 26))
-                                    .stroke(egui::Stroke::new(
-                                        1.0,
-                                        egui::Color32::from_rgb(80, 70, 56),
-                                    ))
+                                    .fill(theme::PANEL_HI)
+                                    .stroke(egui::Stroke::new(1.0, theme::STROKE))
                                     .corner_radius(egui::CornerRadius::same(4))
                                     .inner_margin(egui::Margin::same(6))
                                     .show(ui, |ui| {
@@ -1817,21 +1816,21 @@ fn quarter_start_x(y: i32, q: i32, config: &model::CalendarConfig) -> f32 {
     )
 }
 
-/// Applies the warm-amber theme to the current `ui`'s button widget states, so
-/// every `tool_button` in the row gets a consistent fill, rounded corner, and
+/// Applies the Aurora cyan-HUD theme to the current `ui`'s button widget states
+/// so every `tool_button` in the row gets a consistent fill, rounded corner, and
 /// hover/active feedback instead of egui's flat grey default.
 fn style_tool_buttons(ui: &mut egui::Ui) {
     let r = egui::CornerRadius::same(6);
     let w = &mut ui.visuals_mut().widgets;
-    w.inactive.weak_bg_fill = egui::Color32::from_rgb(40, 30, 16);
-    w.inactive.bg_stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(74, 56, 30));
-    w.inactive.fg_stroke.color = egui::Color32::from_rgb(224, 206, 170);
+    w.inactive.weak_bg_fill = theme::PANEL_HI;
+    w.inactive.bg_stroke = egui::Stroke::new(1.0, theme::STROKE);
+    w.inactive.fg_stroke.color = theme::TEXT;
     w.inactive.corner_radius = r;
-    w.hovered.weak_bg_fill = egui::Color32::from_rgb(58, 44, 24);
-    w.hovered.bg_stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(122, 94, 52));
-    w.hovered.fg_stroke.color = egui::Color32::from_rgb(246, 230, 198);
+    w.hovered.weak_bg_fill = egui::Color32::from_rgb(24, 40, 46);
+    w.hovered.bg_stroke = egui::Stroke::new(1.0, theme::STROKE_HI);
+    w.hovered.fg_stroke.color = theme::TEXT;
     w.hovered.corner_radius = r;
-    w.active.weak_bg_fill = egui::Color32::from_rgb(78, 58, 30);
+    w.active.weak_bg_fill = egui::Color32::from_rgb(28, 50, 58);
     w.active.corner_radius = r;
 }
 
@@ -1840,16 +1839,13 @@ fn style_tool_buttons(ui: &mut egui::Ui) {
 fn tool_button(ui: &mut egui::Ui, label: &str, active: bool) -> egui::Response {
     let mut text = egui::RichText::new(label).size(12.5);
     if active {
-        text = text.color(egui::Color32::from_rgb(250, 165, 40));
+        text = text.color(theme::ACCENT);
     }
     let mut btn = egui::Button::new(text);
     if active {
         btn = btn
-            .fill(egui::Color32::from_rgb(64, 46, 18))
-            .stroke(egui::Stroke::new(
-                1.0,
-                egui::Color32::from_rgb(250, 165, 40),
-            ));
+            .fill(theme::PANEL_HI)
+            .stroke(egui::Stroke::new(1.0, theme::ACCENT));
     }
     ui.add(btn)
 }
@@ -1877,8 +1873,8 @@ fn settings_flyout_ui(
         .exact_width(272.0)
         .frame(
             egui::Frame::new()
-                .fill(egui::Color32::from_rgb(26, 20, 12))
-                .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(60, 46, 26)))
+                .fill(theme::PANEL)
+                .stroke(egui::Stroke::new(1.0, theme::STROKE))
                 .inner_margin(egui::Margin::same(14)),
         )
         .show(ctx, |ui| {
@@ -2288,14 +2284,14 @@ fn top_bar_ui(
             egui::Frame::new()
                 // Opaque — a translucent fill let the timeline show through the
                 // empty area to the right of the breadcrumb.
-                .fill(egui::Color32::from_rgb(18, 12, 4))
+                .fill(theme::BG)
                 .inner_margin(egui::Margin::symmetric(8, 4)),
         )
         .show(ctx, |ui| {
             ui.horizontal(|ui| {
                 let text = egui::RichText::new("brick_road")
                     .size(18.0)
-                    .color(egui::Color32::from_rgb(250, 165, 40));
+                    .color(theme::ACCENT);
                 let btn = egui::Button::new(text)
                     .fill(egui::Color32::TRANSPARENT)
                     .stroke(egui::Stroke::NONE);
@@ -2315,15 +2311,14 @@ fn top_bar_ui(
                     if ui
                         .selectable_label(
                             false,
-                            egui::RichText::new("Plan")
-                                .color(egui::Color32::from_rgb(196, 162, 110)),
+                            egui::RichText::new("Plan").color(theme::TEXT_MUTED),
                         )
                         .clicked()
                     {
                         jump_to = Some(0);
                     }
                     for (i, id) in drill.path.iter().enumerate() {
-                        ui.label(egui::RichText::new("/").color(egui::Color32::from_gray(110)));
+                        ui.label(egui::RichText::new("/").color(theme::TEXT_MUTED));
                         let name = model
                             .work_blocks
                             .get(id)
@@ -2331,9 +2326,9 @@ fn top_bar_ui(
                             .unwrap_or_else(|| "?".to_string());
                         let is_last = i + 1 == drill.path.len();
                         let text = egui::RichText::new(name).color(if is_last {
-                            egui::Color32::from_rgb(232, 234, 244)
+                            theme::TEXT
                         } else {
-                            egui::Color32::from_rgb(196, 162, 110)
+                            theme::TEXT_MUTED
                         });
                         if ui.selectable_label(is_last, text).clicked() {
                             jump_to = Some(i + 1);
@@ -2369,13 +2364,10 @@ fn top_bar_ui(
                                 egui::Button::new(
                                     egui::RichText::new("▲ Accept as main")
                                         .size(12.5)
-                                        .color(egui::Color32::from_rgb(250, 220, 150)),
+                                        .color(theme::ACCENT),
                                 )
-                                .fill(egui::Color32::from_rgb(46, 34, 14))
-                                .stroke(egui::Stroke::new(
-                                    1.0,
-                                    egui::Color32::from_rgb(120, 92, 40),
-                                ))
+                                .fill(theme::PANEL_HI)
+                                .stroke(egui::Stroke::new(1.0, theme::STROKE_HI))
                                 .corner_radius(6.0),
                             )
                             .on_hover_text(format!(
@@ -2445,10 +2437,10 @@ fn top_bar_ui(
                             egui::Button::new(
                                 egui::RichText::new("⌫ Clear")
                                     .size(12.5)
-                                    .color(egui::Color32::from_rgb(228, 132, 122)),
+                                    .color(theme::DANGER),
                             )
-                            .fill(egui::Color32::from_rgb(44, 24, 20))
-                            .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(96, 50, 44)))
+                            .fill(theme::PANEL_HI)
+                            .stroke(egui::Stroke::new(1.0, theme::DANGER))
                             .corner_radius(6.0),
                         )
                         .on_hover_text("Dev: delete all blocks, branches, and links")
