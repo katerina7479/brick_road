@@ -2355,9 +2355,11 @@ fn top_bar_ui(
                     }
                 }
 
-                // When a branch is selected, offer to promote it to main. The
-                // action is destructive and immediate by design — no confirm
-                // dialog; undo (br-225) is the safety net.
+                // When a branch is selected, offer to promote it to main.
+                // No confirm, no undo — DELIBERATE product decision (br-236/237,
+                // both closed wontfix). Destructive actions are immediate;
+                // recovery is manual redo, "like a game, just do it again."
+                // Do NOT add a confirmation dialog or undo machinery here.
                 if let Some(bid) = selected_plan.0 {
                     if plan_is_acceptable(&model, bid) {
                         ui.separator();
@@ -2502,6 +2504,8 @@ fn top_bar_ui(
     if let Some(bid) = accept_branch {
         // Promote the branch to main, persist, and drop the now-gone selection.
         // The mutated model drives the canvas refresh via change-detection.
+        // One-click rewrite of main + sibling branches, no confirm/undo — by
+        // design (br-236/237 wontfix). Recovery is manual redo, not a guardrail.
         model.accept_plan_as_main(bid);
         selected_plan.0 = None;
         if let Err(e) = db::save_model(&conn, &model) {
