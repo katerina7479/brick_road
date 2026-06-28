@@ -3333,13 +3333,7 @@ const PRIORITY_LABELS: [&str; 4] = ["Low", "Normal", "High", "Critical"];
 /// separator, matching the settings fly-out's sectioning.
 fn inspector_section(ui: &mut egui::Ui, title: &str) {
     ui.add_space(12.0);
-    ui.label(
-        egui::RichText::new(title)
-            .size(11.0)
-            .color(egui::Color32::from_rgb(150, 130, 96)),
-    );
-    ui.separator();
-    ui.add_space(4.0);
+    theme::section_header(ui, title, None);
 }
 
 /// Convert an HDR linear-RGB block color into a displayable egui swatch color.
@@ -3491,7 +3485,7 @@ pub fn block_inspector_flyout_ui(
                     egui::RichText::new("Block")
                         .size(16.0)
                         .strong()
-                        .color(egui::Color32::from_rgb(238, 212, 152)),
+                        .color(theme::TEXT),
                 );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.button(egui::RichText::new("✕").size(14.0)).clicked() {
@@ -3540,19 +3534,19 @@ pub fn block_inspector_flyout_ui(
                     }
                 });
             ui.add_space(2.0);
-            ui.label(
-                egui::RichText::new(format!("{duration_days} working days"))
-                    .color(egui::Color32::from_rgb(150, 130, 96)),
-            );
+            theme::chip(ui, &format!("{duration_days} d"));
 
             // ── Priority ───────────────────────────────────────────────────
             inspector_section(ui, "PRIORITY");
             ui.horizontal_wrapped(|ui| {
                 for (i, label) in PRIORITY_LABELS.iter().enumerate() {
-                    if ui
-                        .selectable_label(cur_priority as usize == i, *label)
-                        .clicked()
-                    {
+                    let is_active = cur_priority as usize == i;
+                    let text = egui::RichText::new(*label).color(if is_active {
+                        theme::ACCENT
+                    } else {
+                        theme::TEXT_MUTED
+                    });
+                    if ui.selectable_label(is_active, text).clicked() {
                         chosen_priority = Some(i as u8);
                     }
                 }
@@ -3560,25 +3554,36 @@ pub fn block_inspector_flyout_ui(
 
             // ── Color ──────────────────────────────────────────────────────
             inspector_section(ui, "COLOR");
-            ui.horizontal_wrapped(|ui| {
-                for swatch in PALETTE {
-                    let [r, g, b, _] = swatch.to_f32_array();
-                    let rgb = [r, g, b];
-                    let is_cur = cur_color == Some(rgb);
-                    let mut btn = egui::Button::new("")
-                        .fill(hdr_swatch_color(rgb))
-                        .min_size(egui::vec2(26.0, 22.0))
-                        .corner_radius(egui::CornerRadius::same(4));
-                    if is_cur {
-                        btn = btn.stroke(egui::Stroke::new(2.0, egui::Color32::WHITE));
-                    }
-                    if ui.add(btn).clicked() {
-                        chosen_color = Some(Some(rgb));
-                    }
-                }
-            });
+            egui::Frame::new()
+                .fill(theme::PANEL_HI)
+                .stroke(egui::Stroke::new(1.0, theme::STROKE))
+                .corner_radius(egui::CornerRadius::same(4))
+                .inner_margin(egui::Margin::symmetric(4, 4))
+                .show(ui, |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        for swatch in PALETTE {
+                            let [r, g, b, _] = swatch.to_f32_array();
+                            let rgb = [r, g, b];
+                            let is_cur = cur_color == Some(rgb);
+                            let mut btn = egui::Button::new("")
+                                .fill(hdr_swatch_color(rgb))
+                                .min_size(egui::vec2(26.0, 22.0))
+                                .corner_radius(egui::CornerRadius::same(4));
+                            if is_cur {
+                                btn = btn.stroke(egui::Stroke::new(2.0, egui::Color32::WHITE));
+                            }
+                            if ui.add(btn).clicked() {
+                                chosen_color = Some(Some(rgb));
+                            }
+                        }
+                    });
+                });
             ui.add_space(4.0);
-            if cur_color.is_some() && ui.small_button("Reset to default").clicked() {
+            if cur_color.is_some()
+                && ui
+                    .small_button(egui::RichText::new("Reset to default").color(theme::DANGER))
+                    .clicked()
+            {
                 chosen_color = Some(None);
             }
 
@@ -3593,10 +3598,7 @@ pub fn block_inspector_flyout_ui(
             if !state.reparent_open {
                 // Collapsed state: show current parent + a "Move…" trigger.
                 ui.horizontal(|ui| {
-                    ui.label(
-                        egui::RichText::new(cur_parent_name)
-                            .color(egui::Color32::from_rgb(180, 165, 130)),
-                    );
+                    ui.label(egui::RichText::new(cur_parent_name).color(theme::TEXT_MUTED));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui.small_button("Move…").clicked() {
                             open_reparent = true;
@@ -3606,10 +3608,7 @@ pub fn block_inspector_flyout_ui(
             } else if state.reparent_plan_id.is_none() {
                 // Step 1 — choose plan.
                 ui.horizontal(|ui| {
-                    ui.label(
-                        egui::RichText::new("Select plan:")
-                            .color(egui::Color32::from_rgb(180, 165, 130)),
-                    );
+                    ui.label(egui::RichText::new("Select plan:").color(theme::TEXT_MUTED));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui.small_button("Cancel").clicked() {
                             cancel_reparent = true;
@@ -3637,7 +3636,7 @@ pub fn block_inspector_flyout_ui(
                 ui.horizontal(|ui| {
                     ui.label(
                         egui::RichText::new(format!("Parent in {plan_name}:"))
-                            .color(egui::Color32::from_rgb(180, 165, 130)),
+                            .color(theme::TEXT_MUTED),
                     );
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui.small_button("Cancel").clicked() {
