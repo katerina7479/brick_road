@@ -25,14 +25,14 @@ cargo bundle --release       # produces target/release/bundle/osx/Brick Road.app
 
 The resulting `.app` is **unsigned**. On first launch on a new Mac, right-click → Open to bypass Gatekeeper. The DB is stored in `~/Library/Application Support/brick_road/brick_road.db` (not inside the bundle), so replacing the `.app` with a new build never clobbers user data. Code-signing + notarization for wider distribution is a separate future step.
 
-There is no CI. The Rust toolchain is pinned via `rust-toolchain.toml` (1.96.0, with the `rustfmt` and `clippy` components) and `rustfmt.toml` pins `edition`/`style_edition` to 2021, so `cargo fmt` and `cargo clippy` produce identical output on every host (no cross-version formatting churn). Keep everything else at `cargo fmt` / `cargo clippy` defaults.
+There is **no hosted CI** (no GitHub Actions — deliberately, to avoid paid CI minutes). All checks run **locally via git hooks** before commit/push (see below). The Rust toolchain is pinned via `rust-toolchain.toml` (1.96.0, with the `rustfmt` and `clippy` components) and `rustfmt.toml` pins `edition`/`style_edition` to 2021, so `cargo fmt` and `cargo clippy` produce identical output on every host (no cross-version formatting churn). Keep everything else at `cargo fmt` / `cargo clippy` defaults.
 
 Two repo-tracked hooks live in `.githooks/` — **not active until you enable them once per checkout/worktree**: `git config core.hooksPath .githooks`.
 
 - **`pre-commit`** — runs `cargo fmt --check` (fast, no compile). Bypass: `git commit --no-verify`.
-- **`pre-push`** — runs `scripts/check-schema-guard.sh` to block unapproved schema changes (see § Schema-change policy below). Bypass: `git push --no-verify` (owner approval required).
+- **`pre-push`** — runs **`cargo fmt --check`**, then **`cargo clippy --all-targets -- -D warnings`** (full Bevy compile — the slow step, but only on push), then **`scripts/check-schema-guard.sh`** to block unapproved schema changes (see § Schema-change policy below). Bypass: `git push --no-verify` (schema bypass needs owner approval).
 
-Run `cargo clippy`/`cargo test` yourself before pushing — they need a full Bevy compile and are too slow per-commit.
+The pre-push hook is the gate that replaces hosted CI — it runs fmt + clippy (`-D warnings`) + the schema guard locally before anything leaves the machine. Run `cargo test` yourself too (also a full compile, too slow to hook per-push).
 
 The app opens/creates `brick_road.db` (gitignored SQLite file) in the working directory on launch. Delete it to reset to a freshly seeded demo plan.
 

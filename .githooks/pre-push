@@ -1,15 +1,37 @@
 #!/bin/sh
-# brick_road pre-push hook — guard against unapproved schema changes.
+# brick_road pre-push hook — run all checks locally before pushing (no paid CI).
 #
-# Runs scripts/check-schema-guard.sh for every branch being pushed.
-# Falls back to origin/main as the base when the branch is new on the remote.
+# Runs, in order, and blocks the push on the first failure:
+#   1. cargo fmt --check                       (fast; no compile)
+#   2. cargo clippy --all-targets -- -D warnings  (full Bevy compile — the slow
+#                                              step, but only on push, not every commit)
+#   3. scripts/check-schema-guard.sh           (per branch: unapproved db.rs schema changes)
 #
 # Enable in a fresh checkout (one time, per clone/worktree):
 #     git config core.hooksPath .githooks
 #
-# Bypass a single push (only with explicit owner approval):
+# Bypass a single push (use sparingly; schema bypass needs owner approval):
 #     git push --no-verify
 
+ROOT="$(git rev-parse --show-toplevel)"
+
+# 1. Formatting — fast, no compile.
+if ! cargo fmt --check; then
+    echo >&2
+    echo "pre-push: rustfmt check failed — run 'cargo fmt', commit, and push again." >&2
+    exit 1
+fi
+
+# 2. Lints — full compile, so this is the slow step. -D warnings means any clippy
+#    warning blocks the push (prevents silent lint accumulation).
+if ! cargo clippy --all-targets -- -D warnings; then
+    echo >&2
+    echo "pre-push: clippy found warnings — fix them and push again." >&2
+    exit 1
+fi
+
+# 3. Schema-change guard — per branch being pushed. Falls back to origin/main as
+#    the base when the branch is new on the remote.
 ZERO_SHA="0000000000000000000000000000000000000000"
 
 while IFS=' ' read -r local_ref local_sha remote_ref remote_sha; do
@@ -24,8 +46,7 @@ while IFS=' ' read -r local_ref local_sha remote_ref remote_sha; do
         base="$remote_sha"
     fi
 
-    if ! "$(git rev-parse --show-toplevel)/scripts/check-schema-guard.sh" \
-            "$base" "$local_sha"; then
+    if ! "$ROOT/scripts/check-schema-guard.sh" "$base" "$local_sha"; then
         exit 1
     fi
 done
