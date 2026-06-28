@@ -1895,6 +1895,26 @@ fn group_holidays(dates: &[model::NonWorkingDate]) -> Vec<HolidayGroup> {
     groups
 }
 
+/// Expands [start, end] into a sorted `Vec<NaiveDate>`. `end` is coerced to
+/// `>= start` and capped at 366 days after `start` so a mis-pick can't insert
+/// thousands of rows. Includes both endpoints.
+fn expand_date_range(start: chrono::NaiveDate, end: chrono::NaiveDate) -> Vec<chrono::NaiveDate> {
+    let end = end.max(start).min(start + chrono::Duration::days(366));
+    let mut dates = Vec::new();
+    let mut d = start;
+    loop {
+        dates.push(d);
+        if d >= end {
+            break;
+        }
+        match d.succ_opt() {
+            Some(n) => d = n,
+            None => break,
+        }
+    }
+    dates
+}
+
 /// Right-side settings fly-out. Toggled by the top-bar gear. Holds general
 /// settings; the first section is the calendar (working days per week, the
 /// holiday list, and the start date). Edits write straight to `model.calendar`
@@ -2091,16 +2111,9 @@ fn settings_flyout_ui(
                     let submit = submit || (resp_desc.lost_focus() && enter);
                     if submit {
                         if let Some(start) = settings.holiday_date {
-                            // Clamp: end >= start, capped to a year so a mis-pick
-                            // can't insert thousands of rows.
-                            let end = settings
-                                .holiday_end_date
-                                .unwrap_or(start)
-                                .max(start)
-                                .min(start + chrono::Duration::days(366));
+                            let end = settings.holiday_end_date.unwrap_or(start);
                             let desc = settings.holiday_desc_input.trim().to_string();
-                            let mut d = start;
-                            loop {
+                            for d in expand_date_range(start, end) {
                                 if !model.calendar.non_working_dates.iter().any(|x| x.date == d) {
                                     model
                                         .calendar
@@ -2110,13 +2123,6 @@ fn settings_flyout_ui(
                                             description: desc.clone(),
                                         });
                                     changed = true;
-                                }
-                                if d >= end {
-                                    break;
-                                }
-                                match d.succ_opt() {
-                                    Some(n) => d = n,
-                                    None => break,
                                 }
                             }
                             settings.holiday_date = None;
@@ -2286,25 +2292,15 @@ fn settings_flyout_ui(
                                     .insert(name.clone(), (Some(start), Some(end), desc.clone()));
 
                                 if submit {
-                                    let end_clamped =
-                                        end.max(start).min(start + chrono::Duration::days(366));
                                     let description = desc.trim().to_string();
                                     if let Some(rb) = model.resource_blocks.get_mut(&rb_id) {
-                                        let mut d = start;
-                                        loop {
+                                        for d in expand_date_range(start, end) {
                                             if !rb.non_working_dates.iter().any(|x| x.date == d) {
                                                 rb.non_working_dates.push(model::NonWorkingDate {
                                                     date: d,
                                                     description: description.clone(),
                                                 });
                                                 changed = true;
-                                            }
-                                            if d >= end_clamped {
-                                                break;
-                                            }
-                                            match d.succ_opt() {
-                                                Some(n) => d = n,
-                                                None => break,
                                             }
                                         }
                                     }
@@ -3175,6 +3171,60 @@ mod tests {
             m.plans[&plan_id].row_name(scope, 1),
             None,
             "source row name cleared"
+        );
+    }
+}
+
+#[cfg(test)]
+mod expand_date_range_tests {
+    use super::expand_date_range;
+    use chrono::NaiveDate;
+
+    fn d(y: i32, m: u32, day: u32) -> NaiveDate {
+        NaiveDate::from_ymd_opt(y, m, day).unwrap()
+    }
+
+    #[test]
+    fn single_day() {
+        let dates = expand_date_range(d(2025, 7, 4), d(2025, 7, 4));
+        assert_eq!(dates, vec![d(2025, 7, 4)]);
+    }
+
+    #[test]
+    fn two_day_range() {
+        let dates = expand_date_range(d(2025, 12, 24), d(2025, 12, 25));
+        assert_eq!(dates, vec![d(2025, 12, 24), d(2025, 12, 25)]);
+    }
+
+    #[test]
+    fn end_coerced_when_before_start() {
+        // end < start → treated as single day
+        let dates = expand_date_range(d(2025, 3, 10), d(2025, 3, 5));
+        assert_eq!(dates, vec![d(2025, 3, 10)]);
+    }
+
+    #[test]
+    fn clamped_at_366_days() {
+        let start = d(2025, 1, 1);
+        // Request 400 days past start; should be capped at 366.
+        let end = start + chrono::Duration::days(400);
+        let dates = expand_date_range(start, end);
+        assert_eq!(dates.len(), 367); // 366 days after start = 367 dates inclusive
+        assert_eq!(*dates.first().unwrap(), start);
+        assert_eq!(*dates.last().unwrap(), start + chrono::Duration::days(366));
+    }
+
+    #[test]
+    fn range_crosses_year_boundary() {
+        let dates = expand_date_range(d(2025, 12, 30), d(2026, 1, 2));
+        assert_eq!(
+            dates,
+            vec![
+                d(2025, 12, 30),
+                d(2025, 12, 31),
+                d(2026, 1, 1),
+                d(2026, 1, 2),
+            ]
         );
     }
 }
