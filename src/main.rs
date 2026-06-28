@@ -2176,15 +2176,19 @@ fn settings_flyout_ui(
 
                     // t-shirt size → working-days map. Edits persist immediately;
                     // the per-block size picker reads this map.
+                    // Display rows sorted smallest-to-largest by day count.
+                    let mut sorted_indices: Vec<usize> = (0..model.t_shirt_sizes.len()).collect();
+                    sorted_indices.sort_by_key(|&i| model.t_shirt_sizes[i].days);
+
                     let mut remove_size: Option<usize> = None;
-                    for (i, size) in model.t_shirt_sizes.iter_mut().enumerate() {
+                    for &idx in &sorted_indices {
                         ui.horizontal(|ui| {
-                            // Right side: DragValue (~58px) + × (~22px) + spacing.
+                            // Right side: DragValue (~58px) + 🗑 (~22px) + spacing.
                             let right_reserve = 58.0 + 22.0 + ui.spacing().item_spacing.x * 2.0;
                             let label_w = (ui.available_width() - right_reserve).max(40.0);
                             if ui
                                 .add(
-                                    egui::TextEdit::singleline(&mut size.label)
+                                    egui::TextEdit::singleline(&mut model.t_shirt_sizes[idx].label)
                                         .desired_width(label_w),
                                 )
                                 .changed()
@@ -2193,7 +2197,7 @@ fn settings_flyout_ui(
                             }
                             if ui
                                 .add(
-                                    egui::DragValue::new(&mut size.days)
+                                    egui::DragValue::new(&mut model.t_shirt_sizes[idx].days)
                                         .range(1..=400)
                                         .suffix(" d"),
                                 )
@@ -2205,11 +2209,11 @@ fn settings_flyout_ui(
                                 egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
                                     if ui
-                                        .small_button(egui::RichText::new("×").color(theme::DANGER))
+                                        .small_button(egui::RichText::new("🗑").color(theme::DANGER))
                                         .on_hover_text("Remove")
                                         .clicked()
                                     {
-                                        remove_size = Some(i);
+                                        remove_size = Some(idx);
                                     }
                                 },
                             );
