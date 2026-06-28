@@ -1513,6 +1513,7 @@ pub fn handle_block_drag(
             if !snapshot.is_empty() {
                 undo.last_move = Some(snapshot);
                 undo.last_deletion = None;
+                undo.last_batch_edit = None;
             }
 
             schedule::cascade_dependencies(&mut model, id);
@@ -2400,8 +2401,8 @@ struct DeletedBlockSnapshot {
 }
 
 /// Single-slot undo buffer. Holds the most recent destructive action: either a
-/// deletion batch, a move (group or single), or a paste. At most one slot is
-/// populated at any time; the newer action always overwrites the older.
+/// deletion batch, a move (group or single), a paste, or a batch property edit.
+/// At most one slot is populated at any time; the newer action always overwrites.
 #[derive(Resource, Default)]
 pub struct UndoStack {
     last_deletion: Option<Vec<DeletedBlockSnapshot>>,
@@ -2410,6 +2411,17 @@ pub struct UndoStack {
     last_move: Option<Vec<(WorkBlockId, i32, i32)>>,
     /// IDs of blocks created by the most recent paste. Undo = delete them all.
     last_paste: Option<Vec<WorkBlockId>>,
+    /// Pre-edit snapshots for the most recent batch property edit (multi-select).
+    last_batch_edit: Option<Vec<BatchEditSnapshot>>,
+}
+
+/// Snapshot of a single block's editable properties before a batch edit.
+struct BatchEditSnapshot {
+    id: WorkBlockId,
+    priority: u8,
+    t_shirt_size: Option<String>,
+    duration_days: Day,
+    color: Option<[f32; 3]>,
 }
 
 /// Clipboard for copy/paste. Stores a snapshot of copied block data (including
@@ -2530,6 +2542,7 @@ pub fn handle_block_delete(
             undo.last_deletion = Some(snaps);
             undo.last_move = None;
             undo.last_paste = None;
+            undo.last_batch_edit = None;
             for id in ids {
                 delete_work_block(&mut model, id);
             }
@@ -2584,6 +2597,18 @@ pub fn handle_undo(
         } else if let Some(pasted_ids) = undo.last_paste.take() {
             for id in pasted_ids {
                 delete_work_block(&mut model, id);
+            }
+            if let Err(e) = db::save_model(&conn, &model) {
+                error!("save_model failed: {e}");
+            }
+        } else if let Some(snaps) = undo.last_batch_edit.take() {
+            for snap in snaps {
+                if let Some(wb) = model.work_blocks.get_mut(&snap.id) {
+                    wb.priority = snap.priority;
+                    wb.t_shirt_size = snap.t_shirt_size;
+                    wb.duration_days = snap.duration_days;
+                    wb.color = snap.color;
+                }
             }
             if let Err(e) = db::save_model(&conn, &model) {
                 error!("save_model failed: {e}");
@@ -2767,6 +2792,7 @@ pub fn handle_paste(
     undo.last_paste = Some(new_ids.clone());
     undo.last_deletion = None;
     undo.last_move = None;
+    undo.last_batch_edit = None;
 
     // Select the newly pasted blocks.
     set.0 = new_ids.into_iter().collect();
@@ -4101,11 +4127,229 @@ pub fn block_inspector_flyout_ui(
     settings: Res<crate::SettingsState>,
     keys: Res<ButtonInput<KeyCode>>,
     conn: NonSend<rusqlite::Connection>,
+    mut set: ResMut<SelectedBlocks>,
+    mut undo: ResMut<UndoStack>,
 ) {
     // The settings fly-out owns the right slot while it is open.
     if settings.open {
         return;
     }
+
+    // ── Multi-select inspector (2+ blocks) ────────────────────────────────────
+    if set.0.len() > 1 {
+        state.bound = None;
+        let Ok(ctx) = contexts.ctx_mut() else { return };
+
+        let valid_ids: Vec<WorkBlockId> = {
+            let mut v: Vec<WorkBlockId> = set
+                .0
+                .iter()
+                .copied()
+                .filter(|id| model.work_blocks.contains_key(id))
+                .collect();
+            v.sort_unstable_by_key(|id| id.0);
+            v
+        };
+        if valid_ids.is_empty() {
+            return;
+        }
+
+        // Collect owned snapshots so that no borrow of `model` outlives the
+        // read phase; `get_mut` follows after the panel closure returns.
+        let snap_data: Vec<BatchEditSnapshot> = valid_ids
+            .iter()
+            .filter_map(|&id| {
+                model.work_blocks.get(&id).map(|wb| BatchEditSnapshot {
+                    id,
+                    priority: wb.priority,
+                    t_shirt_size: wb.t_shirt_size.clone(),
+                    duration_days: wb.duration_days,
+                    color: wb.color,
+                })
+            })
+            .collect();
+
+        let first_priority = snap_data[0].priority;
+        let priority_common: Option<u8> = if snap_data.iter().all(|s| s.priority == first_priority)
+        {
+            Some(first_priority)
+        } else {
+            None
+        };
+
+        let first_size = snap_data[0].t_shirt_size.clone();
+        let size_unanimous: Option<Option<String>> =
+            if snap_data.iter().all(|s| s.t_shirt_size == first_size) {
+                Some(first_size)
+            } else {
+                None
+            };
+
+        let first_color = snap_data[0].color;
+        let color_unanimous: Option<Option<[f32; 3]>> =
+            if snap_data.iter().all(|s| s.color == first_color) {
+                Some(first_color)
+            } else {
+                None
+            };
+
+        let any_has_color = snap_data.iter().any(|s| s.color.is_some());
+        let sizes = model.t_shirt_sizes.clone();
+        let count = valid_ids.len();
+
+        let mut chosen_size: Option<(String, Day)> = None;
+        let mut chosen_priority: Option<u8> = None;
+        let mut chosen_color: Option<Option<[f32; 3]>> = None;
+        let mut close = false;
+
+        egui::SidePanel::right("block_inspector_flyout")
+            .resizable(false)
+            .exact_width(272.0)
+            .frame(
+                egui::Frame::new()
+                    .fill(theme::PANEL)
+                    .stroke(egui::Stroke::new(1.0, theme::STROKE))
+                    .inner_margin(egui::Margin::same(14)),
+            )
+            .show(ctx, |ui| {
+                // ── Header ──────────────────────────────────────────────────
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new(format!("{count} blocks"))
+                            .size(16.0)
+                            .strong()
+                            .color(theme::TEXT),
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button(egui::RichText::new("✕").size(14.0)).clicked() {
+                            close = true;
+                        }
+                    });
+                });
+
+                // ── Size ────────────────────────────────────────────────────
+                inspector_section(ui, "SIZE");
+                let common_size_label: Option<&str> =
+                    size_unanimous.as_ref().and_then(|opt| opt.as_deref());
+                let sel_text = match &size_unanimous {
+                    None => "—Mixed—".to_string(),
+                    Some(None) => "—".to_string(),
+                    Some(Some(lbl)) => sizes
+                        .iter()
+                        .find(|s| &s.label == lbl)
+                        .map(|s| format!("{} · {}d", s.label, s.days))
+                        .unwrap_or_else(|| lbl.clone()),
+                };
+                egui::ComboBox::from_id_salt("batch_size_picker")
+                    .selected_text(sel_text)
+                    .width(ui.available_width())
+                    .show_ui(ui, |ui| {
+                        for size in &sizes {
+                            let is_cur = common_size_label == Some(size.label.as_str());
+                            let text = format!("{} · {}d", size.label, size.days);
+                            if ui.selectable_label(is_cur, text).clicked() {
+                                chosen_size = Some((size.label.clone(), size.days));
+                            }
+                        }
+                    });
+
+                // ── Priority ────────────────────────────────────────────────
+                inspector_section(ui, "PRIORITY");
+                ui.horizontal_wrapped(|ui| {
+                    for (i, label) in PRIORITY_LABELS.iter().enumerate() {
+                        let is_active = priority_common == Some(i as u8);
+                        let text = egui::RichText::new(*label).color(if is_active {
+                            theme::ACCENT
+                        } else {
+                            theme::TEXT_MUTED
+                        });
+                        if ui.selectable_label(is_active, text).clicked() {
+                            chosen_priority = Some(i as u8);
+                        }
+                    }
+                });
+
+                // ── Color ───────────────────────────────────────────────────
+                inspector_section(ui, "COLOR");
+                if color_unanimous.is_none() {
+                    ui.label(
+                        egui::RichText::new("(Mixed)")
+                            .color(theme::TEXT_MUTED)
+                            .italics(),
+                    );
+                }
+                egui::Frame::new()
+                    .fill(theme::PANEL_HI)
+                    .stroke(egui::Stroke::new(1.0, theme::STROKE))
+                    .corner_radius(egui::CornerRadius::same(4))
+                    .inner_margin(egui::Margin::symmetric(4, 4))
+                    .show(ui, |ui| {
+                        ui.horizontal_wrapped(|ui| {
+                            for swatch in PALETTE {
+                                let [r, g, b, _] = swatch.to_f32_array();
+                                let rgb = [r, g, b];
+                                let is_cur = color_unanimous == Some(Some(rgb));
+                                let mut btn = egui::Button::new("")
+                                    .fill(hdr_swatch_color(rgb))
+                                    .min_size(egui::vec2(26.0, 22.0))
+                                    .corner_radius(egui::CornerRadius::same(4));
+                                if is_cur {
+                                    btn = btn.stroke(egui::Stroke::new(2.0, egui::Color32::WHITE));
+                                }
+                                if ui.add(btn).clicked() {
+                                    chosen_color = Some(Some(rgb));
+                                }
+                            }
+                        });
+                    });
+                ui.add_space(4.0);
+                if any_has_color
+                    && ui
+                        .small_button(egui::RichText::new("Reset to default").color(theme::DANGER))
+                        .clicked()
+                {
+                    chosen_color = Some(None);
+                }
+            });
+
+        // Apply batch edits (outside the closure so we can call `get_mut`).
+        if chosen_size.is_some() || chosen_priority.is_some() || chosen_color.is_some() {
+            // `snap_data` is already the pre-edit snapshot; move it into undo.
+            let batch_snap = snap_data;
+
+            for &bid in &valid_ids {
+                if let Some(wb) = model.work_blocks.get_mut(&bid) {
+                    if let Some((ref label, days)) = chosen_size {
+                        wb.duration_days = days;
+                        wb.t_shirt_size = Some(label.clone());
+                    }
+                    if let Some(p) = chosen_priority {
+                        wb.priority = p;
+                    }
+                    if let Some(c) = chosen_color {
+                        wb.color = c;
+                    }
+                }
+            }
+
+            undo.last_batch_edit = Some(batch_snap);
+            undo.last_deletion = None;
+            undo.last_move = None;
+            undo.last_paste = None;
+
+            if let Err(e) = db::save_model(&conn, &model) {
+                error!("save_model failed: {e}");
+            }
+        }
+
+        if close {
+            set.0.clear();
+            selected.0 = None;
+        }
+
+        return;
+    }
+
     let Some(id) = selected.0 else {
         state.bound = None;
         return;
