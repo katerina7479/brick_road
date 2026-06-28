@@ -30,6 +30,19 @@ fn day_step_for_zoom(scale: f32) -> (i32, bool) {
     }
 }
 
+/// Minimum on-screen horizontal spacing (px) between adjacent day *numbers* in
+/// the calendar ruler — about a two-digit glyph plus breathing room.
+const MIN_DAY_LABEL_PX: f32 = 22.0;
+
+/// How many days to skip between drawn day *numbers* in the calendar ruler so
+/// adjacent numbers keep a comfortable gap, given the on-screen width of one day
+/// (`day_w`, px). The per-day ticks stay dense (they read as a fine grid); only
+/// the numbers thin out. `day_w >= 22` -> stride 1 (every day, when there's room);
+/// narrower columns stride 2, 3, ... so the numbers never touch.
+pub(crate) fn day_label_stride(day_w: f32) -> i32 {
+    (MIN_DAY_LABEL_PX / day_w).ceil().max(1.0) as i32
+}
+
 /// Formats a timeline day number as a human-readable date label.
 /// `month_only` → "Jun 2025";  otherwise → "Jun 16 '25".
 fn format_day_label(day: i32, month_only: bool, config: &crate::model::CalendarConfig) -> String {
@@ -369,6 +382,14 @@ mod tests {
         let (step, month_only) = day_step_for_zoom(5.0);
         assert_eq!(step, 30);
         assert!(month_only);
+    }
+
+    #[test]
+    fn day_label_stride_thins_as_columns_narrow() {
+        assert_eq!(day_label_stride(30.0), 1, "wide columns show every day");
+        assert_eq!(day_label_stride(22.0), 1, "at the min spacing, still every day");
+        assert_eq!(day_label_stride(13.0), 2, "cramped columns show every other day");
+        assert_eq!(day_label_stride(7.0), 4, "very narrow columns show every fourth day");
     }
 
     // ── compute_day_labels ───────────────────────────────────────────────────

@@ -1139,6 +1139,9 @@ fn calendar_ruler_ui(
             // Tier 4: Day numbers (1, 2, 3 …) centered in each day cell.
             if show_days {
                 let tick = egui::Stroke::new(1.0, egui::Color32::from_rgb(52, 56, 72));
+                // Thin the day *numbers* (not the ticks) so they keep a gap and
+                // never collide when columns get narrow.
+                let label_stride = labels::day_label_stride(day_w);
                 for d in day_min..=day_max {
                     let bx = world_to_screen_x(day_x(d));
                     painter.line_segment(
@@ -1148,6 +1151,11 @@ fn calendar_ruler_ui(
                         ],
                         tick,
                     );
+                    // Ticks stay dense; draw a number only every `label_stride`
+                    // days. Anchoring on `d` keeps drawn numbers evenly spaced.
+                    if d.rem_euclid(label_stride) != 0 {
+                        continue;
+                    }
                     let cx = world_to_screen_x(day_x(d) + PIXELS_PER_DAY * 0.5);
                     let date = calendar::day_to_date(d, config);
                     let color = if d < today.day { past_color } else { day_color };
@@ -1168,13 +1176,17 @@ fn calendar_ruler_ui(
                     if cx < rect.left() || cx > rect.right() {
                         continue;
                     }
-                    painter.text(
-                        egui::Pos2::new(cx, day_y),
-                        egui::Align2::CENTER_CENTER,
-                        format!("{}", date.day()),
-                        egui::FontId::proportional(10.5),
-                        holiday_num,
-                    );
+                    // Thin holiday numbers consistently with the regular days,
+                    // keyed off the holiday's own day index.
+                    if calendar::date_to_day(date, config).rem_euclid(label_stride) == 0 {
+                        painter.text(
+                            egui::Pos2::new(cx, day_y),
+                            egui::Align2::CENTER_CENTER,
+                            format!("{}", date.day()),
+                            egui::FontId::proportional(10.5),
+                            holiday_num,
+                        );
+                    }
                     if !desc.is_empty() {
                         let col_rect = egui::Rect::from_min_max(
                             egui::Pos2::new(sx, rect.top()),
