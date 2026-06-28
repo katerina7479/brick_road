@@ -1,0 +1,33 @@
+#!/bin/sh
+# brick_road pre-push hook — guard against unapproved schema changes.
+#
+# Runs scripts/check-schema-guard.sh for every branch being pushed.
+# Falls back to origin/main as the base when the branch is new on the remote.
+#
+# Enable in a fresh checkout (one time, per clone/worktree):
+#     git config core.hooksPath .githooks
+#
+# Bypass a single push (only with explicit owner approval):
+#     git push --no-verify
+
+ZERO_SHA="0000000000000000000000000000000000000000"
+
+while IFS=' ' read -r local_ref local_sha remote_ref remote_sha; do
+    # Deletion push — nothing to check.
+    [ "$local_sha" = "$ZERO_SHA" ] && continue
+
+    # Use the remote sha as base when the branch already exists on the remote
+    # (incremental push); fall back to origin/main for new branches.
+    if [ "$remote_sha" = "$ZERO_SHA" ]; then
+        base="origin/main"
+    else
+        base="$remote_sha"
+    fi
+
+    if ! "$(git rev-parse --show-toplevel)/scripts/check-schema-guard.sh" \
+            "$base" "$local_sha"; then
+        exit 1
+    fi
+done
+
+exit 0
