@@ -186,6 +186,20 @@ pub(crate) fn sprite_hit(transform: &Transform, sprite: &Sprite, world: Vec2) ->
 #[derive(Resource, Default)]
 pub struct SelectedBlock(pub Option<WorkBlockId>);
 
+/// Full selection set for multi-select. `SelectedBlock.0` is the anchor (most
+/// recently added member); empty set ⇒ `SelectedBlock.0 == None`.
+#[derive(Resource, Default)]
+pub struct SelectedBlocks(pub HashSet<WorkBlockId>);
+
+/// Transient rubber-band (marquee) drag state.
+#[derive(Resource, Default)]
+pub struct MarqueeState {
+    /// World-space corner where the drag started; `None` when inactive.
+    pub start: Option<Vec2>,
+    /// Current drag world-pos (updated each frame while held).
+    pub current: Vec2,
+}
+
 /// Tracks the currently selected dependency edge (for click-to-delete).
 #[derive(Resource, Default)]
 pub struct SelectedDependency(pub Option<model::DependencyId>);
@@ -517,7 +531,8 @@ pub fn sync_description_dots(
 ///   3. Palette default
 pub fn sync_block_sprites(
     model: Res<model::Model>,
-    selected: Res<SelectedBlock>,
+    _selected: Res<SelectedBlock>,
+    set: Res<SelectedBlocks>,
     today: Res<schedule::TodayMarker>,
     camera_q: Query<&Projection, With<Camera2d>>,
     mut query: Query<(&BlockSprite, &mut Transform, &mut Sprite)>,
@@ -552,7 +567,7 @@ pub fn sync_block_sprites(
         // Color hierarchy: user color > selected highlight > palette.
         sprite.color = if let Some([r, g, b]) = wb.color {
             Color::from(LinearRgba::new(r, g, b, 1.0))
-        } else if selected.0 == Some(id) {
+        } else if set.0.contains(&id) {
             Color::from(LinearRgba::new(
                 base.red * 2.0,
                 base.green * 2.0,
@@ -830,6 +845,125 @@ pub fn sync_block_labels(
     }
 }
 
+/// Returns the IDs of blocks whose world AABBs intersect `marquee`. Edge-touching counts.
+pub fn blocks_in_rect(blocks: &[(WorkBlockId, Rect)], marquee: Rect) -> HashSet<WorkBlockId> {
+    blocks
+        .iter()
+        .filter(|(_, r)| !marquee.intersect(*r).is_empty())
+        .map(|(id, _)| *id)
+        .collect()
+}
+
+/// Rubber-band (marquee) drag-select. Runs before `handle_block_selection`.
+///
+/// - Left-press on empty canvas → start marquee.
+/// - Held → update current world pos.
+/// - Release with movement ≥ 4 px → select intersecting blocks (replace, or
+///   union if Shift held). Release with movement < 4 px → deselect all.
+#[allow(clippy::too_many_arguments)]
+pub fn handle_marquee_select(
+    mut egui_ctx: EguiContexts,
+    windows: Query<&Window>,
+    camera: Query<(&Camera, &GlobalTransform)>,
+    mouse: Res<ButtonInput<MouseButton>>,
+    keys: Res<ButtonInput<KeyCode>>,
+    mut marquee: ResMut<MarqueeState>,
+    mut selected: ResMut<SelectedBlock>,
+    mut set: ResMut<SelectedBlocks>,
+    block_query: Query<(&BlockSprite, &Transform, &Sprite)>,
+    name_edit: Res<NameEditState>,
+    dep_drag: Res<DepDragState>,
+) {
+    // Yield when a dep-handle drag or rename is in progress.
+    if dep_drag.from.is_some() || name_edit.editing.is_some() {
+        marquee.start = None;
+        return;
+    }
+    if let Ok(ctx) = egui_ctx.ctx_mut() {
+        if ctx.is_pointer_over_area() {
+            marquee.start = None;
+            return;
+        }
+    }
+
+    let Ok(window) = windows.single() else { return };
+    let Ok((camera_c, camera_transform)) = camera.single() else {
+        return;
+    };
+    let Some(cursor_pos) = window.cursor_position() else {
+        return;
+    };
+    let Ok(world_pos) = camera_c.viewport_to_world_2d(camera_transform, cursor_pos) else {
+        return;
+    };
+
+    if mouse.just_pressed(MouseButton::Left) {
+        // Only start marquee if the press hits empty canvas (no block).
+        let hits_block = block_query
+            .iter()
+            .any(|(_, t, s)| sprite_hit(t, s, world_pos));
+        if !hits_block {
+            marquee.start = Some(world_pos);
+            marquee.current = world_pos;
+        }
+        return;
+    }
+
+    if mouse.pressed(MouseButton::Left) {
+        if marquee.start.is_some() {
+            marquee.current = world_pos;
+        }
+        return;
+    }
+
+    if mouse.just_released(MouseButton::Left) {
+        if let Some(start) = marquee.start.take() {
+            let delta = (marquee.current - start).length();
+            if delta >= 4.0 {
+                // Commit marquee selection.
+                let marquee_rect =
+                    Rect::from_corners(start.min(marquee.current), start.max(marquee.current));
+                let block_aabbs: Vec<(WorkBlockId, Rect)> = block_query
+                    .iter()
+                    .filter_map(|(bs, t, s)| {
+                        let size = s.custom_size?;
+                        let center = t.translation.truncate();
+                        let half = size * 0.5;
+                        Some((
+                            bs.work_block_id,
+                            Rect::from_corners(center - half, center + half),
+                        ))
+                    })
+                    .collect();
+                let hit = blocks_in_rect(&block_aabbs, marquee_rect);
+                let shift = keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]);
+                if shift {
+                    set.0.extend(hit);
+                } else {
+                    set.0 = hit;
+                }
+                selected.0 = set.0.iter().next().copied();
+            } else {
+                // Click (no real drag): deselect all.
+                set.0.clear();
+                selected.0 = None;
+            }
+        }
+    }
+}
+
+/// Draws the active marquee rectangle as a cyan gizmo outline.
+pub fn draw_marquee(marquee: Res<MarqueeState>, mut gizmos: Gizmos) {
+    let Some(start) = marquee.start else { return };
+    let min = start.min(marquee.current);
+    let max = start.max(marquee.current);
+    let color = Color::srgba(0.35, 0.88, 0.86, 0.7);
+    gizmos.line_2d(Vec2::new(min.x, min.y), Vec2::new(max.x, min.y), color);
+    gizmos.line_2d(Vec2::new(max.x, min.y), Vec2::new(max.x, max.y), color);
+    gizmos.line_2d(Vec2::new(max.x, max.y), Vec2::new(min.x, max.y), color);
+    gizmos.line_2d(Vec2::new(min.x, max.y), Vec2::new(min.x, min.y), color);
+}
+
 /// Converts a left-click to a block selection.
 ///
 /// Clicks that land inside egui areas (e.g. the side panel) are ignored.
@@ -842,9 +976,12 @@ pub fn handle_block_selection(
     camera: Query<(&Camera, &GlobalTransform)>,
     cam_proj: Query<&Projection, With<Camera2d>>,
     mouse: Res<ButtonInput<MouseButton>>,
+    keys: Res<ButtonInput<KeyCode>>,
     mut selected: ResMut<SelectedBlock>,
     mut selected_dep: ResMut<SelectedDependency>,
     mut selected_plan: ResMut<crate::SelectedPlan>,
+    mut set: ResMut<SelectedBlocks>,
+    marquee: Res<MarqueeState>,
     block_query: Query<(&BlockSprite, &Transform, &Sprite)>,
     name_edit: Res<NameEditState>,
     model: Res<model::Model>,
@@ -913,12 +1050,28 @@ pub fn handle_block_selection(
     }
 
     if let Some(id) = clicked {
-        // Re-clicking the selected block toggles it off; otherwise select it.
-        selected.0 = if Some(id) == selected.0 {
-            None
+        let shift = keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]);
+        let ctrl = keys.any_pressed([
+            KeyCode::ControlLeft,
+            KeyCode::ControlRight,
+            KeyCode::SuperLeft,
+            KeyCode::SuperRight,
+        ]);
+        if shift || ctrl {
+            // Toggle id in the multi-select set.
+            if set.0.contains(&id) {
+                set.0.remove(&id);
+                selected.0 = set.0.iter().next().copied();
+            } else {
+                set.0.insert(id);
+                selected.0 = Some(id);
+            }
         } else {
-            Some(id)
-        };
+            // Plain click: replace selection with just this block.
+            set.0.clear();
+            set.0.insert(id);
+            selected.0 = Some(id);
+        }
         selected_dep.0 = None;
     } else {
         // A dependency edge under the cursor takes priority — select it (for delete).
@@ -926,12 +1079,16 @@ pub fn handle_block_selection(
         if let Some(dep_id) = nearest_dep_edge(&model, world_pos, 7.0 * scale) {
             selected_dep.0 = Some(dep_id);
             selected.0 = None;
+            set.0.clear();
             return;
         }
         selected_dep.0 = None;
-        // Empty space: deselect. (Double-click-to-create lives in
-        // `handle_canvas_create`.)
-        selected.0 = None;
+        // Empty canvas press: marquee_select handles deselect on release;
+        // do not clear selection here while a marquee may be forming.
+        if marquee.start.is_none() {
+            set.0.clear();
+            selected.0 = None;
+        }
     }
 }
 
@@ -2169,11 +2326,11 @@ struct DeletedBlockSnapshot {
     reparented_children: Vec<WorkBlockId>,
 }
 
-/// Single-slot undo buffer for block deletions. Holds the most recent deletion;
-/// overwritten on each delete; consumed by undo.
+/// Single-slot undo buffer for block deletions. Holds the most recent deletion
+/// batch (one or more blocks); overwritten on each delete; consumed by undo.
 #[derive(Resource, Default)]
 pub struct UndoStack {
-    last_deletion: Option<DeletedBlockSnapshot>,
+    last_deletion: Option<Vec<DeletedBlockSnapshot>>,
 }
 
 fn build_deletion_snapshot(model: &model::Model, id: WorkBlockId) -> DeletedBlockSnapshot {
@@ -2242,9 +2399,10 @@ fn restore_deletion_snapshot(model: &mut model::Model, snap: DeletedBlockSnapsho
     }
 }
 
-/// Detects Delete/Backspace and immediately removes the selected block from the
-/// model. Runs in Update BEFORE `update_visible_blocks` so sprite reconciliation
-/// fires in the same frame — this avoids the timing bug where a deletion in
+/// Detects Delete/Backspace and immediately removes the selected block(s) from
+/// the model. Deletes the whole `SelectedBlocks` set in one batch. Runs in
+/// Update BEFORE `update_visible_blocks` so sprite reconciliation fires in the
+/// same frame — this avoids the timing bug where a deletion in
 /// `EguiPrimaryContextPass` would be invisible to `is_changed()` the next frame.
 #[allow(clippy::too_many_arguments)]
 pub fn handle_block_delete(
@@ -2252,6 +2410,7 @@ pub fn handle_block_delete(
     keyboard: Res<ButtonInput<KeyCode>>,
     mut selected: ResMut<SelectedBlock>,
     mut selected_dep: ResMut<SelectedDependency>,
+    mut set: ResMut<SelectedBlocks>,
     name_edit: Res<NameEditState>,
     mut model: ResMut<model::Model>,
     mut undo: ResMut<UndoStack>,
@@ -2266,18 +2425,26 @@ pub fn handle_block_delete(
         }
     }
     if keyboard.just_pressed(KeyCode::Delete) || keyboard.just_pressed(KeyCode::Backspace) {
-        // A selected dependency edge deletes first; otherwise delete the block.
+        // A selected dependency edge deletes first; otherwise delete the block(s).
         if let Some(dep_id) = selected_dep.0.take() {
             model.dependencies.remove(&dep_id);
             if let Err(e) = db::save_model(&conn, &model) {
                 error!("save_model failed: {e}");
             }
-        } else if let Some(id) = selected.0 {
-            undo.last_deletion = Some(build_deletion_snapshot(&model, id));
-            delete_work_block(&mut model, id);
+        } else if !set.0.is_empty() {
+            let ids: Vec<WorkBlockId> = set.0.iter().copied().collect();
+            let snaps: Vec<DeletedBlockSnapshot> = ids
+                .iter()
+                .map(|&id| build_deletion_snapshot(&model, id))
+                .collect();
+            undo.last_deletion = Some(snaps);
+            for id in ids {
+                delete_work_block(&mut model, id);
+            }
             if let Err(e) = db::save_model(&conn, &model) {
                 error!("save_model failed: {e}");
             }
+            set.0.clear();
             selected.0 = None;
         }
     }
@@ -2303,8 +2470,10 @@ pub fn handle_undo(
     let ctrl = keyboard.any_pressed([KeyCode::ControlLeft, KeyCode::ControlRight])
         || keyboard.any_pressed([KeyCode::SuperLeft, KeyCode::SuperRight]);
     if ctrl && keyboard.just_pressed(KeyCode::KeyZ) {
-        if let Some(snap) = undo.last_deletion.take() {
-            restore_deletion_snapshot(&mut model, snap);
+        if let Some(snaps) = undo.last_deletion.take() {
+            for snap in snaps {
+                restore_deletion_snapshot(&mut model, snap);
+            }
             if let Err(e) = db::save_model(&conn, &model) {
                 error!("save_model failed: {e}");
             }
@@ -3083,6 +3252,59 @@ mod tests {
             computed, holiday_left_x,
             "resource helper must match holiday_columns for the same set"
         );
+    }
+
+    // ── blocks_in_rect ────────────────────────────────────────────────────────
+
+    #[test]
+    fn marquee_includes_overlapping_blocks() {
+        let id_a = WorkBlockId(1);
+        let id_b = WorkBlockId(2);
+        let id_c = WorkBlockId(3);
+        let blocks = vec![
+            (
+                id_a,
+                Rect::from_corners(Vec2::new(0.0, 0.0), Vec2::new(10.0, 5.0)),
+            ),
+            (
+                id_b,
+                Rect::from_corners(Vec2::new(20.0, 0.0), Vec2::new(30.0, 5.0)),
+            ),
+            (
+                id_c,
+                Rect::from_corners(Vec2::new(8.0, 0.0), Vec2::new(22.0, 5.0)),
+            ),
+        ];
+        let marquee = Rect::from_corners(Vec2::new(5.0, -1.0), Vec2::new(15.0, 6.0));
+        let result = blocks_in_rect(&blocks, marquee);
+        assert!(result.contains(&id_a));
+        assert!(!result.contains(&id_b));
+        assert!(result.contains(&id_c));
+    }
+
+    #[test]
+    fn marquee_includes_one_pixel_overlap() {
+        let id_a = WorkBlockId(1);
+        let blocks = vec![(
+            id_a,
+            Rect::from_corners(Vec2::new(10.0, 0.0), Vec2::new(20.0, 5.0)),
+        )];
+        // Marquee overlaps block by 1px — should be selected.
+        let marquee = Rect::from_corners(Vec2::new(0.0, 0.0), Vec2::new(11.0, 5.0));
+        let result = blocks_in_rect(&blocks, marquee);
+        assert!(result.contains(&id_a));
+    }
+
+    #[test]
+    fn marquee_excludes_non_overlapping() {
+        let id_a = WorkBlockId(1);
+        let blocks = vec![(
+            id_a,
+            Rect::from_corners(Vec2::new(50.0, 0.0), Vec2::new(60.0, 5.0)),
+        )];
+        let marquee = Rect::from_corners(Vec2::new(0.0, 0.0), Vec2::new(10.0, 5.0));
+        let result = blocks_in_rect(&blocks, marquee);
+        assert!(result.is_empty());
     }
 }
 

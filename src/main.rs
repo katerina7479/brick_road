@@ -43,6 +43,8 @@ fn main() {
         .insert_resource(blocks::ResizeDragState::default())
         .insert_resource(blocks::DepDragState::default())
         .insert_resource(blocks::UndoStack::default())
+        .insert_resource(blocks::SelectedBlocks::default())
+        .insert_resource(blocks::MarqueeState::default())
         .insert_resource(blocks::CreateModeState::default())
         .insert_resource(blocks::BlockInspectorState::default())
         .insert_resource(schedule::VisibleBlocks::default())
@@ -185,6 +187,13 @@ fn main() {
             blocks::handle_create_mode_toggle.after(blocks::handle_block_drill),
         )
         .add_systems(Update, blocks::handle_create_mode_click_exit)
+        .add_systems(
+            Update,
+            blocks::handle_marquee_select
+                .after(blocks::handle_block_drill)
+                .before(blocks::handle_block_selection),
+        )
+        .add_systems(Update, blocks::draw_marquee)
         .add_systems(
             Update,
             blocks::handle_block_selection.after(blocks::handle_block_drill),
