@@ -4170,12 +4170,12 @@ pub fn block_inspector_flyout_ui(
             .collect();
 
         let first_priority = snap_data[0].priority;
-        let priority_common: Option<u8> =
-            if snap_data.iter().all(|s| s.priority == first_priority) {
-                Some(first_priority)
-            } else {
-                None
-            };
+        let priority_common: Option<u8> = if snap_data.iter().all(|s| s.priority == first_priority)
+        {
+            Some(first_priority)
+        } else {
+            None
+        };
 
         let first_size = snap_data[0].t_shirt_size.clone();
         let size_unanimous: Option<Option<String>> =
