@@ -1713,7 +1713,7 @@ mod tests {
         // S has a block it created itself (not in old main). After rebase it
         // must still be in S's root_blocks.
         let mut m = Model::default();
-        let main = m.create_plan("main", None);
+        let _main = m.create_plan("main", None);
         let accepted = m.fork_main(0).unwrap();
         let sibling = m.fork_main(0).unwrap();
         let s_owned = m.add_block_to_plan(sibling, "s_owned", 15, 3, 0);
@@ -1782,7 +1782,7 @@ mod tests {
         // Accepted B (fork=5) has an owned block at start_day=7.
         // Sibling S (fork=10) must NOT inherit that block (7 < 10).
         let mut m = Model::default();
-        let main = m.create_plan("main", None);
+        let _main = m.create_plan("main", None);
         let accepted = m.fork_main(5).unwrap();
         let sibling = m.fork_main(10).unwrap();
         let b_early = m.add_block_to_plan(accepted, "early", 7, 3, 0);
@@ -1805,7 +1805,7 @@ mod tests {
         // S has its own block at start_day=20; B also has an owned block at
         // start_day=20. After accept they are different IDs and both appear in S.
         let mut m = Model::default();
-        let main = m.create_plan("main", None);
+        let _main = m.create_plan("main", None);
         let accepted = m.fork_main(0).unwrap();
         let sibling = m.fork_main(0).unwrap();
         let s_own = m.add_block_to_plan(sibling, "s_block", 20, 5, 0);
@@ -1885,7 +1885,7 @@ mod tests {
     fn rebase_sibling_lane_seeded_from_main_for_new_ghost() {
         // A promoted block gets main's lane (block_row) in the sibling.
         let mut m = Model::default();
-        let main = m.create_plan("main", None);
+        let _main = m.create_plan("main", None);
         let accepted = m.fork_main(0).unwrap();
         let sibling = m.fork_main(0).unwrap();
         let b_owned = m.add_block_to_plan(accepted, "b_owned", 10, 5, 3); // lane 3 in B
