@@ -261,6 +261,26 @@ pub fn fit_to_blocks(
     ))
 }
 
+/// Exponentially smooths the actual camera transform toward `CameraTarget`.
+/// Must run after `update_camera_target`.
+pub fn smooth_camera(
+    target: Res<CameraTarget>,
+    mut cam_q: Query<(&mut Transform, &mut Projection), With<Camera2d>>,
+    time: Res<Time>,
+) {
+    let alpha = 1.0 - (-14.0 * time.delta_secs()).exp();
+    let Ok((mut transform, mut proj)) = cam_q.single_mut() else {
+        return;
+    };
+
+    transform.translation.x += (target.pos.x - transform.translation.x) * alpha;
+    transform.translation.y += (target.pos.y - transform.translation.y) * alpha;
+
+    if let Projection::Orthographic(ref mut ortho) = *proj {
+        ortho.scale += (target.zoom - ortho.scale) * alpha;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -376,25 +396,5 @@ mod tests {
         let expected_pos_y = y_max - (h * 0.5 - HOME_TOP_MARGIN) * t.zoom;
         assert!((t.pos.x - expected_pos_x).abs() < 1e-4);
         assert!((t.pos.y - expected_pos_y).abs() < 1e-4);
-    }
-}
-
-/// Exponentially smooths the actual camera transform toward `CameraTarget`.
-/// Must run after `update_camera_target`.
-pub fn smooth_camera(
-    target: Res<CameraTarget>,
-    mut cam_q: Query<(&mut Transform, &mut Projection), With<Camera2d>>,
-    time: Res<Time>,
-) {
-    let alpha = 1.0 - (-14.0 * time.delta_secs()).exp();
-    let Ok((mut transform, mut proj)) = cam_q.single_mut() else {
-        return;
-    };
-
-    transform.translation.x += (target.pos.x - transform.translation.x) * alpha;
-    transform.translation.y += (target.pos.y - transform.translation.y) * alpha;
-
-    if let Projection::Orthographic(ref mut ortho) = *proj {
-        ortho.scale += (target.zoom - ortho.scale) * alpha;
     }
 }

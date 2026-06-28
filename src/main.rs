@@ -2865,8 +2865,10 @@ mod tests {
 
     #[test]
     fn period_bands_start_jan_produces_bands() {
-        let mut cfg = model::CalendarConfig::default();
-        cfg.start_date = NaiveDate::from_ymd_opt(2025, 1, 1).unwrap();
+        let cfg = model::CalendarConfig {
+            start_date: NaiveDate::from_ymd_opt(2025, 1, 1).unwrap(),
+            ..model::CalendarConfig::default()
+        };
         // 130 working days covers Jan–Jun 2025.
         let bands = period_band_spans(&cfg, 130);
         assert!(!bands.is_empty(), "should produce at least one month band");
@@ -2878,8 +2880,10 @@ mod tests {
 
     #[test]
     fn period_bands_use_builtin_quarter_tints() {
-        let mut cfg = model::CalendarConfig::default();
-        cfg.start_date = NaiveDate::from_ymd_opt(2025, 1, 1).unwrap();
+        let cfg = model::CalendarConfig {
+            start_date: NaiveDate::from_ymd_opt(2025, 1, 1).unwrap(),
+            ..model::CalendarConfig::default()
+        };
         let bands = period_band_spans(&cfg, 25);
         // Jan is Q1, first month → Q1 tint at full QUARTER_TINT_ALPHA.
         let (_, _, color) = bands[0];
@@ -2889,8 +2893,10 @@ mod tests {
 
     #[test]
     fn period_bands_alternating_alpha() {
-        let mut cfg = model::CalendarConfig::default();
-        cfg.start_date = NaiveDate::from_ymd_opt(2025, 1, 1).unwrap();
+        let cfg = model::CalendarConfig {
+            start_date: NaiveDate::from_ymd_opt(2025, 1, 1).unwrap(),
+            ..model::CalendarConfig::default()
+        };
         // Span enough to cover Jan and Feb (both Q1: month_in_quarter 0 and 1).
         let bands = period_band_spans(&cfg, 45);
         // Jan is month_in_quarter=0 (even): full alpha.
