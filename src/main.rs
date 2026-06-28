@@ -43,6 +43,7 @@ fn main() {
         .insert_resource(blocks::ResizeDragState::default())
         .insert_resource(blocks::DepDragState::default())
         .insert_resource(blocks::UndoStack::default())
+        .insert_resource(blocks::Clipboard::default())
         .insert_resource(blocks::SelectedBlocks::default())
         .insert_resource(blocks::MarqueeState::default())
         .insert_resource(blocks::CreateModeState::default())
@@ -161,7 +162,8 @@ fn main() {
                 .before(blocks::draw_dependency_edges)
                 .before(blocks::draw_block_handles)
                 .after(blocks::handle_block_delete)
-                .after(blocks::handle_undo),
+                .after(blocks::handle_undo)
+                .after(blocks::handle_paste),
         )
         .add_systems(Update, blocks::handle_block_drill)
         .add_systems(Update, blocks::handle_drill_out)
@@ -182,6 +184,8 @@ fn main() {
             blocks::handle_block_delete.after(blocks::handle_block_drill),
         )
         .add_systems(Update, blocks::handle_undo)
+        .add_systems(Update, blocks::handle_copy)
+        .add_systems(Update, blocks::handle_paste.after(blocks::handle_copy))
         .add_systems(
             Update,
             blocks::handle_create_mode_toggle.after(blocks::handle_block_drill),
