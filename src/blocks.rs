@@ -2494,6 +2494,14 @@ struct BatchEditSnapshot {
     color: Option<[f32; 3]>,
 }
 
+/// `Some(v)` when every item equals the first, `None` when they differ or the
+/// iterator is empty. The kernel of batch-edit mixed-state detection: a property
+/// shared across the whole selection shows its value; a mixed one shows "—".
+fn unanimous<'a, T: PartialEq + Clone + 'a>(mut iter: impl Iterator<Item = &'a T>) -> Option<T> {
+    let first = iter.next()?;
+    iter.all(|v| v == first).then(|| first.clone())
+}
+
 /// Clipboard for copy/paste. Stores a snapshot of copied block data (including
 /// the full descendant subtree of every selected block) and the dependencies
 /// internal to that set. Cross-plan: paste always creates new owned blocks.
@@ -2918,6 +2926,19 @@ pub fn delete_work_block(model: &mut model::Model, id: WorkBlockId) {
 mod tests {
     use super::*;
     use crate::model::Model;
+
+    #[test]
+    fn unanimous_detects_shared_vs_mixed() {
+        // All equal -> the shared value; any difference -> None; empty -> None.
+        assert_eq!(unanimous([2u8, 2, 2].iter()), Some(2));
+        assert_eq!(unanimous([2u8, 3, 2].iter()), None);
+        assert_eq!(unanimous(std::iter::empty::<&u8>()), None);
+        // The Option types the batch editor actually compares.
+        let same = [Some("M".to_string()), Some("M".to_string())];
+        assert_eq!(unanimous(same.iter()), Some(Some("M".to_string())));
+        let mixed = [Some("M".to_string()), None];
+        assert_eq!(unanimous(mixed.iter()), None);
+    }
 
     #[test]
     fn delete_simple_block_removes_it() {
@@ -4197,29 +4218,11 @@ pub fn block_inspector_flyout_ui(
             })
             .collect();
 
-        let first_priority = snap_data[0].priority;
-        let priority_common: Option<u8> = if snap_data.iter().all(|s| s.priority == first_priority)
-        {
-            Some(first_priority)
-        } else {
-            None
-        };
-
-        let first_size = snap_data[0].t_shirt_size.clone();
+        let priority_common: Option<u8> = unanimous(snap_data.iter().map(|s| &s.priority));
         let size_unanimous: Option<Option<String>> =
-            if snap_data.iter().all(|s| s.t_shirt_size == first_size) {
-                Some(first_size)
-            } else {
-                None
-            };
-
-        let first_color = snap_data[0].color;
+            unanimous(snap_data.iter().map(|s| &s.t_shirt_size));
         let color_unanimous: Option<Option<[f32; 3]>> =
-            if snap_data.iter().all(|s| s.color == first_color) {
-                Some(first_color)
-            } else {
-                None
-            };
+            unanimous(snap_data.iter().map(|s| &s.color));
 
         let any_has_color = snap_data.iter().any(|s| s.color.is_some());
         let sizes = model.t_shirt_sizes.clone();
