@@ -12,7 +12,7 @@ use crate::{
     constants::{PIXELS_PER_DAY, ROW_HEIGHT},
     db, graph,
     model::{self, Day, DependencyType, PlanId, WorkBlockId},
-    schedule,
+    schedule, theme,
 };
 
 const BLOCK_HEIGHT: f32 = 28.0;
@@ -3481,8 +3481,8 @@ pub fn block_inspector_flyout_ui(
         .exact_width(272.0)
         .frame(
             egui::Frame::new()
-                .fill(egui::Color32::from_rgb(26, 20, 12))
-                .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(60, 46, 26)))
+                .fill(theme::PANEL)
+                .stroke(egui::Stroke::new(1.0, theme::STROKE))
                 .inner_margin(egui::Margin::same(14)),
         )
         .show(ctx, |ui| {
