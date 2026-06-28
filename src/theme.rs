@@ -23,7 +23,6 @@ pub const DANGER: Color32 = Color32::from_rgb(220, 92, 80); // destructive (Clea
 
 /// Section header: caps label in TEXT_MUTED + optional right-aligned count in
 /// ACCENT + a thin STROKE rule spanning the full row below.
-#[allow(dead_code)] // consumed by br-256/257/258
 pub fn section_header(ui: &mut Ui, title: &str, count: Option<usize>) {
     ui.horizontal(|ui| {
         ui.label(RichText::new(title).size(11.0).color(TEXT_MUTED));
@@ -44,7 +43,6 @@ pub fn section_header(ui: &mut Ui, title: &str, count: Option<usize>) {
 
 /// Small monospace chip: PANEL_HI background, STROKE border, ACCENT text.
 /// Used for compact data labels (`5 / 7`, date chips `07·04`).
-#[allow(dead_code)] // consumed by br-256/257/258
 pub fn chip(ui: &mut Ui, text: &str) -> Response {
     ui.add(
         egui::Button::new(
@@ -60,7 +58,6 @@ pub fn chip(ui: &mut Ui, text: &str) -> Response {
 
 /// Bordered pill button for the top bar (TODAY, Fit, Home…).
 /// `active` → ACCENT_GLOW border + glow fill; inactive → dim STROKE border.
-#[allow(dead_code)] // consumed by br-257
 pub fn pill_button(ui: &mut Ui, label: &str, active: bool) -> Response {
     let text = RichText::new(label)
         .size(12.5)
@@ -81,7 +78,6 @@ pub fn pill_button(ui: &mut Ui, label: &str, active: bool) -> Response {
 }
 
 /// Compact cyan-bordered `+` add-button for add-rows (holidays, sizes, resources).
-#[allow(dead_code)] // consumed by br-256/257/258
 pub fn add_button(ui: &mut Ui) -> Response {
     ui.add(
         egui::Button::new(RichText::new("+").size(14.0).color(ACCENT))
@@ -93,7 +89,6 @@ pub fn add_button(ui: &mut Ui) -> Response {
 
 /// Bordered PANEL_HI container row for list items (holidays, sizes, resources).
 /// Caller layouts content inside; returns `InnerResponse` for response chaining.
-#[allow(dead_code)] // consumed by br-256/257/258
 pub fn list_row<R>(ui: &mut Ui, add_contents: impl FnOnce(&mut Ui) -> R) -> egui::InnerResponse<R> {
     egui::Frame::new()
         .fill(PANEL_HI)
