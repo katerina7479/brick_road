@@ -1848,7 +1848,7 @@ struct HolidayGroup {
 /// as one entry. Result is ordered by start date.
 fn group_holidays(dates: &[model::NonWorkingDate]) -> Vec<HolidayGroup> {
     let mut sorted = dates.to_vec();
-    sorted.sort_by(|a, b| a.date.cmp(&b.date));
+    sorted.sort_by_key(|nwd| nwd.date);
     let mut groups: Vec<HolidayGroup> = Vec::new();
     for nwd in sorted {
         if let Some(g) = groups.last_mut() {
