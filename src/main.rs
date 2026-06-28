@@ -1835,6 +1835,39 @@ fn settings_row(ui: &mut egui::Ui, label: &str, add_control: impl FnOnce(&mut eg
     });
 }
 
+/// A run of consecutive calendar days that share a label — one logical holiday.
+struct HolidayGroup {
+    start: chrono::NaiveDate,
+    end: chrono::NaiveDate,
+    description: String,
+    dates: Vec<chrono::NaiveDate>,
+}
+
+/// Groups non-working dates into runs of consecutive calendar days that share a
+/// description, so a multi-day holiday stored as N daily rows shows and removes
+/// as one entry. Result is ordered by start date.
+fn group_holidays(dates: &[model::NonWorkingDate]) -> Vec<HolidayGroup> {
+    let mut sorted = dates.to_vec();
+    sorted.sort_by_key(|nwd| nwd.date);
+    let mut groups: Vec<HolidayGroup> = Vec::new();
+    for nwd in sorted {
+        if let Some(g) = groups.last_mut() {
+            if g.description == nwd.description && g.end.succ_opt() == Some(nwd.date) {
+                g.end = nwd.date;
+                g.dates.push(nwd.date);
+                continue;
+            }
+        }
+        groups.push(HolidayGroup {
+            start: nwd.date,
+            end: nwd.date,
+            description: nwd.description.clone(),
+            dates: vec![nwd.date],
+        });
+    }
+    groups
+}
+
 /// Right-side settings fly-out. Toggled by the top-bar gear. Holds general
 /// settings; the first section is the calendar (working days per week, the
 /// holiday list, and the start date). Edits write straight to `model.calendar`
@@ -1934,28 +1967,33 @@ fn settings_flyout_ui(
 
                     // Holidays / non-working dates.
                     ui.add_space(SETTINGS_SECTION_GAP);
-                    let holiday_count = model.calendar.non_working_dates.len();
-                    theme::section_header(ui, "HOLIDAYS", Some(holiday_count));
+                    let groups = group_holidays(&model.calendar.non_working_dates);
+                    theme::section_header(ui, "HOLIDAYS", Some(groups.len()));
 
-                    let mut dates = model.calendar.non_working_dates.clone();
-                    dates.sort_by_key(|nwd| nwd.date);
-                    if dates.is_empty() {
+                    if groups.is_empty() {
                         ui.label(
                             egui::RichText::new("None set")
                                 .italics()
                                 .color(theme::TEXT_MUTED),
                         );
                     }
-                    let mut remove: Option<chrono::NaiveDate> = None;
-                    for nwd in &dates {
+                    // Each run of consecutive same-label days shows and removes as
+                    // one entry (a multi-day holiday is stored as N daily rows).
+                    let mut remove_group: Option<Vec<chrono::NaiveDate>> = None;
+                    for g in &groups {
                         theme::list_row(ui, |ui| {
                             ui.horizontal(|ui| {
-                                theme::chip(ui, &nwd.date.format("%m·%d").to_string());
+                                let span = if g.start == g.end {
+                                    g.start.format("%m·%d").to_string()
+                                } else {
+                                    format!("{}–{}", g.start.format("%m·%d"), g.end.format("%m·%d"))
+                                };
+                                theme::chip(ui, &span);
                                 ui.add_space(4.0);
-                                let desc = if nwd.description.is_empty() {
+                                let desc = if g.description.is_empty() {
                                     "—"
                                 } else {
-                                    &nwd.description
+                                    &g.description
                                 };
                                 ui.label(egui::RichText::new(desc).color(theme::TEXT_MUTED));
                                 ui.with_layout(
@@ -1967,7 +2005,7 @@ fn settings_flyout_ui(
                                             )
                                             .clicked()
                                         {
-                                            remove = Some(nwd.date);
+                                            remove_group = Some(g.dates.clone());
                                         }
                                     },
                                 );
@@ -1975,21 +2013,40 @@ fn settings_flyout_ui(
                         });
                         ui.add_space(2.0);
                     }
-                    if let Some(d) = remove {
-                        model.calendar.non_working_dates.retain(|x| x.date != d);
+                    if let Some(dts) = remove_group {
+                        model
+                            .calendar
+                            .non_working_dates
+                            .retain(|x| !dts.contains(&x.date));
                         changed = true;
                     }
 
                     ui.add_space(SETTINGS_ROW_GAP);
-                    // Add-row 1: visual date picker (replaces YYYY-MM-DD typing).
-                    // Defaults to the plan start date until the user picks one.
-                    let mut picked = settings.holiday_date.unwrap_or(model.calendar.start_date);
-                    if ui
-                        .add(egui_extras::DatePickerButton::new(&mut picked))
-                        .changed()
-                    {
-                        settings.holiday_date = Some(picked);
-                    }
+                    // Add-row 1: start–end pickers. End defaults to start, so just
+                    // picking a start adds one day; pick a later end for a range
+                    // (e.g. Christmas Dec 24–26, or a shutdown week).
+                    let mut start = settings.holiday_date.unwrap_or(model.calendar.start_date);
+                    let mut end = settings.holiday_end_date.unwrap_or(start);
+                    ui.horizontal(|ui| {
+                        if ui
+                            .add(
+                                egui_extras::DatePickerButton::new(&mut start)
+                                    .id_salt("holiday_start"),
+                            )
+                            .changed()
+                        {
+                            settings.holiday_date = Some(start);
+                        }
+                        ui.label(egui::RichText::new("→").color(theme::TEXT_MUTED));
+                        if ui
+                            .add(
+                                egui_extras::DatePickerButton::new(&mut end).id_salt("holiday_end"),
+                            )
+                            .changed()
+                        {
+                            settings.holiday_end_date = Some(end);
+                        }
+                    });
                     // Add-row 2: description (constrained fraction) + add_button.
                     let (resp_desc, submit) = ui
                         .horizontal(|ui| {
@@ -2006,23 +2063,37 @@ fn settings_flyout_ui(
                     let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
                     let submit = submit || (resp_desc.lost_focus() && enter);
                     if submit {
-                        if let Some(date) = settings.holiday_date {
-                            if !model
-                                .calendar
-                                .non_working_dates
-                                .iter()
-                                .any(|x| x.date == date)
-                            {
-                                model
-                                    .calendar
-                                    .non_working_dates
-                                    .push(model::NonWorkingDate {
-                                        date,
-                                        description: settings.holiday_desc_input.trim().to_string(),
-                                    });
-                                changed = true;
+                        if let Some(start) = settings.holiday_date {
+                            // Clamp: end >= start, capped to a year so a mis-pick
+                            // can't insert thousands of rows.
+                            let end = settings
+                                .holiday_end_date
+                                .unwrap_or(start)
+                                .max(start)
+                                .min(start + chrono::Duration::days(366));
+                            let desc = settings.holiday_desc_input.trim().to_string();
+                            let mut d = start;
+                            loop {
+                                if !model.calendar.non_working_dates.iter().any(|x| x.date == d) {
+                                    model
+                                        .calendar
+                                        .non_working_dates
+                                        .push(model::NonWorkingDate {
+                                            date: d,
+                                            description: desc.clone(),
+                                        });
+                                    changed = true;
+                                }
+                                if d >= end {
+                                    break;
+                                }
+                                match d.succ_opt() {
+                                    Some(n) => d = n,
+                                    None => break,
+                                }
                             }
                             settings.holiday_date = None;
+                            settings.holiday_end_date = None;
                             settings.holiday_desc_input.clear();
                         }
                     }
@@ -2535,8 +2606,10 @@ pub struct RowRename {
 #[derive(Resource, Default)]
 pub struct SettingsState {
     pub open: bool,
-    /// The date currently selected in the HOLIDAYS date-picker, if any.
+    /// Start date selected in the HOLIDAYS range picker, if any.
     pub holiday_date: Option<chrono::NaiveDate>,
+    /// End date for a multi-day holiday range; single-day when `None`.
+    pub holiday_end_date: Option<chrono::NaiveDate>,
     pub holiday_desc_input: String,
     pub start_input: String,
     /// Per-resource add-row buffers: resource name → (date_input, desc_input).
@@ -2810,6 +2883,36 @@ fn handle_branch_delete(
 mod tests {
     use super::*;
     use chrono::NaiveDate;
+
+    #[test]
+    fn group_holidays_merges_consecutive_same_label() {
+        use chrono::NaiveDate;
+        let d = |m, dd| NaiveDate::from_ymd_opt(2025, m, dd).unwrap();
+        let nwd = |date, desc: &str| model::NonWorkingDate {
+            date,
+            description: desc.to_string(),
+        };
+        let dates = vec![
+            nwd(d(12, 26), "Christmas"),
+            nwd(d(12, 24), "Christmas"),
+            nwd(d(12, 25), "Christmas"),
+            nwd(d(7, 4), "July 4"),
+            nwd(NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(), "Christmas"),
+        ];
+        let groups = group_holidays(&dates);
+        assert_eq!(
+            groups.len(),
+            3,
+            "xmas run + july4 + far new-year = 3 groups"
+        );
+        let xmas = groups
+            .iter()
+            .find(|g| g.start == d(12, 24))
+            .expect("christmas group");
+        assert_eq!(xmas.end, d(12, 26));
+        assert_eq!(xmas.dates.len(), 3);
+        assert_eq!(xmas.description, "Christmas");
+    }
 
     #[test]
     fn only_branches_are_acceptable_as_main() {
