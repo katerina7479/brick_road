@@ -279,6 +279,49 @@ fn main() {
 /// new location is empty, the file is moved there so existing data carries over.
 /// Falls back to the cwd on the rare chance `ProjectDirs` cannot resolve a home
 /// directory (e.g. running as a service with no home).
+/// Moves `cwd_db` to `new_db` when only the legacy cwd path exists.
+///
+/// No-op when `new_db` already exists (never clobbers existing data) or when
+/// `cwd_db` is absent.  Tries an atomic `rename` first; on cross-filesystem
+/// paths falls back to copy-to-temp then atomic rename so `new_db` is never
+/// observed in a partial state.
+fn migrate_legacy_db(cwd_db: &std::path::Path, new_db: &std::path::Path) {
+    if !cwd_db.exists() || new_db.exists() {
+        return;
+    }
+    if std::fs::rename(cwd_db, new_db).is_ok() {
+        return;
+    }
+    // Cross-filesystem: copy to a temp path in the same directory as new_db,
+    // then atomically rename so new_db is never seen partially written.
+    let tmp = new_db.with_extension("tmp");
+    match std::fs::copy(cwd_db, &tmp) {
+        Ok(_) => match std::fs::rename(&tmp, new_db) {
+            Ok(_) => {
+                let _ = std::fs::remove_file(cwd_db);
+            }
+            Err(e) => {
+                let _ = std::fs::remove_file(&tmp);
+                eprintln!("warning: could not migrate {cwd_db:?} → {new_db:?}: {e}");
+            }
+        },
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp);
+            eprintln!("warning: could not copy {cwd_db:?} to temp: {e}");
+        }
+    }
+}
+
+/// Returns the path to `brick_road.db` in the per-user data directory,
+/// creating the directory if needed.
+///
+/// On macOS: `~/Library/Application Support/brick_road/brick_road.db`
+/// On Linux: `~/.local/share/brick_road/brick_road.db`
+/// On Windows: `%APPDATA%\katerina7479\brick_road\data\brick_road.db`
+///
+/// Falls back to the cwd when `ProjectDirs` cannot resolve a home directory
+/// (e.g. running as a service with no home).  Performs a one-time migration of
+/// any legacy `./brick_road.db` before returning the new path.
 fn resolve_db_path() -> std::path::PathBuf {
     let data_dir = directories::ProjectDirs::from("com", "katerina7479", "brick_road")
         .map(|d| d.data_dir().to_path_buf())
@@ -293,21 +336,56 @@ fn resolve_db_path() -> std::path::PathBuf {
 
     let new_db = data_dir.join("brick_road.db");
     let cwd_db = std::path::Path::new("brick_road.db");
+    migrate_legacy_db(cwd_db, &new_db);
+    new_db
+}
 
-    // One-time migration: move the legacy cwd DB to the new location so the
-    // user's data carries over on first launch after upgrading.
-    if cwd_db.exists() && !new_db.exists() {
-        // Try an atomic rename first (fast, same-FS); fall back to copy+remove.
-        let ok = std::fs::rename(cwd_db, &new_db).is_ok()
-            || std::fs::copy(cwd_db, &new_db)
-                .and_then(|_| std::fs::remove_file(cwd_db))
-                .is_ok();
-        if !ok {
-            eprintln!("warning: could not migrate {cwd_db:?} → {new_db:?}; continuing with new DB");
-        }
+#[cfg(test)]
+mod db_path_tests {
+    use super::migrate_legacy_db;
+    use std::fs;
+
+    #[test]
+    fn migrate_moves_legacy_db_to_new_location() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd_db = dir.path().join("cwd.db");
+        let new_db = dir.path().join("new.db");
+        fs::write(&cwd_db, b"data").unwrap();
+        migrate_legacy_db(&cwd_db, &new_db);
+        assert!(!cwd_db.exists(), "legacy cwd DB should have been removed");
+        assert_eq!(fs::read(&new_db).unwrap(), b"data");
     }
 
-    new_db
+    #[test]
+    fn migrate_does_not_clobber_existing_new_db() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd_db = dir.path().join("cwd.db");
+        let new_db = dir.path().join("new.db");
+        fs::write(&cwd_db, b"old").unwrap();
+        fs::write(&new_db, b"current").unwrap();
+        migrate_legacy_db(&cwd_db, &new_db);
+        assert_eq!(
+            fs::read(&new_db).unwrap(),
+            b"current",
+            "new DB must not be clobbered"
+        );
+        assert!(
+            cwd_db.exists(),
+            "cwd DB must be untouched when new DB exists"
+        );
+    }
+
+    #[test]
+    fn migrate_no_op_when_cwd_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd_db = dir.path().join("cwd.db");
+        let new_db = dir.path().join("new.db");
+        migrate_legacy_db(&cwd_db, &new_db);
+        assert!(
+            !new_db.exists(),
+            "no new DB should be created when cwd DB is absent"
+        );
+    }
 }
 
 fn setup_db(world: &mut World) {
