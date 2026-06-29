@@ -152,19 +152,18 @@ pub fn compute_row_offs(
 }
 
 /// World-x left edge of the grey column for `date` in a row that uses
-/// `row_offs` as its off-day set.
+/// per-resource off-days.
 ///
-/// Uses the same layout as `block_span_x` with the same `row_offs`, so the
-/// column sits precisely in the gap the block bar opens for `date`. Callers
-/// must supply the row-augmented set (global ∪ resource off-days), not the
-/// global set alone.
-pub fn resource_offday_column_left_x(
-    date: NaiveDate,
-    row_offs: &HashSet<NaiveDate>,
-    cal: &model::CalendarConfig,
-) -> f32 {
+/// Uses the global off-day set (not the row-augmented set) in `day_to_x` so
+/// the column lands in the same visual position as a global holiday on `date`
+/// would. Per-resource PTO is not in `config.non_working_dates`, so
+/// `date_to_day` counts it as a working day and `boundary` ends up one higher
+/// than the global-holiday path — but `day_to_x` applied to the global set
+/// (which lacks the date) gains no holiday offset for it, and the two shifts
+/// cancel out, leaving the correct position.
+pub fn resource_offday_column_left_x(date: NaiveDate, cal: &model::CalendarConfig) -> f32 {
     let boundary = crate::calendar::date_to_day(date, cal) + 1;
-    crate::calendar::day_to_x(boundary, row_offs, cal) - PIXELS_PER_DAY
+    crate::calendar::day_to_x(boundary, &cal.global_off_days(), cal) - PIXELS_PER_DAY
 }
 
 /// The fill color a work block renders with: its explicit `color` if set,
@@ -3646,9 +3645,9 @@ mod tests {
         let mut row_offs = HashSet::new();
         row_offs.insert(pto);
 
-        let left_x = resource_offday_column_left_x(pto, &row_offs, &cal);
+        let left_x = resource_offday_column_left_x(pto, &cal);
 
-        // Block spanning days 0–5 on the same row.
+        // Block spanning days 0–5 on the same row (row_offs widens it by 1 PPD).
         use crate::model::WorkBlockId;
         let wb = crate::model::WorkBlock {
             id: WorkBlockId(1),
@@ -3673,29 +3672,59 @@ mod tests {
     }
 
     #[test]
-    fn resource_offday_column_left_x_right_edge_matches_next_working_day() {
-        // The band's right edge must touch exactly where the next working
-        // day starts in the row layout — i.e. day_to_x(date_to_day + 1, row_offs).
-        let pto = chrono::NaiveDate::from_ymd_opt(2025, 1, 8).unwrap();
-        let cal = base_cal();
-        let mut row_offs = HashSet::new();
-        row_offs.insert(pto);
+    fn resource_offday_column_left_x_pure_pto_matches_global_holiday_same_date() {
+        // A PTO date not in the global set must grey exactly the same column
+        // that holiday_columns would render for a global holiday on that date.
+        let pto = chrono::NaiveDate::from_ymd_opt(2025, 1, 8).unwrap(); // Wednesday
+        let cal_pto = base_cal(); // PTO only, no global holidays
+        let mut cal_global = base_cal();
+        cal_global
+            .non_working_dates
+            .push(crate::model::NonWorkingDate {
+                date: pto,
+                description: String::new(),
+            });
+        let global_offs = cal_global.global_off_days();
+        let hols = crate::calendar::holiday_columns(&global_offs, &cal_global, 20);
+        assert_eq!(hols.len(), 1);
+        let holiday_left_x = hols[0].0;
 
-        let left_x = resource_offday_column_left_x(pto, &row_offs, &cal);
-        let day = crate::calendar::date_to_day(pto, &cal);
-        let next_day_x = crate::calendar::day_to_x(day + 1, &row_offs, &cal);
-
+        let pto_left_x = resource_offday_column_left_x(pto, &cal_pto);
         assert_eq!(
-            left_x + PIXELS_PER_DAY,
-            next_day_x,
-            "band right edge must equal day_to_x(day+1, row_offs)"
+            pto_left_x, holiday_left_x,
+            "pure PTO left_x {pto_left_x} must match global-holiday left_x {holiday_left_x}"
+        );
+    }
+
+    #[test]
+    fn resource_offday_column_left_x_pto_after_weekend_matches_global_holiday() {
+        // PTO on Monday Jan 13 (immediately after Sat/Sun Jan 11-12).
+        // Must align with a global holiday on the same date.
+        let pto = chrono::NaiveDate::from_ymd_opt(2025, 1, 13).unwrap();
+        let cal_pto = base_cal();
+        let mut cal_global = base_cal();
+        cal_global
+            .non_working_dates
+            .push(crate::model::NonWorkingDate {
+                date: pto,
+                description: String::new(),
+            });
+        let global_offs = cal_global.global_off_days();
+        let hols = crate::calendar::holiday_columns(&global_offs, &cal_global, 40);
+        assert_eq!(hols.len(), 1);
+        let holiday_left_x = hols[0].0;
+
+        let pto_left_x = resource_offday_column_left_x(pto, &cal_pto);
+        assert_eq!(
+            pto_left_x, holiday_left_x,
+            "PTO-after-weekend left_x {pto_left_x} must match global-holiday left_x {holiday_left_x}"
         );
     }
 
     #[test]
     fn resource_offday_column_left_x_matches_global_holiday_columns_position() {
-        // When the off-day set contains only that one date (mirrors how
-        // holiday_columns positions a global holiday), the x must match.
+        // When the date is also a global holiday (row_offs ⊇ global), the
+        // helper must still agree with holiday_columns.
         let date = chrono::NaiveDate::from_ymd_opt(2025, 1, 8).unwrap();
         let mut cal = base_cal();
         cal.non_working_dates.push(crate::model::NonWorkingDate {
@@ -3703,13 +3732,11 @@ mod tests {
             description: String::new(),
         });
         let global_offs = cal.global_off_days();
-        // holiday_columns returns (left_x, date, desc) for this date.
         let hols = crate::calendar::holiday_columns(&global_offs, &cal, 20);
         assert_eq!(hols.len(), 1);
         let holiday_left_x = hols[0].0;
 
-        // resource_offday_column_left_x with the same set must agree.
-        let computed = resource_offday_column_left_x(date, &global_offs, &cal);
+        let computed = resource_offday_column_left_x(date, &cal);
         assert_eq!(
             computed, holiday_left_x,
             "resource helper must match holiday_columns for the same set"

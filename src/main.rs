@@ -733,9 +733,7 @@ fn sync_resource_offday_bands(
     }
 
     let cal = &model.calendar;
-    // Build the same (global, row_offs) map that sync_block_sprites uses so
-    // band x-positions are computed against the identical off-day sets.
-    let (global_offs, row_offs_map) = blocks::compute_row_offs(&model);
+    let (global_offs, _) = blocks::compute_row_offs(&model);
     let span = schedule.total_duration_days.max(CALENDAR_HORIZON_DAYS) + 10;
 
     let Some(main_id) = model.main_plan_id() else {
@@ -762,9 +760,6 @@ fn sync_resource_offday_bands(
         }
         let row = row_idx as i32;
         let row_y = -(row as f32) * constants::ROW_HEIGHT;
-        // Row-augmented set: same one used by block_span_x for this row.
-        let row_offs = row_offs_map.get(&row).unwrap_or(&global_offs);
-
         for nwd in &rb.non_working_dates {
             let date = nwd.date;
             // Skip compressed weekends and dates already covered by a
@@ -779,9 +774,7 @@ fn sync_resource_offday_bands(
             if day < 0 || day > span {
                 continue;
             }
-            // Position the band in the row's augmented layout so it falls
-            // in the same gap that block_span_x stretches the block over.
-            let left_x = blocks::resource_offday_column_left_x(date, row_offs, cal);
+            let left_x = blocks::resource_offday_column_left_x(date, cal);
             commands.spawn((
                 ResourceOffDayBand,
                 Sprite {
