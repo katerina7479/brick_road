@@ -1432,6 +1432,17 @@ fn resource_gutter_ui(
     let rh = constants::ROW_HEIGHT;
     let scope = drill.path.last().copied();
 
+    // In By-Person the gutter is read-only: no rename, no resource picker. Clear
+    // any pending one (e.g. a rename started in By-Plan, then toggled to
+    // By-Person) up front. Both the editable field and the Enter/lost-focus
+    // commit key off `rename.editing`, so leaving it set is a read-only escape
+    // that could `commit_row_name` on a main lane.
+    if view.by_person && (rename.editing.is_some() || rename.picker_open.is_some()) {
+        rename.editing = None;
+        rename.picker_open = None;
+        rename.buf.clear();
+    }
+
     // One labelled row in the gutter. Each plan — main plus every forked band —
     // contributes its own rows at its own world-Y, so the gutter is plan-aware
     // rather than locked to a single "active" plan.
