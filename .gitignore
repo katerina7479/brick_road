@@ -1,5 +1,6 @@
 .company_town/
 /target
+/dist
 config.json
 brick_road.db
 brick_road_bevy_spike_spec.md
