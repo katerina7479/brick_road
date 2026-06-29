@@ -11,6 +11,7 @@ pub mod calendar;
 pub mod camera;
 pub mod constants;
 pub mod csv_export;
+pub mod datepicker;
 pub mod db;
 pub mod graph;
 pub mod labels;
