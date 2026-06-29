@@ -101,6 +101,32 @@ pub struct VisibleBlocks {
     pub ids: Vec<WorkBlockId>,
 }
 
+/// Cached by-person layout for the active plan, recomputed when the model or
+/// `ViewMode` changes. Consumed by sprite systems and the gutter when
+/// `view.by_person` is true.
+#[derive(Default, Resource)]
+pub struct PersonViewCache(pub crate::model::PersonView);
+
+/// Recomputes `PersonViewCache` when the model or view mode changes.
+pub fn update_person_view(
+    model: Res<Model>,
+    view: Res<crate::ViewMode>,
+    mut cache: ResMut<PersonViewCache>,
+) {
+    if !model.is_changed() && !view.is_changed() {
+        return;
+    }
+    if !view.by_person {
+        return;
+    }
+    let plan_id = view.plan.or_else(|| model.main_plan_id());
+    let Some(plan_id) = plan_id else {
+        cache.0 = crate::model::PersonView::default();
+        return;
+    };
+    cache.0 = crate::model::person_view_layout(&model, plan_id);
+}
+
 /// Refreshes `VisibleBlocks` when the model changes.
 ///
 /// Only writes to `cache.ids` when the content actually changes, so downstream
@@ -110,17 +136,28 @@ pub fn update_visible_blocks(
     model: Res<Model>,
     schedule: Res<Schedule>,
     drill: Res<DrillScope>,
+    view: Res<crate::ViewMode>,
+    person_view: Res<PersonViewCache>,
     mut cache: ResMut<VisibleBlocks>,
 ) {
-    if !model.is_changed() && !schedule.is_changed() && !drill.is_changed() {
+    if !model.is_changed()
+        && !schedule.is_changed()
+        && !drill.is_changed()
+        && !view.is_changed()
+        && !person_view.is_changed()
+    {
         return;
     }
-    let new_ids: Vec<WorkBlockId> = match model.main_plan_id() {
-        Some(main_id) => visible_blocks(&model, main_id, drill.current())
-            .into_iter()
-            .map(|wb| wb.id)
-            .collect(),
-        None => Vec::new(),
+    let new_ids: Vec<WorkBlockId> = if view.by_person {
+        person_view.0.visible.clone()
+    } else {
+        match model.main_plan_id() {
+            Some(main_id) => visible_blocks(&model, main_id, drill.current())
+                .into_iter()
+                .map(|wb| wb.id)
+                .collect(),
+            None => Vec::new(),
+        }
     };
     if new_ids != cache.ids {
         cache.ids = new_ids;

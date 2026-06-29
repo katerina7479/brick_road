@@ -116,6 +116,11 @@ impl ResourceType {
             ResourceType::Budget => "Budget",
         }
     }
+
+    /// Individual-contributor resource types (people), vs Team/Equipment/Budget.
+    pub fn is_individual(self) -> bool {
+        matches!(self, ResourceType::Engineer | ResourceType::NewHire)
+    }
 }
 
 /// A specific date when one resource is unavailable (PTO, leave, training).
@@ -997,6 +1002,90 @@ impl Model {
             main.root_blocks.clear();
         }
         main_id
+    }
+}
+
+/// The computed by-person layout for one plan: rows correspond to individual
+/// contributors (Engineers / New Hires), leaves mapped to their person's row.
+#[derive(Default)]
+pub struct PersonView {
+    /// Person name + kind in row order (index == row number).
+    pub rows: Vec<(String, ResourceType)>,
+    /// Leaf block id → its person's row index.
+    pub leaf_row: HashMap<WorkBlockId, i32>,
+    /// The leaf ids that should be visible in by-person mode (keyed in leaf_row).
+    pub visible: Vec<WorkBlockId>,
+}
+
+/// Computes the by-person layout for `plan_id`: finds every leaf block (no
+/// children) reachable from the plan's root_blocks, resolves each leaf's person
+/// via `resolved_row_name`, filters to IC types, and groups distinct people into
+/// sorted row indices.
+///
+/// Returns an empty `PersonView` if the plan doesn't exist.
+pub fn person_view_layout(model: &Model, plan_id: PlanId) -> PersonView {
+    let Some(plan) = model.plans.get(&plan_id) else {
+        return PersonView::default();
+    };
+
+    // Walk plan's root_blocks depth-first to collect leaves.
+    let mut leaves: Vec<WorkBlockId> = Vec::new();
+    let mut stack: Vec<WorkBlockId> = plan.root_blocks.to_vec();
+    while let Some(id) = stack.pop() {
+        let children = model.children(id);
+        if children.is_empty() {
+            leaves.push(id);
+        } else {
+            stack.extend(children);
+        }
+    }
+
+    // Resolve each leaf's person and filter to IC types.
+    let mut person_leaves: Vec<(WorkBlockId, String, ResourceType)> = Vec::new();
+    for leaf in leaves {
+        let Some(wb) = model.work_blocks.get(&leaf) else {
+            continue;
+        };
+        let row = model.block_row(plan_id, leaf);
+        let Some(name) = model.resolved_row_name(plan_id, wb.parent, row) else {
+            continue;
+        };
+        let Some(kind) = model.resource_kind(name) else {
+            continue;
+        };
+        if !kind.is_individual() {
+            continue;
+        }
+        person_leaves.push((leaf, name.to_string(), kind));
+    }
+
+    // Collect distinct person names, sorted case-insensitively.
+    let mut seen_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut rows: Vec<(String, ResourceType)> = Vec::new();
+    for (_, name, kind) in &person_leaves {
+        if seen_names.insert(name.clone()) {
+            rows.push((name.clone(), *kind));
+        }
+    }
+    rows.sort_by_key(|a| a.0.to_lowercase());
+
+    let name_to_row: HashMap<String, i32> = rows
+        .iter()
+        .enumerate()
+        .map(|(i, (n, _))| (n.clone(), i as i32))
+        .collect();
+
+    let leaf_row: HashMap<WorkBlockId, i32> = person_leaves
+        .iter()
+        .filter_map(|(id, name, _)| name_to_row.get(name).map(|&r| (*id, r)))
+        .collect();
+
+    let visible: Vec<WorkBlockId> = leaf_row.keys().copied().collect();
+
+    PersonView {
+        rows,
+        leaf_row,
+        visible,
     }
 }
 
@@ -1938,5 +2027,112 @@ mod tests {
         // Shared WorkBlock timing must not change.
         assert_eq!(m.work_blocks[&ghost].start_day, 5);
         assert_eq!(m.work_blocks[&ghost].duration_days, 3);
+    }
+
+    // --- person_view_layout / is_individual ---
+
+    #[test]
+    fn is_individual_true_for_engineer_and_newhire() {
+        assert!(ResourceType::Engineer.is_individual());
+        assert!(ResourceType::NewHire.is_individual());
+    }
+
+    #[test]
+    fn is_individual_false_for_team_equipment_budget() {
+        assert!(!ResourceType::Team.is_individual());
+        assert!(!ResourceType::Equipment.is_individual());
+        assert!(!ResourceType::Budget.is_individual());
+    }
+
+    #[test]
+    fn person_view_layout_empty_plan_returns_empty() {
+        let mut m = Model::default();
+        let plan = m.create_plan("main", None);
+        let pv = person_view_layout(&m, plan);
+        assert!(pv.rows.is_empty());
+        assert!(pv.leaf_row.is_empty());
+        assert!(pv.visible.is_empty());
+    }
+
+    #[test]
+    fn person_view_layout_leaf_under_engineer_included() {
+        let mut m = Model::default();
+        let plan = m.create_plan("main", None);
+        let block = m.add_block_to_plan(plan, "Task A", 0, 5, 0);
+        m.set_resource_kind("Alice", ResourceType::Engineer);
+        m.plans
+            .get_mut(&plan)
+            .unwrap()
+            .set_row_name(None, 0, "Alice".to_string());
+        let pv = person_view_layout(&m, plan);
+        assert_eq!(pv.rows.len(), 1);
+        assert_eq!(pv.rows[0].0, "Alice");
+        assert_eq!(pv.rows[0].1, ResourceType::Engineer);
+        assert_eq!(pv.leaf_row.get(&block), Some(&0));
+        assert!(pv.visible.contains(&block));
+    }
+
+    #[test]
+    fn person_view_layout_team_assigned_excluded() {
+        let mut m = Model::default();
+        let plan = m.create_plan("main", None);
+        let _block = m.add_block_to_plan(plan, "Task B", 0, 5, 0);
+        m.set_resource_kind("Backend Team", ResourceType::Team);
+        m.plans
+            .get_mut(&plan)
+            .unwrap()
+            .set_row_name(None, 0, "Backend Team".to_string());
+        let pv = person_view_layout(&m, plan);
+        assert!(pv.rows.is_empty(), "Team-assigned leaf must be excluded");
+    }
+
+    #[test]
+    fn person_view_layout_unassigned_excluded() {
+        let mut m = Model::default();
+        let plan = m.create_plan("main", None);
+        let _block = m.add_block_to_plan(plan, "Task C", 0, 5, 0);
+        // No row name set and no resource registered → excluded.
+        let pv = person_view_layout(&m, plan);
+        assert!(pv.rows.is_empty(), "Unassigned leaf must be excluded");
+    }
+
+    #[test]
+    fn person_view_layout_rows_sorted_case_insensitively() {
+        let mut m = Model::default();
+        let plan = m.create_plan("main", None);
+        let b0 = m.add_block_to_plan(plan, "Task 0", 0, 3, 0);
+        let b1 = m.add_block_to_plan(plan, "Task 1", 0, 3, 1);
+        m.set_resource_kind("Zara", ResourceType::Engineer);
+        m.set_resource_kind("Alice", ResourceType::NewHire);
+        {
+            let p = m.plans.get_mut(&plan).unwrap();
+            p.set_row_name(None, 0, "Zara".to_string());
+            p.set_row_name(None, 1, "Alice".to_string());
+        }
+        let pv = person_view_layout(&m, plan);
+        assert_eq!(pv.rows.len(), 2);
+        assert_eq!(pv.rows[0].0, "Alice");
+        assert_eq!(pv.rows[1].0, "Zara");
+        assert_eq!(pv.leaf_row[&b0], 1, "Zara is row 1 after sort");
+        assert_eq!(pv.leaf_row[&b1], 0, "Alice is row 0 after sort");
+    }
+
+    #[test]
+    fn person_view_layout_container_not_a_leaf() {
+        let mut m = Model::default();
+        let plan = m.create_plan("main", None);
+        // parent has children → it's a container, not a leaf
+        let parent = m.add_block_to_plan(plan, "Container", 0, 10, 0);
+        m.set_resource_kind("Alice", ResourceType::Engineer);
+        // Child's scope is Some(parent), so the row name must be set there.
+        let child = m.add_child_block(plan, parent, "Leaf", 0, 5, 0);
+        m.plans
+            .get_mut(&plan)
+            .unwrap()
+            .set_row_name(Some(parent), 0, "Alice".to_string());
+        let pv = person_view_layout(&m, plan);
+        // Only child is a leaf; parent is a container → only child visible.
+        assert!(pv.visible.contains(&child));
+        assert!(!pv.visible.contains(&parent));
     }
 }
