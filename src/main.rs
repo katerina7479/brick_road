@@ -1630,6 +1630,27 @@ fn resource_gutter_ui(
                     if resp.lost_focus() && act.is_none() {
                         act = Some(Act::CommitNew);
                     }
+                } else if view.by_person {
+                    // By-person: read-only label + dot, no click interaction.
+                    let (text, color) = match name {
+                        Some(n) => (n.clone(), egui::Color32::from_rgb(206, 190, 164)),
+                        None => (
+                            default_row_label(e.row),
+                            egui::Color32::from_rgb(138, 128, 114),
+                        ),
+                    };
+                    let mut text_x = rect.left() + 10.0;
+                    if let Some(k) = kind {
+                        draw_resource_dot(ui.painter(), egui::pos2(rect.left() + 8.0, cy), *k);
+                        text_x = rect.left() + 18.0;
+                    }
+                    ui.painter().text(
+                        egui::pos2(text_x, cy),
+                        egui::Align2::LEFT_CENTER,
+                        &text,
+                        egui::FontId::proportional(13.0),
+                        color,
+                    );
                 } else {
                     let hot = egui::Rect::from_min_max(
                         egui::pos2(rect.left(), cy - half),
