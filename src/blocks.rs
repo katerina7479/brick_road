@@ -554,9 +554,11 @@ pub fn sync_block_sprites(
         let row = main_id.map(|m| model.block_row(m, id)).unwrap_or(0);
         let off = row_offs.get(&row).unwrap_or(&global_offs);
         let (left_x, width) = block_span_x(wb, off, &model.calendar);
-        // Expand to min_width before computing x so the sprite is always
-        // left-anchored at start_day, not centered on the model midpoint.
-        let visual_width = width.max(min_width);
+        // Inset by a screen-constant gap so abutting blocks get a hairline
+        // separation (~1 px each side at default zoom). min_width floor still
+        // applies so very narrow blocks don't collapse.
+        let gap = 2.0 * ortho_scale;
+        let visual_width = (width - gap).max(min_width);
         let x = left_x + visual_width * 0.5;
         let (y, height) = block_extent(row);
         transform.translation.x = x;
@@ -1225,7 +1227,7 @@ pub struct ResizeDragState {
 const EDGE_GRAB_PX: f32 = 8.0;
 
 /// World-space radius of the small left/right edge dep-creation handles.
-const HANDLE_RADIUS: f32 = 4.0;
+const HANDLE_RADIUS: f32 = 2.5;
 /// Hit-test radius for the dep handle — slightly larger than visual to aid clicking.
 const HANDLE_HIT_PX: f32 = 8.0;
 
