@@ -1441,10 +1441,9 @@ fn resource_gutter_ui(
             .ids
             .iter()
             .map(|id| model.block_row(main_id, *id))
-            .collect::<std::collections::HashSet<_>>()
-            .into_iter()
             .collect();
         rows.sort_unstable();
+        rows.dedup();
         for r in rows {
             entries.push(resolve(&model, main_id, scope, r, -(r as f32 * rh)));
         }
@@ -1457,10 +1456,9 @@ fn resource_gutter_ui(
             let mut rows: Vec<i32> = schedule::visible_blocks(&model, band.plan_id, None)
                 .iter()
                 .map(|wb| model.block_row(band.plan_id, wb.id))
-                .collect::<std::collections::HashSet<_>>()
-                .into_iter()
                 .collect();
             rows.sort_unstable();
+            rows.dedup();
             for r in rows {
                 entries.push(resolve(
                     &model,
@@ -1470,6 +1468,27 @@ fn resource_gutter_ui(
                     band.row0_y - r as f32 * rh,
                 ));
             }
+        }
+    }
+
+    // A brand-new resource lane is edited before it has a block. Give the edited
+    // row an entry (synthesizing its world-Y from the row index in its plan) so
+    // the rename field below actually renders on that row.
+    if let Some((pid, sc, r)) = rename.editing {
+        if !entries
+            .iter()
+            .any(|e| e.plan_id == pid && e.scope == sc && e.row == r)
+        {
+            let world_y = if Some(pid) == model.main_plan_id() {
+                -(r as f32 * rh)
+            } else {
+                bands::layout_bands(&model)
+                    .into_iter()
+                    .find(|b| b.plan_id == pid)
+                    .map(|b| b.row0_y - r as f32 * rh)
+                    .unwrap_or(-(r as f32 * rh))
+            };
+            entries.push(resolve(&model, pid, sc, r, world_y));
         }
     }
 
@@ -1545,18 +1564,21 @@ fn resource_gutter_ui(
                         egui::pos2(rect.left() + 6.0, cy - 9.0),
                         egui::pos2(rect.right() - 4.0, cy + 9.0),
                     );
-                    ui.visuals_mut().extreme_bg_color = egui::Color32::TRANSPARENT;
-                    ui.visuals_mut().widgets.active.bg_stroke = egui::Stroke::NONE;
-                    ui.visuals_mut().widgets.hovered.bg_stroke = egui::Stroke::NONE;
-                    let resp = ui.put(
-                        field,
-                        egui::TextEdit::singleline(&mut rename.buf)
-                            .frame(false)
-                            .margin(egui::Margin::ZERO)
-                            .font(egui::FontId::proportional(13.0))
-                            .text_color(egui::Color32::from_rgb(224, 208, 180)),
-                    );
-                    resp.request_focus();
+                    let resp = ui
+                        .scope(|ui| {
+                            theme::style_inputs(ui);
+                            ui.put(
+                                field,
+                                egui::TextEdit::singleline(&mut rename.buf)
+                                    .id(egui::Id::new(("gutter_rename", e.plan_id.0, e.row)))
+                                    .font(egui::FontId::proportional(13.0))
+                                    .text_color(theme::TEXT),
+                            )
+                        })
+                        .inner;
+                    if !resp.has_focus() {
+                        resp.request_focus();
+                    }
                     if resp.lost_focus() && act.is_none() {
                         act = Some(Act::CommitNew);
                     }
