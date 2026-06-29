@@ -1437,13 +1437,25 @@ fn resource_gutter_ui(
     // Main plan occupies world rows 0,1,2… at y = -row * ROW_HEIGHT, respecting
     // the active drill scope.
     if let Some(main_id) = model.main_plan_id() {
-        let mut rows: Vec<i32> = visible
+        let mut rows: std::collections::HashSet<i32> = visible
             .ids
             .iter()
             .map(|id| model.block_row(main_id, *id))
-            .collect::<std::collections::HashSet<_>>()
-            .into_iter()
             .collect();
+        // Also surface rows that carry a name but no block, so a freshly-named
+        // resource lane stays visible after it is committed.
+        if let Some(names) = model
+            .plans
+            .get(&main_id)
+            .and_then(|p| p.row_names.get(&scope))
+        {
+            for (i, n) in names.iter().enumerate() {
+                if !n.is_empty() {
+                    rows.insert(i as i32);
+                }
+            }
+        }
+        let mut rows: Vec<i32> = rows.into_iter().collect();
         rows.sort_unstable();
         for r in rows {
             entries.push(resolve(&model, main_id, scope, r, -(r as f32 * rh)));
@@ -1454,12 +1466,23 @@ fn resource_gutter_ui(
     // Bands are hidden while drilled into a block, so skip them then.
     if drill.path.is_empty() {
         for band in bands::layout_bands(&model) {
-            let mut rows: Vec<i32> = schedule::visible_blocks(&model, band.plan_id, None)
-                .iter()
-                .map(|wb| model.block_row(band.plan_id, wb.id))
-                .collect::<std::collections::HashSet<_>>()
-                .into_iter()
-                .collect();
+            let mut rows: std::collections::HashSet<i32> =
+                schedule::visible_blocks(&model, band.plan_id, None)
+                    .iter()
+                    .map(|wb| model.block_row(band.plan_id, wb.id))
+                    .collect();
+            if let Some(names) = model
+                .plans
+                .get(&band.plan_id)
+                .and_then(|p| p.row_names.get(&None))
+            {
+                for (i, n) in names.iter().enumerate() {
+                    if !n.is_empty() {
+                        rows.insert(i as i32);
+                    }
+                }
+            }
+            let mut rows: Vec<i32> = rows.into_iter().collect();
             rows.sort_unstable();
             for r in rows {
                 entries.push(resolve(
@@ -1470,6 +1493,27 @@ fn resource_gutter_ui(
                     band.row0_y - r as f32 * rh,
                 ));
             }
+        }
+    }
+
+    // A brand-new resource lane is edited before it has a block. Give the edited
+    // row an entry (synthesizing its world-Y from the row index in its plan) so
+    // the rename field below actually renders on that row.
+    if let Some((pid, sc, r)) = rename.editing {
+        if !entries
+            .iter()
+            .any(|e| e.plan_id == pid && e.scope == sc && e.row == r)
+        {
+            let world_y = if Some(pid) == model.main_plan_id() {
+                -(r as f32 * rh)
+            } else {
+                bands::layout_bands(&model)
+                    .into_iter()
+                    .find(|b| b.plan_id == pid)
+                    .map(|b| b.row0_y - r as f32 * rh)
+                    .unwrap_or(-(r as f32 * rh))
+            };
+            entries.push(resolve(&model, pid, sc, r, world_y));
         }
     }
 
@@ -1496,7 +1540,7 @@ fn resource_gutter_ui(
         OpenPicker(model::PlanId, Option<model::WorkBlockId>, i32),
         ClosePicker,
         SelectResource(model::PlanId, Option<model::WorkBlockId>, i32, String),
-        StartNew(model::PlanId, Option<model::WorkBlockId>, i32),
+        StartNew(model::PlanId, Option<model::WorkBlockId>),
         CommitNew,
         CancelNew,
     }
@@ -1665,7 +1709,7 @@ fn resource_gutter_ui(
                                             .sense(egui::Sense::click()),
                                         );
                                         if add_btn.clicked() {
-                                            act = Some(Act::StartNew(e.plan_id, e.scope, e.row));
+                                            act = Some(Act::StartNew(e.plan_id, e.scope));
                                         }
                                         if name.is_some() {
                                             ui.add_space(2.0);
@@ -1718,7 +1762,15 @@ fn resource_gutter_ui(
             commit_row_name(&mut model, &conn, pid, sc, r, &name);
             rename.picker_open = None;
         }
-        Some(Act::StartNew(pid, sc, r)) => {
+        Some(Act::StartNew(pid, sc)) => {
+            // A new lane: one past the highest occupied row (block-backed or
+            // named) in this plan + scope. `entries` already merges both.
+            let r = entries
+                .iter()
+                .filter(|e| e.plan_id == pid && e.scope == sc)
+                .map(|e| e.row)
+                .max()
+                .map_or(0, |m| m + 1);
             rename.picker_open = None;
             rename.editing = Some((pid, sc, r));
             rename.buf.clear();
