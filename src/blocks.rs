@@ -3932,6 +3932,8 @@ pub fn draw_create_mode_overlay(
     mut state: ResMut<CreateModeState>,
     mut model: ResMut<model::Model>,
     conn: NonSend<rusqlite::Connection>,
+    windows: Query<&Window>,
+    camera: Query<(&Camera, &GlobalTransform)>,
 ) {
     if !state.active {
         return;
@@ -3976,27 +3978,49 @@ pub fn draw_create_mode_overlay(
             let Some(plan_id) = model.main_plan_id() else {
                 return;
             };
-            let new_id = model.create_work_block(name);
-            // Place the new block at branch_min so it appears immediately on the timeline.
-            // For baseline plans (branch_start_day=None) branch_min is 0.0 — day 0 is the
-            // correct default since the user can drag to reposition. Leaving duration_days=0
-            // would make the block invisible, which is worse UX.
-            // For branch plans branch_min is the branch start day, keeping new work inside
-            // the branch window.
             let branch_min = model
                 .plans
                 .get(&plan_id)
                 .and_then(|p| p.branch_start_day)
                 .unwrap_or(0);
-            // No cursor in bulk-create mode: stack each new block one lane down
-            // (by current block count) so they don't pile onto the same spot.
-            let new_row = model
-                .plans
-                .get(&plan_id)
-                .map(|p| p.root_blocks.len() as i32)
-                .unwrap_or(0);
+
+            // Resolve cursor position → (day, row). Falls back to None when the
+            // pointer is over the overlay, off-canvas, or in band/swimlane territory.
+            let placement: Option<(crate::model::Day, i32)> = if ctx.is_pointer_over_area() {
+                None
+            } else {
+                (|| {
+                    let window = windows.single().ok()?;
+                    let (cam, cam_tr) = camera.single().ok()?;
+                    let cursor = window.cursor_position()?;
+                    let world = cam.viewport_to_world_2d(cam_tr, cursor).ok()?;
+                    if let Some(top) = crate::bands::bands_top_y(&model) {
+                        if world.y <= top {
+                            return None;
+                        }
+                    }
+                    let row = (-world.y / ROW_HEIGHT).round().max(0.0) as i32;
+                    let off = model.calendar.global_off_days();
+                    let day = crate::calendar::x_to_day(world.x, &off, &model.calendar).max(0);
+                    Some((day, row))
+                })()
+            };
+
+            let (start_day, new_row) = if let Some((day, row)) = placement {
+                (day.max(branch_min), row)
+            } else {
+                // Fallback: stack each new block one lane down by current block count.
+                let stacked_row = model
+                    .plans
+                    .get(&plan_id)
+                    .map(|p| p.root_blocks.len() as i32)
+                    .unwrap_or(0);
+                (branch_min, stacked_row)
+            };
+
+            let new_id = model.create_work_block(name);
             if let Some(wb) = model.work_blocks.get_mut(&new_id) {
-                wb.start_day = branch_min;
+                wb.start_day = start_day;
                 wb.duration_days = 5;
             }
             if let Some(plan) = model.plans.get_mut(&plan_id) {
