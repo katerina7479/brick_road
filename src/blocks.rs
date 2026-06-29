@@ -94,6 +94,26 @@ pub fn block_edges_x(
     (left, right.max(left))
 }
 
+/// Maps a resolved canvas world position to its `(day, row)` cell.
+/// Returns `None` when `world.y <= bands_top` (swimlane territory); pass
+/// `bands_top = None` when drilled in or there are no bands to skip that guard.
+/// Row is clamped to ≥ 0; day is clamped to ≥ 0.
+pub fn canvas_cursor_cell(
+    world: Vec2,
+    bands_top: Option<f32>,
+    off: &HashSet<NaiveDate>,
+    calendar: &model::CalendarConfig,
+) -> Option<(model::Day, i32)> {
+    if let Some(top) = bands_top {
+        if world.y <= top {
+            return None;
+        }
+    }
+    let row = (-world.y / ROW_HEIGHT).round().max(0.0) as i32;
+    let day = crate::calendar::x_to_day(world.x, off, calendar).max(0);
+    Some((day, row))
+}
+
 /// Builds the per-row off-day sets for the main plan's top-level rows.
 ///
 /// Returns `(global_offs, row_offs)` where `row_offs` maps row index →
@@ -1139,14 +1159,6 @@ pub fn handle_canvas_create(
         return;
     };
 
-    // Band territory belongs to the lane handlers — only at the plan level.
-    if drill.current().is_none() {
-        if let Some(top) = crate::bands::bands_top_y(&model) {
-            if world_pos.y <= top {
-                return;
-            }
-        }
-    }
     // Only empty space — bail if a block is under the cursor.
     for (_, transform, sprite) in &block_query {
         if sprite_hit(transform, sprite, world_pos) {
@@ -1162,12 +1174,17 @@ pub fn handle_canvas_create(
     }
     *last_click = 0.0;
 
-    // Rows are centered on integers, so round picks the lane the cursor is in.
-    // Days are cells starting at the boundary, so floor puts the block in the
-    // cell you clicked (round would jump to the next cell past a cell's midpoint).
-    let row = (-world_pos.y / ROW_HEIGHT).round() as i32;
+    // Resolve cell, guarding band territory at plan level (not when drilled in).
+    let bands_top = if drill.current().is_none() {
+        crate::bands::bands_top_y(&model)
+    } else {
+        None
+    };
     let off = model.calendar.global_off_days();
-    let raw_start = crate::calendar::x_to_day(world_pos.x, &off, &model.calendar).max(0);
+    let Some((raw_start, row)) = canvas_cursor_cell(world_pos, bands_top, &off, &model.calendar)
+    else {
+        return;
+    };
 
     let Some(plan_id) = model.main_plan_id() else {
         return;
@@ -3996,15 +4013,9 @@ pub fn draw_create_mode_overlay(
                     let (cam, cam_tr) = camera.single().ok()?;
                     let cursor = window.cursor_position()?;
                     let world = cam.viewport_to_world_2d(cam_tr, cursor).ok()?;
-                    if let Some(top) = crate::bands::bands_top_y(&model) {
-                        if world.y <= top {
-                            return None;
-                        }
-                    }
-                    let row = (-world.y / ROW_HEIGHT).round().max(0.0) as i32;
+                    let bands_top = crate::bands::bands_top_y(&model);
                     let off = model.calendar.global_off_days();
-                    let day = crate::calendar::x_to_day(world.x, &off, &model.calendar).max(0);
-                    Some((day, row))
+                    canvas_cursor_cell(world, bands_top, &off, &model.calendar)
                 })()
             };
 
@@ -4895,5 +4906,77 @@ mod effective_inspector_id_tests {
     #[test]
     fn main_only_no_lane() {
         assert_eq!(effective_inspector_id(Some(bid(5)), None), Some(bid(5)));
+    }
+}
+
+#[cfg(test)]
+mod canvas_cursor_cell_tests {
+    use super::*;
+    use crate::model::CalendarConfig;
+    use std::collections::HashSet;
+
+    fn cal() -> CalendarConfig {
+        CalendarConfig::default()
+    }
+
+    #[test]
+    fn in_bounds_returns_day_and_row() {
+        let off = HashSet::new();
+        let cal = cal();
+        // world.x = PIXELS_PER_DAY * 2 → day 2; world.y = -ROW_HEIGHT → row 1
+        let world = Vec2::new(crate::constants::PIXELS_PER_DAY * 2.0, -ROW_HEIGHT);
+        let result = canvas_cursor_cell(world, None, &off, &cal);
+        assert!(result.is_some());
+        let (day, row) = result.unwrap();
+        assert_eq!(day, 2);
+        assert_eq!(row, 1);
+    }
+
+    #[test]
+    fn band_territory_returns_none() {
+        let off = HashSet::new();
+        let cal = cal();
+        let bands_top = -100.0_f32;
+        // world.y <= bands_top → None
+        let world = Vec2::new(0.0, -200.0);
+        assert_eq!(canvas_cursor_cell(world, Some(bands_top), &off, &cal), None);
+    }
+
+    #[test]
+    fn no_bands_top_skips_band_guard() {
+        let off = HashSet::new();
+        let cal = cal();
+        // Same y that would trigger band guard, but bands_top is None
+        let world = Vec2::new(0.0, -200.0);
+        assert!(canvas_cursor_cell(world, None, &off, &cal).is_some());
+    }
+
+    #[test]
+    fn above_row_zero_clamps_row_to_zero() {
+        let off = HashSet::new();
+        let cal = cal();
+        // Positive world.y is above row 0 — row should clamp to 0.
+        let world = Vec2::new(0.0, 50.0);
+        let (_, row) = canvas_cursor_cell(world, None, &off, &cal).unwrap();
+        assert_eq!(row, 0);
+    }
+
+    #[test]
+    fn day_clamps_to_zero_for_negative_x() {
+        let off = HashSet::new();
+        let cal = cal();
+        let world = Vec2::new(-1000.0, 0.0);
+        let (day, _) = canvas_cursor_cell(world, None, &off, &cal).unwrap();
+        assert_eq!(day, 0);
+    }
+
+    #[test]
+    fn above_band_top_passes_through() {
+        let off = HashSet::new();
+        let cal = cal();
+        let bands_top = -100.0_f32;
+        // world.y > bands_top → Some(...)
+        let world = Vec2::new(0.0, 0.0);
+        assert!(canvas_cursor_cell(world, Some(bands_top), &off, &cal).is_some());
     }
 }
