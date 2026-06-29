@@ -1437,26 +1437,13 @@ fn resource_gutter_ui(
     // Main plan occupies world rows 0,1,2… at y = -row * ROW_HEIGHT, respecting
     // the active drill scope.
     if let Some(main_id) = model.main_plan_id() {
-        let mut rows: std::collections::HashSet<i32> = visible
+        let mut rows: Vec<i32> = visible
             .ids
             .iter()
             .map(|id| model.block_row(main_id, *id))
             .collect();
-        // Also surface rows that carry a name but no block, so a freshly-named
-        // resource lane stays visible after it is committed.
-        if let Some(names) = model
-            .plans
-            .get(&main_id)
-            .and_then(|p| p.row_names.get(&scope))
-        {
-            for (i, n) in names.iter().enumerate() {
-                if !n.is_empty() {
-                    rows.insert(i as i32);
-                }
-            }
-        }
-        let mut rows: Vec<i32> = rows.into_iter().collect();
         rows.sort_unstable();
+        rows.dedup();
         for r in rows {
             entries.push(resolve(&model, main_id, scope, r, -(r as f32 * rh)));
         }
@@ -1466,24 +1453,12 @@ fn resource_gutter_ui(
     // Bands are hidden while drilled into a block, so skip them then.
     if drill.path.is_empty() {
         for band in bands::layout_bands(&model) {
-            let mut rows: std::collections::HashSet<i32> =
-                schedule::visible_blocks(&model, band.plan_id, None)
-                    .iter()
-                    .map(|wb| model.block_row(band.plan_id, wb.id))
-                    .collect();
-            if let Some(names) = model
-                .plans
-                .get(&band.plan_id)
-                .and_then(|p| p.row_names.get(&None))
-            {
-                for (i, n) in names.iter().enumerate() {
-                    if !n.is_empty() {
-                        rows.insert(i as i32);
-                    }
-                }
-            }
-            let mut rows: Vec<i32> = rows.into_iter().collect();
+            let mut rows: Vec<i32> = schedule::visible_blocks(&model, band.plan_id, None)
+                .iter()
+                .map(|wb| model.block_row(band.plan_id, wb.id))
+                .collect();
             rows.sort_unstable();
+            rows.dedup();
             for r in rows {
                 entries.push(resolve(
                     &model,
