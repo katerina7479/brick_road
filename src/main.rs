@@ -1540,7 +1540,7 @@ fn resource_gutter_ui(
         OpenPicker(model::PlanId, Option<model::WorkBlockId>, i32),
         ClosePicker,
         SelectResource(model::PlanId, Option<model::WorkBlockId>, i32, String),
-        StartNew(model::PlanId, Option<model::WorkBlockId>),
+        StartNew(model::PlanId, Option<model::WorkBlockId>, i32),
         CommitNew,
         CancelNew,
     }
@@ -1589,18 +1589,21 @@ fn resource_gutter_ui(
                         egui::pos2(rect.left() + 6.0, cy - 9.0),
                         egui::pos2(rect.right() - 4.0, cy + 9.0),
                     );
-                    ui.visuals_mut().extreme_bg_color = egui::Color32::TRANSPARENT;
-                    ui.visuals_mut().widgets.active.bg_stroke = egui::Stroke::NONE;
-                    ui.visuals_mut().widgets.hovered.bg_stroke = egui::Stroke::NONE;
-                    let resp = ui.put(
-                        field,
-                        egui::TextEdit::singleline(&mut rename.buf)
-                            .frame(false)
-                            .margin(egui::Margin::ZERO)
-                            .font(egui::FontId::proportional(13.0))
-                            .text_color(egui::Color32::from_rgb(224, 208, 180)),
-                    );
-                    resp.request_focus();
+                    let resp = ui
+                        .scope(|ui| {
+                            theme::style_inputs(ui);
+                            ui.put(
+                                field,
+                                egui::TextEdit::singleline(&mut rename.buf)
+                                    .id(egui::Id::new(("gutter_rename", e.plan_id.0, e.row)))
+                                    .font(egui::FontId::proportional(13.0))
+                                    .text_color(theme::TEXT),
+                            )
+                        })
+                        .inner;
+                    if !resp.has_focus() {
+                        resp.request_focus();
+                    }
                     if resp.lost_focus() && act.is_none() {
                         act = Some(Act::CommitNew);
                     }
@@ -1709,7 +1712,7 @@ fn resource_gutter_ui(
                                             .sense(egui::Sense::click()),
                                         );
                                         if add_btn.clicked() {
-                                            act = Some(Act::StartNew(e.plan_id, e.scope));
+                                            act = Some(Act::StartNew(e.plan_id, e.scope, e.row));
                                         }
                                         if name.is_some() {
                                             ui.add_space(2.0);
@@ -1762,15 +1765,7 @@ fn resource_gutter_ui(
             commit_row_name(&mut model, &conn, pid, sc, r, &name);
             rename.picker_open = None;
         }
-        Some(Act::StartNew(pid, sc)) => {
-            // A new lane: one past the highest occupied row (block-backed or
-            // named) in this plan + scope. `entries` already merges both.
-            let r = entries
-                .iter()
-                .filter(|e| e.plan_id == pid && e.scope == sc)
-                .map(|e| e.row)
-                .max()
-                .map_or(0, |m| m + 1);
+        Some(Act::StartNew(pid, sc, r)) => {
             rename.picker_open = None;
             rename.editing = Some((pid, sc, r));
             rename.buf.clear();
