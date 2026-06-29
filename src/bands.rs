@@ -67,9 +67,12 @@ pub struct LaneSelection(pub Option<(WorkBlockId, PlanId)>);
 enum LaneDragMode {
     Move,
     Resize,
+    /// Ghost block vertical-only: changes only the per-plan row (resource lane),
+    /// leaving start_day/duration untouched so timing keeps tracking main.
+    Reassign,
 }
 
-/// In-progress drag of an owned lane block.
+/// In-progress drag of a lane block (owned or ghost reassignment).
 struct LaneDragActive {
     block: WorkBlockId,
     plan: PlanId,
@@ -892,12 +895,12 @@ pub fn handle_lane_block_edit(
             }
             rename.last_click = Some((hit.id, now));
 
-            // Ghosts are read-only otherwise — they track main, so no drag/resize.
-            if !hit.owned {
-                return;
-            }
-
-            let mode = if (world.x - hit.right_x).abs() <= EDGE_GRAB_PX {
+            // Ghosts can only be dragged vertically (row = per-plan resource
+            // assignment); horizontal move and resize track main and stay blocked.
+            // Owned blocks retain free move + resize.
+            let mode = if !hit.owned {
+                LaneDragMode::Reassign
+            } else if (world.x - hit.right_x).abs() <= EDGE_GRAB_PX {
                 LaneDragMode::Resize
             } else {
                 LaneDragMode::Move
@@ -950,6 +953,12 @@ pub fn handle_lane_block_edit(
                         &model.calendar,
                     );
                     model.set_block_duration(a.block, (end_day - start).max(1));
+                }
+            }
+            LaneDragMode::Reassign => {
+                let row = ((band.row0_y - world.y) / ROW_HEIGHT).round().max(0.0) as i32;
+                if model.block_row(a.plan, a.block) != row {
+                    model.set_block_row(a.plan, a.block, row);
                 }
             }
         }
