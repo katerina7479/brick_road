@@ -2437,6 +2437,10 @@ fn settings_flyout_ui(
                                 let ed_date = matches!(&settings.editing,
                                     Some(SettingsEdit::ResourceDate(rn, d))
                                     if rn.as_str() == name.as_str() && *d == g.start);
+                                let ed_date_end = g.start != g.end
+                                    && matches!(&settings.editing,
+                                        Some(SettingsEdit::ResourceDate(rn, d))
+                                        if rn.as_str() == name.as_str() && *d == g.end);
                                 let ed_lbl = matches!(&settings.editing,
                                     Some(SettingsEdit::ResourceLabel(rn, d))
                                     if rn.as_str() == name.as_str() && *d == g.start);
@@ -2450,7 +2454,7 @@ fn settings_flyout_ui(
                                     ui.horizontal(|ui| {
                                         ui.add_space(4.0);
 
-                                        // Date chip or in-place editor.
+                                        // Start date: chip or in-place TextEdit.
                                         if ed_date {
                                             let r = ui
                                                 .scope(|ui| {
@@ -2492,15 +2496,7 @@ fn settings_flyout_ui(
                                                 settings.editing = None;
                                             }
                                         } else {
-                                            // Single date or range chips.
                                             let cr = theme::date_chip(ui, g.start);
-                                            if g.start != g.end {
-                                                ui.label(
-                                                    egui::RichText::new("–")
-                                                        .color(theme::TEXT_MUTED),
-                                                );
-                                                theme::date_chip(ui, g.end);
-                                            }
                                             if cr.clicked() {
                                                 settings.editing =
                                                     Some(SettingsEdit::ResourceDate(
@@ -2509,6 +2505,66 @@ fn settings_flyout_ui(
                                                     ));
                                                 settings.edit_buf =
                                                     g.start.format("%Y-%m-%d").to_string();
+                                            }
+                                        }
+                                        // End date (ranges only): chip or in-place TextEdit.
+                                        if g.start != g.end {
+                                            ui.label(
+                                                egui::RichText::new("–").color(theme::TEXT_MUTED),
+                                            );
+                                            if ed_date_end {
+                                                let r = ui
+                                                    .scope(|ui| {
+                                                        theme::style_inputs(ui);
+                                                        ui.add(
+                                                            egui::TextEdit::singleline(
+                                                                &mut settings.edit_buf,
+                                                            )
+                                                            .desired_width(88.0)
+                                                            .hint_text("YYYY-MM-DD"),
+                                                        )
+                                                    })
+                                                    .inner;
+                                                r.request_focus();
+                                                let esc =
+                                                    ui.input(|i| i.key_pressed(egui::Key::Escape));
+                                                if esc {
+                                                    settings.editing = None;
+                                                } else if r.lost_focus()
+                                                    || ui.input(|i| i.key_pressed(egui::Key::Enter))
+                                                {
+                                                    if let Ok(nd) =
+                                                        chrono::NaiveDate::parse_from_str(
+                                                            settings.edit_buf.trim(),
+                                                            "%Y-%m-%d",
+                                                        )
+                                                    {
+                                                        let old = g.end;
+                                                        if let Some(rb) =
+                                                            model.resource_blocks.get_mut(&rb_id)
+                                                        {
+                                                            for nwd in &mut rb.non_working_dates {
+                                                                if nwd.date == old {
+                                                                    nwd.date = nd;
+                                                                    changed = true;
+                                                                    break;
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                    settings.editing = None;
+                                                }
+                                            } else {
+                                                let cr = theme::date_chip(ui, g.end);
+                                                if cr.clicked() {
+                                                    settings.editing =
+                                                        Some(SettingsEdit::ResourceDate(
+                                                            name.clone(),
+                                                            g.end,
+                                                        ));
+                                                    settings.edit_buf =
+                                                        g.end.format("%Y-%m-%d").to_string();
+                                                }
                                             }
                                         }
 
