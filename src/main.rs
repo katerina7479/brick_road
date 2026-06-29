@@ -50,6 +50,7 @@ fn main() {
         .insert_resource(blocks::BlockInspectorState::default())
         .insert_resource(schedule::VisibleBlocks::default())
         .insert_resource(schedule::DrillScope::default())
+        .insert_resource(ViewMode::default())
         .insert_resource(schedule::TodayMarker::default())
         .insert_resource(blocks::BlockSpriteMap::default())
         .insert_resource(blocks::ComparePlanState::default())
@@ -108,24 +109,28 @@ fn main() {
             // overlapping same-day forks by height) wins over the nearest marker.
             bands::handle_band_rename_click
                 .run_if(at_plan_level)
+                .run_if(editing_enabled)
                 .after(handle_branch_selection),
         )
         .add_systems(
             Update,
             bands::handle_band_block_create
                 .run_if(at_plan_level)
+                .run_if(editing_enabled)
                 .before(blocks::handle_block_selection),
         )
         .add_systems(
             Update,
             bands::handle_lane_dep_drag
                 .run_if(at_plan_level)
+                .run_if(editing_enabled)
                 .before(bands::handle_lane_block_edit),
         )
         .add_systems(
             Update,
             bands::handle_lane_block_edit
                 .run_if(at_plan_level)
+                .run_if(editing_enabled)
                 .before(blocks::handle_block_selection),
         )
         .add_systems(
@@ -166,23 +171,28 @@ fn main() {
                 .after(blocks::handle_undo)
                 .after(blocks::handle_paste),
         )
-        .add_systems(Update, blocks::handle_block_drill)
-        .add_systems(Update, blocks::handle_drill_out)
+        .add_systems(Update, blocks::handle_block_drill.run_if(editing_enabled))
+        .add_systems(Update, blocks::handle_drill_out.run_if(editing_enabled))
         // Runs before the keyboard shortcut handlers so the first typed
         // character opens the rename instead of triggering F/N/Home.
         .add_systems(
             Update,
             blocks::handle_type_to_rename
+                .run_if(editing_enabled)
                 .before(camera_nav_keys)
                 .before(blocks::handle_create_mode_toggle),
         )
         .add_systems(
             Update,
-            blocks::handle_canvas_create.after(blocks::handle_block_drill),
+            blocks::handle_canvas_create
+                .run_if(editing_enabled)
+                .after(blocks::handle_block_drill),
         )
         .add_systems(
             Update,
-            blocks::handle_block_delete.after(blocks::handle_block_drill),
+            blocks::handle_block_delete
+                .run_if(editing_enabled)
+                .after(blocks::handle_block_drill),
         )
         .add_systems(Update, blocks::handle_undo)
         .add_systems(Update, blocks::handle_copy)
@@ -195,21 +205,27 @@ fn main() {
         .add_systems(
             Update,
             blocks::handle_marquee_select
+                .run_if(editing_enabled)
                 .after(blocks::handle_block_drill)
                 .before(blocks::handle_block_selection),
         )
         .add_systems(Update, blocks::draw_marquee)
         .add_systems(
             Update,
-            blocks::handle_block_selection.after(blocks::handle_block_drill),
+            blocks::handle_block_selection
+                .run_if(editing_enabled)
+                .after(blocks::handle_block_drill),
         )
         .add_systems(
             Update,
-            blocks::handle_block_resize.after(blocks::handle_block_selection),
+            blocks::handle_block_resize
+                .run_if(editing_enabled)
+                .after(blocks::handle_block_selection),
         )
         .add_systems(
             Update,
             blocks::handle_block_drag
+                .run_if(editing_enabled)
                 .after(blocks::handle_block_selection)
                 .after(blocks::handle_block_resize),
         )
@@ -240,6 +256,7 @@ fn main() {
         .add_systems(
             Update,
             blocks::handle_dep_drag
+                .run_if(editing_enabled)
                 .before(blocks::handle_block_selection)
                 .before(blocks::handle_block_drag)
                 .before(blocks::handle_block_resize),
@@ -424,6 +441,10 @@ fn setup_camera(mut commands: Commands) {
 /// just that block's children.
 fn at_plan_level(drill: Res<schedule::DrillScope>) -> bool {
     drill.path.is_empty()
+}
+
+fn editing_enabled(view: Res<ViewMode>) -> bool {
+    !view.by_person
 }
 
 /// On a drill-in/out change, reframe the camera: drilling into a block frames
@@ -2716,6 +2737,7 @@ fn top_bar_ui(
     mut help: ResMut<HelpState>,
     mut import_state: ResMut<ImportState>,
     mut selected_plan: ResMut<SelectedPlan>,
+    mut view: ResMut<ViewMode>,
     windows: Query<&Window>,
     today: Res<schedule::TodayMarker>,
     conn: NonSend<rusqlite::Connection>,
@@ -2877,6 +2899,39 @@ fn top_bar_ui(
                         }
                     }
                     ui.add_space(8.0);
+                    // By Plan / By Person view toggle.
+                    if theme::pill_button(ui, "BY PLAN", !view.by_person).clicked() {
+                        view.by_person = false;
+                    }
+                    if theme::pill_button(ui, "BY PERSON", view.by_person).clicked() {
+                        view.by_person = true;
+                        if view.plan.is_none() {
+                            view.plan = model.main_plan_id();
+                        }
+                    }
+                    if view.by_person {
+                        ui.add_space(4.0);
+                        let current = view.plan.or_else(|| model.main_plan_id());
+                        let current_name = current
+                            .and_then(|id| model.plans.get(&id))
+                            .map(|p| p.name.clone())
+                            .unwrap_or_else(|| "(none)".to_string());
+                        let mut sorted: Vec<model::PlanId> = model.plans.keys().copied().collect();
+                        sorted.sort_by_key(|&id| {
+                            model.plans[&id].branch_start_day.map_or(i32::MIN, |d| d)
+                        });
+                        egui::ComboBox::from_id_salt("view_plan_select")
+                            .selected_text(&current_name)
+                            .show_ui(ui, |ui| {
+                                for id in &sorted {
+                                    let name = model.plans[id].name.clone();
+                                    if ui.selectable_label(current == Some(*id), &name).clicked() {
+                                        view.plan = Some(*id);
+                                    }
+                                }
+                            });
+                    }
+                    ui.add_space(8.0);
                     // Dev: wipe all blocks, branches, and links; keep one empty
                     // main plan to start fresh from. Coral-red DANGER pill.
                     if ui
@@ -2979,6 +3034,15 @@ fn plan_is_acceptable(model: &model::Model, plan_id: model::PlanId) -> bool {
 /// Selecting a branch by clicking its marker arms the Delete key to remove it.
 #[derive(Resource, Default)]
 pub struct SelectedPlan(pub Option<model::PlanId>);
+
+/// View mode: By Plan (default) vs By Person. In By-Person mode all editing and
+/// drilling is disabled (run-condition `editing_enabled`) and branch swimlanes are
+/// hidden.
+#[derive(Resource, Default)]
+pub struct ViewMode {
+    pub by_person: bool,
+    pub plan: Option<model::PlanId>,
+}
 
 /// Resource-gutter state: which row has an open picker popup and, when editing,
 /// the text buffer for the row name.
@@ -3592,5 +3656,19 @@ mod tests {
             None,
             "source row name cleared"
         );
+    }
+
+    #[test]
+    fn editing_enabled_reflects_by_person() {
+        let by_plan = ViewMode {
+            by_person: false,
+            plan: None,
+        };
+        assert!(!by_plan.by_person, "By-Plan: by_person is false");
+        let by_person = ViewMode {
+            by_person: true,
+            plan: None,
+        };
+        assert!(by_person.by_person, "By-Person: by_person is true");
     }
 }

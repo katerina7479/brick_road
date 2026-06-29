@@ -261,11 +261,15 @@ pub fn plan_marker_in_lane_at(model: &Model, world: Vec2, hit_world: f32) -> Opt
 pub fn draw_band_overlays(
     mut gizmos: Gizmos,
     model: Res<Model>,
+    view: Res<crate::ViewMode>,
     selection: Res<LaneSelection>,
     selected_plan: Res<crate::SelectedPlan>,
     cam_q: Query<(&Transform, &Projection), With<Camera2d>>,
     windows: Query<&Window>,
 ) {
+    if view.by_person {
+        return;
+    }
     let Ok((cam_t, proj)) = cam_q.single() else {
         return;
     };
@@ -333,12 +337,14 @@ pub fn sync_band_visuals(
     mut commands: Commands,
     model: Res<Model>,
     drill: Res<crate::schedule::DrillScope>,
+    view: Res<crate::ViewMode>,
     plan_rename: Res<PlanRenameState>,
     lane_rename: Res<LaneBlockRename>,
     mut ents: ResMut<BandEntities>,
 ) {
     if !model.is_changed()
         && !drill.is_changed()
+        && !view.is_changed()
         && !plan_rename.is_changed()
         && !lane_rename.is_changed()
     {
@@ -347,8 +353,8 @@ pub fn sync_band_visuals(
     for e in ents.0.drain(..) {
         commands.entity(e).despawn();
     }
-    if !drill.path.is_empty() {
-        return; // drilled in: no branch lanes
+    if !drill.path.is_empty() || view.by_person {
+        return; // drilled in or by-person view: no branch lanes
     }
 
     for (i, band) in layout_bands(&model).into_iter().enumerate() {
