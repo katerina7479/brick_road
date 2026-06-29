@@ -4161,6 +4161,16 @@ fn flush_inspector_buffers(
     }
 }
 
+/// Resolve the block id the inspector should display.
+/// Main selection (`selected`) wins; falls back to the lane selection when main
+/// is empty (single-select path only — multi-select is handled before this is called).
+fn effective_inspector_id(
+    selected: Option<WorkBlockId>,
+    lane: Option<(WorkBlockId, crate::model::PlanId)>,
+) -> Option<WorkBlockId> {
+    selected.or_else(|| lane.map(|(id, _)| id))
+}
+
 /// Right-side block inspector fly-out. Appears whenever a block is selected and
 /// gathers all of its editable properties in one cohesive panel — name,
 /// description, t-shirt size (write-through to `duration_days`), priority, and
@@ -4178,6 +4188,7 @@ pub fn block_inspector_flyout_ui(
     conn: NonSend<rusqlite::Connection>,
     mut set: ResMut<SelectedBlocks>,
     mut undo: ResMut<UndoStack>,
+    lane_selected: Res<crate::bands::LaneSelection>,
 ) {
     // The settings fly-out owns the right slot while it is open.
     if settings.open {
@@ -4381,7 +4392,7 @@ pub fn block_inspector_flyout_ui(
         return;
     }
 
-    let Some(id) = selected.0 else {
+    let Some(id) = effective_inspector_id(selected.0, lane_selected.0) else {
         state.bound = None;
         return;
     };
@@ -4819,5 +4830,44 @@ mod group_targets_tests {
         assert_eq!(anchor, 6); // 10 + (-4)
         assert_eq!(peers[0].1, 3); // 6 + (-3)
         assert_eq!(peers[1].1, 0); // 6 + (-6) = 0, at floor
+    }
+}
+
+#[cfg(test)]
+mod effective_inspector_id_tests {
+    use super::*;
+    use crate::model::PlanId;
+
+    fn bid(n: u64) -> WorkBlockId {
+        WorkBlockId(n)
+    }
+    fn pid(n: u64) -> PlanId {
+        PlanId(n)
+    }
+
+    #[test]
+    fn main_selection_wins() {
+        assert_eq!(
+            effective_inspector_id(Some(bid(1)), Some((bid(2), pid(10)))),
+            Some(bid(1))
+        );
+    }
+
+    #[test]
+    fn lane_fallback_when_main_empty() {
+        assert_eq!(
+            effective_inspector_id(None, Some((bid(2), pid(10)))),
+            Some(bid(2))
+        );
+    }
+
+    #[test]
+    fn none_when_both_empty() {
+        assert_eq!(effective_inspector_id(None, None), None);
+    }
+
+    #[test]
+    fn main_only_no_lane() {
+        assert_eq!(effective_inspector_id(Some(bid(5)), None), Some(bid(5)));
     }
 }
