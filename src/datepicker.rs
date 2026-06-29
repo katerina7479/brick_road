@@ -350,8 +350,25 @@ fn draw_corner_brackets(painter: &egui::Painter, rect: egui::Rect) {
     painter.vline(max.x, Rangef::new(max.y - b, max.y), s);
 }
 
+/// Expands a date span into a `Vec` of every calendar day in `start..=end`
+/// (inclusive, swapping if `end < start`).
+pub fn expand_date_range(start: NaiveDate, end: NaiveDate) -> Vec<NaiveDate> {
+    let (lo, hi) = if start <= end {
+        (start, end)
+    } else {
+        (end, start)
+    };
+    let mut dates = Vec::new();
+    let mut cur = lo;
+    while cur <= hi {
+        dates.push(cur);
+        cur += Duration::days(1);
+    }
+    dates
+}
+
 /// Current date from the system clock (no chrono `clock` feature required).
-fn today_date() -> NaiveDate {
+pub fn today_date() -> NaiveDate {
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
