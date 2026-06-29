@@ -1916,4 +1916,27 @@ mod tests {
         m.accept_plan_as_main(accepted); // no other branches → no-op sibling pass
         assert_eq!(m.main_plan_id(), Some(main));
     }
+
+    #[test]
+    fn ghost_row_change_is_branch_local() {
+        // Reassigning a ghost's row in a branch must not touch main's row,
+        // a sibling branch's row, or the WorkBlock's start_day/duration.
+        let mut m = Model::default();
+        let main = m.create_plan("main", None);
+        let ghost = placed(&mut m, main, "g", 5, 3);
+        m.set_block_row(main, ghost, 0);
+
+        let branch_a = m.fork_main(1).unwrap();
+        let branch_b = m.fork_main(1).unwrap();
+
+        // Reassign the ghost in branch_a only.
+        m.set_block_row(branch_a, ghost, 2);
+
+        assert_eq!(m.block_row(main, ghost), 0, "main row unchanged");
+        assert_eq!(m.block_row(branch_b, ghost), 0, "sibling row unchanged");
+        assert_eq!(m.block_row(branch_a, ghost), 2, "branch_a row updated");
+        // Shared WorkBlock timing must not change.
+        assert_eq!(m.work_blocks[&ghost].start_day, 5);
+        assert_eq!(m.work_blocks[&ghost].duration_days, 3);
+    }
 }
