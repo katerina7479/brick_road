@@ -328,6 +328,8 @@ pub fn reconcile_block_sprites(
     mut commands: Commands,
     model: Res<model::Model>,
     visible_blocks: Res<schedule::VisibleBlocks>,
+    view: Res<crate::ViewMode>,
+    person_view: Res<schedule::PersonViewCache>,
     mut sprite_map: ResMut<BlockSpriteMap>,
     mut sprite_q: Query<&mut BlockSprite>,
 ) {
@@ -351,16 +353,19 @@ pub fn reconcile_block_sprites(
         }
     }
 
-    // Reconcile each visible block at its explicit, user-assigned lane. The lane
-    // is per-plan (freeform, not derived from sort order); the primary timeline
-    // always renders the main plan, so rows come from main's block_rows.
+    // Reconcile each visible block at its row. By-Plan: row from main's block_rows.
+    // By-Person: row from the person layout (each IC maps to a stable row index).
     let main_id = model.main_plan_id();
     let (global_offs, row_offs) = compute_row_offs(&model);
     for &id in &visible_blocks.ids {
         let Some(wb) = model.work_blocks.get(&id) else {
             continue;
         };
-        let row = main_id.map(|m| model.block_row(m, id)).unwrap_or(0);
+        let row = if view.by_person {
+            person_view.0.leaf_row.get(&id).copied().unwrap_or(0)
+        } else {
+            main_id.map(|m| model.block_row(m, id)).unwrap_or(0)
+        };
 
         if let Some(&entity) = sprite_map.entities.get(&id) {
             // Existing entity: update row in place. Transform and color are
@@ -549,11 +554,14 @@ pub fn sync_description_dots(
 ///   1. Explicit per-block `color` override
 ///   2. Selection 2× — block is the currently selected block
 ///   3. Palette default
+#[allow(clippy::too_many_arguments)]
 pub fn sync_block_sprites(
     model: Res<model::Model>,
     _selected: Res<SelectedBlock>,
     set: Res<SelectedBlocks>,
     today: Res<schedule::TodayMarker>,
+    view: Res<crate::ViewMode>,
+    person_view: Res<schedule::PersonViewCache>,
     camera_q: Query<&Projection, With<Camera2d>>,
     mut query: Query<(&BlockSprite, &mut Transform, &mut Sprite)>,
 ) {
@@ -567,12 +575,19 @@ pub fn sync_block_sprites(
         let Some(wb) = model.work_blocks.get(&id) else {
             continue;
         };
-        // Read the live model row (not the cached BlockSprite.row, which only
-        // refreshes when the visible set changes) so vertical drags track the
-        // cursor immediately — same as start_day does for x. The primary timeline
-        // renders the main plan, so the lane comes from main's block_rows.
-        let row = main_id.map(|m| model.block_row(m, id)).unwrap_or(0);
-        let off = row_offs.get(&row).unwrap_or(&global_offs);
+        // By-Person: use person row from cached layout; use global off-days for x.
+        // By-Plan: read live model row so vertical drags track cursor immediately.
+        let row = if view.by_person {
+            person_view.0.leaf_row.get(&id).copied().unwrap_or(0)
+        } else {
+            main_id.map(|m| model.block_row(m, id)).unwrap_or(0)
+        };
+        // By-Person uses only global off-days (per-person stretching is a later refinement).
+        let off = if view.by_person {
+            &global_offs
+        } else {
+            row_offs.get(&row).unwrap_or(&global_offs)
+        };
         let (left_x, width) = block_span_x(wb, off, &model.calendar);
         // Inset by a screen-constant gap so abutting blocks get a hairline
         // separation (~1 px each side at default zoom). min_width floor still

@@ -49,6 +49,7 @@ fn main() {
         .insert_resource(blocks::CreateModeState::default())
         .insert_resource(blocks::BlockInspectorState::default())
         .insert_resource(schedule::VisibleBlocks::default())
+        .insert_resource(schedule::PersonViewCache::default())
         .insert_resource(schedule::DrillScope::default())
         .insert_resource(ViewMode::default())
         .insert_resource(schedule::TodayMarker::default())
@@ -163,10 +164,19 @@ fn main() {
         .add_systems(Update, sync_period_bands.after(sync_total_duration))
         .add_systems(
             Update,
+            schedule::update_person_view
+                .before(schedule::update_visible_blocks)
+                .after(blocks::handle_block_delete)
+                .after(blocks::handle_undo)
+                .after(blocks::handle_paste),
+        )
+        .add_systems(
+            Update,
             schedule::update_visible_blocks
                 .before(blocks::reconcile_block_sprites)
                 .before(blocks::draw_dependency_edges)
                 .before(blocks::draw_block_handles)
+                .after(schedule::update_person_view)
                 .after(blocks::handle_block_delete)
                 .after(blocks::handle_undo)
                 .after(blocks::handle_paste),
@@ -1404,6 +1414,8 @@ fn resource_gutter_ui(
     mut model: ResMut<model::Model>,
     drill: Res<schedule::DrillScope>,
     visible: Res<schedule::VisibleBlocks>,
+    view: Res<ViewMode>,
+    person_view: Res<schedule::PersonViewCache>,
     mut rename: ResMut<RowRename>,
     conn: NonSend<rusqlite::Connection>,
     keys: Res<ButtonInput<KeyCode>>,
@@ -1455,61 +1467,76 @@ fn resource_gutter_ui(
     // until there's real work on a row.
     let mut entries: Vec<GutterRow> = Vec::new();
 
-    // Main plan occupies world rows 0,1,2… at y = -row * ROW_HEIGHT, respecting
-    // the active drill scope.
-    if let Some(main_id) = model.main_plan_id() {
-        let mut rows: Vec<i32> = visible
-            .ids
-            .iter()
-            .map(|id| model.block_row(main_id, *id))
-            .collect();
-        rows.sort_unstable();
-        rows.dedup();
-        for r in rows {
-            entries.push(resolve(&model, main_id, scope, r, -(r as f32 * rh)));
+    if view.by_person {
+        // By-Person: one read-only label per individual contributor row.
+        let dummy_plan = model.main_plan_id().unwrap_or(model::PlanId(0));
+        for (i, (name, kind)) in person_view.0.rows.iter().enumerate() {
+            entries.push(GutterRow {
+                plan_id: dummy_plan,
+                scope: None,
+                row: i as i32,
+                world_y: -(i as f32 * rh),
+                name: Some(name.clone()),
+                kind: Some(*kind),
+            });
         }
-    }
-
-    // Each forked-plan band labels its own rows, anchored at that lane's row0_y.
-    // Bands are hidden while drilled into a block, so skip them then.
-    if drill.path.is_empty() {
-        for band in bands::layout_bands(&model) {
-            let mut rows: Vec<i32> = schedule::visible_blocks(&model, band.plan_id, None)
+    } else {
+        // Main plan occupies world rows 0,1,2… at y = -row * ROW_HEIGHT, respecting
+        // the active drill scope.
+        if let Some(main_id) = model.main_plan_id() {
+            let mut rows: Vec<i32> = visible
+                .ids
                 .iter()
-                .map(|wb| model.block_row(band.plan_id, wb.id))
+                .map(|id| model.block_row(main_id, *id))
                 .collect();
             rows.sort_unstable();
             rows.dedup();
             for r in rows {
-                entries.push(resolve(
-                    &model,
-                    band.plan_id,
-                    None,
-                    r,
-                    band.row0_y - r as f32 * rh,
-                ));
+                entries.push(resolve(&model, main_id, scope, r, -(r as f32 * rh)));
             }
         }
-    }
 
-    // A brand-new resource lane is edited before it has a block. Give the edited
-    // row an entry (synthesizing its world-Y from the row index in its plan) so
-    // the rename field below actually renders on that row.
-    if let Some((pid, sc, r)) = rename.editing {
-        if !entries
-            .iter()
-            .any(|e| e.plan_id == pid && e.scope == sc && e.row == r)
-        {
-            let world_y = if Some(pid) == model.main_plan_id() {
-                -(r as f32 * rh)
-            } else {
-                bands::layout_bands(&model)
-                    .into_iter()
-                    .find(|b| b.plan_id == pid)
-                    .map(|b| b.row0_y - r as f32 * rh)
-                    .unwrap_or(-(r as f32 * rh))
-            };
-            entries.push(resolve(&model, pid, sc, r, world_y));
+        // Each forked-plan band labels its own rows, anchored at that lane's row0_y.
+        // Bands are hidden while drilled into a block, so skip them then.
+        if drill.path.is_empty() {
+            for band in bands::layout_bands(&model) {
+                let mut rows: Vec<i32> = schedule::visible_blocks(&model, band.plan_id, None)
+                    .iter()
+                    .map(|wb| model.block_row(band.plan_id, wb.id))
+                    .collect();
+                rows.sort_unstable();
+                rows.dedup();
+                for r in rows {
+                    entries.push(resolve(
+                        &model,
+                        band.plan_id,
+                        None,
+                        r,
+                        band.row0_y - r as f32 * rh,
+                    ));
+                }
+            }
+        }
+
+        // A brand-new resource lane is edited before it has a block. Give the edited
+        // row an entry (synthesizing its world-Y from the row index in its plan) so
+        // the rename field below actually renders on that row.
+        if let Some((pid, sc, r)) = rename.editing {
+            if !entries
+                .iter()
+                .any(|e| e.plan_id == pid && e.scope == sc && e.row == r)
+            {
+                let world_y = if Some(pid) == model.main_plan_id() {
+                    -(r as f32 * rh)
+                } else {
+                    bands::layout_bands(&model)
+                        .into_iter()
+                        .find(|b| b.plan_id == pid)
+                        .map(|b| b.row0_y - r as f32 * rh)
+                        .unwrap_or(-(r as f32 * rh))
+                };
+                entries.push(resolve(&model, pid, sc, r, world_y));
+            }
         }
     }
 
@@ -1603,6 +1630,27 @@ fn resource_gutter_ui(
                     if resp.lost_focus() && act.is_none() {
                         act = Some(Act::CommitNew);
                     }
+                } else if view.by_person {
+                    // By-person: read-only label + dot, no click interaction.
+                    let (text, color) = match name {
+                        Some(n) => (n.clone(), egui::Color32::from_rgb(206, 190, 164)),
+                        None => (
+                            default_row_label(e.row),
+                            egui::Color32::from_rgb(138, 128, 114),
+                        ),
+                    };
+                    let mut text_x = rect.left() + 10.0;
+                    if let Some(k) = kind {
+                        draw_resource_dot(ui.painter(), egui::pos2(rect.left() + 8.0, cy), *k);
+                        text_x = rect.left() + 18.0;
+                    }
+                    ui.painter().text(
+                        egui::pos2(text_x, cy),
+                        egui::Align2::LEFT_CENTER,
+                        &text,
+                        egui::FontId::proportional(13.0),
+                        color,
+                    );
                 } else {
                     let hot = egui::Rect::from_min_max(
                         egui::pos2(rect.left(), cy - half),
