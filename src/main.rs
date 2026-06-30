@@ -2000,6 +2000,89 @@ fn group_holidays(dates: &[model::NonWorkingDate]) -> Vec<HolidayGroup> {
     groups
 }
 
+/// All calendar days in `[start, end]` inclusive, with `end` clamped to `>= start`
+/// and to at most a year past `start` (so a mis-picked span can't insert thousands
+/// of daily rows). This is the expansion behind a multi-day holiday / time-off span.
+fn expand_date_range(start: chrono::NaiveDate, end: chrono::NaiveDate) -> Vec<chrono::NaiveDate> {
+    let end = end.max(start).min(start + chrono::Duration::days(366));
+    let mut out = Vec::new();
+    let mut d = start;
+    loop {
+        out.push(d);
+        if d >= end {
+            break;
+        }
+        match d.succ_opt() {
+            Some(n) => d = n,
+            None => break,
+        }
+    }
+    out
+}
+
+/// Re-anchor a date group: drop its current `old_dates` from `dates` and insert
+/// the expanded `[start, end]` span, all carrying `desc`, de-duplicated against
+/// the survivors. Shared by the holiday and per-resource time-off editors.
+fn set_date_range(
+    dates: &mut Vec<model::NonWorkingDate>,
+    old_dates: &[chrono::NaiveDate],
+    start: chrono::NaiveDate,
+    end: chrono::NaiveDate,
+    desc: &str,
+) {
+    dates.retain(|x| !old_dates.contains(&x.date));
+    for d in expand_date_range(start, end) {
+        if !dates.iter().any(|x| x.date == d) {
+            dates.push(model::NonWorkingDate {
+                date: d,
+                description: desc.to_string(),
+            });
+        }
+    }
+}
+
+/// Apply a committed date-picker result to `dates`, re-anchoring the group that
+/// currently starts at `old_start`. A `Single` collapses to a one-day span; a
+/// `Range` expands to the inclusive span. Returns whether anything was applied.
+fn apply_date_pick(
+    dates: &mut Vec<model::NonWorkingDate>,
+    old_start: chrono::NaiveDate,
+    result: &datepicker::DatePickerResult,
+) -> bool {
+    let (old_dates, desc) = {
+        let groups = group_holidays(dates);
+        match groups.iter().find(|g| g.start == old_start) {
+            Some(g) => (g.dates.clone(), g.description.clone()),
+            None => return false,
+        }
+    };
+    let (start, end) = match *result {
+        datepicker::DatePickerResult::Single(d) => (d, d),
+        datepicker::DatePickerResult::Range(s, e) => (s, e),
+    };
+    set_date_range(dates, &old_dates, start, end, &desc);
+    true
+}
+
+/// Which date group an open Aurora picker is editing — a calendar holiday or a
+/// specific resource's time-off, keyed by the group's (current) start date.
+#[derive(Clone, PartialEq)]
+enum DateTarget {
+    Holiday(chrono::NaiveDate),
+    Resource(String, chrono::NaiveDate),
+}
+
+/// An open settings date-range picker popup: what it edits, its calendar state,
+/// and the screen anchor to draw it at (kept fresh from the row each frame).
+struct OpenDatePicker {
+    target: DateTarget,
+    state: datepicker::DatePickerState,
+    anchor: egui::Pos2,
+    /// `false` on the frame it opened (so the chip-click that spawned it isn't
+    /// counted as a click-outside dismiss); becomes `true` after one frame.
+    armed: bool,
+}
+
 /// Right-side settings fly-out. Toggled by the top-bar gear. Holds general
 /// settings; the first section is the calendar (working days per week, the
 /// holiday list, and the start date). Edits write straight to `model.calendar`
@@ -2179,11 +2262,6 @@ fn settings_flyout_ui(
 
                     let mut remove_hol: Option<Vec<chrono::NaiveDate>> = None;
                     for g in &holiday_groups {
-                        let ed_start = matches!(&settings.editing,
-                            Some(SettingsEdit::HolidayDate(d)) if *d == g.start);
-                        let ed_end = g.start != g.end
-                            && matches!(&settings.editing,
-                                Some(SettingsEdit::HolidayDate(d)) if *d == g.end);
                         let ed_label = matches!(&settings.editing,
                             Some(SettingsEdit::HolidayLabel(d)) if *d == g.start);
 
@@ -2193,93 +2271,29 @@ fn settings_flyout_ui(
 
                         let row = theme::list_row(ui, |ui| {
                             ui.horizontal(|ui| {
-                                // Start date: chip or in-place TextEdit.
-                                if ed_start {
-                                    let r = ui
-                                        .scope(|ui| {
-                                            theme::style_inputs(ui);
-                                            ui.add(
-                                                egui::TextEdit::singleline(&mut settings.edit_buf)
-                                                    .desired_width(88.0)
-                                                    .hint_text("YYYY-MM-DD"),
-                                            )
-                                        })
-                                        .inner;
-                                    r.request_focus();
-                                    let esc = ui.input(|i| i.key_pressed(egui::Key::Escape));
-                                    if esc {
-                                        settings.editing = None;
-                                    } else if r.lost_focus()
-                                        || ui.input(|i| i.key_pressed(egui::Key::Enter))
-                                    {
-                                        if let Ok(nd) = chrono::NaiveDate::parse_from_str(
-                                            settings.edit_buf.trim(),
-                                            "%Y-%m-%d",
-                                        ) {
-                                            let old = g.start;
-                                            for nwd in &mut model.calendar.non_working_dates {
-                                                if nwd.date == old {
-                                                    nwd.date = nd;
-                                                    changed = true;
-                                                    break;
-                                                }
-                                            }
-                                        }
-                                        settings.editing = None;
-                                    }
-                                } else {
-                                    let cr = theme::date_chip(ui, g.start);
-                                    if cr.clicked() {
-                                        settings.editing = Some(SettingsEdit::HolidayDate(g.start));
-                                        settings.edit_buf = g.start.format("%Y-%m-%d").to_string();
-                                    }
-                                }
-                                // For ranges: also show end chip / editor.
+                                // Date span: a clickable chip for the start (plus
+                                // an end chip for a multi-day span). Clicking either
+                                // opens the Aurora calendar range picker popup.
+                                let cr = theme::date_chip(ui, g.start);
+                                let anchor = cr.rect.left_bottom();
+                                let mut open_picker = cr.clicked();
                                 if g.start != g.end {
                                     ui.label(egui::RichText::new("–").color(theme::TEXT_MUTED));
-                                    if ed_end {
-                                        let r = ui
-                                            .scope(|ui| {
-                                                theme::style_inputs(ui);
-                                                ui.add(
-                                                    egui::TextEdit::singleline(
-                                                        &mut settings.edit_buf,
-                                                    )
-                                                    .desired_width(88.0)
-                                                    .hint_text("YYYY-MM-DD"),
-                                                )
-                                            })
-                                            .inner;
-                                        r.request_focus();
-                                        let esc = ui.input(|i| i.key_pressed(egui::Key::Escape));
-                                        if esc {
-                                            settings.editing = None;
-                                        } else if r.lost_focus()
-                                            || ui.input(|i| i.key_pressed(egui::Key::Enter))
-                                        {
-                                            if let Ok(nd) = chrono::NaiveDate::parse_from_str(
-                                                settings.edit_buf.trim(),
-                                                "%Y-%m-%d",
-                                            ) {
-                                                let old = g.end;
-                                                for nwd in &mut model.calendar.non_working_dates {
-                                                    if nwd.date == old {
-                                                        nwd.date = nd;
-                                                        changed = true;
-                                                        break;
-                                                    }
-                                                }
-                                            }
-                                            settings.editing = None;
-                                        }
-                                    } else {
-                                        let cr = theme::date_chip(ui, g.end);
-                                        if cr.clicked() {
-                                            settings.editing =
-                                                Some(SettingsEdit::HolidayDate(g.end));
-                                            settings.edit_buf =
-                                                g.end.format("%Y-%m-%d").to_string();
-                                        }
+                                    open_picker |= theme::date_chip(ui, g.end).clicked();
+                                }
+                                if open_picker {
+                                    settings.editing = None;
+                                    settings.picker = Some(OpenDatePicker {
+                                        target: DateTarget::Holiday(g.start),
+                                        state: datepicker::DatePickerState::range(g.start, None),
+                                        anchor,
+                                        armed: false,
+                                    });
+                                }
+                                // Keep an already-open picker pinned under this row.
+                                if let Some(p) = &mut settings.picker {
+                                    if p.target == DateTarget::Holiday(g.start) {
+                                        p.anchor = anchor;
                                     }
                                 }
 
@@ -2382,13 +2396,16 @@ fn settings_flyout_ui(
                             .non_working_dates
                             .retain(|x| !dts.contains(&x.date));
                         changed = true;
-                        let stale = match &settings.editing {
-                            Some(SettingsEdit::HolidayLabel(d))
-                            | Some(SettingsEdit::HolidayDate(d)) => dts.contains(d),
-                            _ => false,
-                        };
+                        let stale = matches!(&settings.editing,
+                            Some(SettingsEdit::HolidayLabel(d)) if dts.contains(d));
                         if stale {
                             settings.editing = None;
+                        }
+                        // Drop an open picker that targeted a removed group.
+                        if matches!(&settings.picker,
+                            Some(p) if matches!(&p.target, DateTarget::Holiday(d) if dts.contains(d)))
+                        {
+                            settings.picker = None;
                         }
                     }
 
@@ -2446,9 +2463,6 @@ fn settings_flyout_ui(
 
                             let mut remove_to: Option<Vec<chrono::NaiveDate>> = None;
                             for g in &to_groups {
-                                let ed_date = matches!(&settings.editing,
-                                    Some(SettingsEdit::ResourceDate(rn, d))
-                                    if rn.as_str() == name.as_str() && *d == g.start);
                                 let ed_lbl = matches!(&settings.editing,
                                     Some(SettingsEdit::ResourceLabel(rn, d))
                                     if rn.as_str() == name.as_str() && *d == g.start);
@@ -2462,65 +2476,36 @@ fn settings_flyout_ui(
                                     ui.horizontal(|ui| {
                                         ui.add_space(4.0);
 
-                                        // Date chip or in-place editor.
-                                        if ed_date {
-                                            let r = ui
-                                                .scope(|ui| {
-                                                    theme::style_inputs(ui);
-                                                    ui.add(
-                                                        egui::TextEdit::singleline(
-                                                            &mut settings.edit_buf,
-                                                        )
-                                                        .desired_width(88.0)
-                                                        .hint_text("YYYY-MM-DD"),
-                                                    )
-                                                })
-                                                .inner;
-                                            r.request_focus();
-                                            let esc =
-                                                ui.input(|i| i.key_pressed(egui::Key::Escape));
-                                            if esc {
-                                                settings.editing = None;
-                                            } else if r.lost_focus()
-                                                || ui.input(|i| i.key_pressed(egui::Key::Enter))
+                                        // Date span: clickable chip(s) opening the
+                                        // Aurora calendar range picker popup.
+                                        let cr = theme::date_chip(ui, g.start);
+                                        let anchor = cr.rect.left_bottom();
+                                        let mut open_picker = cr.clicked();
+                                        if g.start != g.end {
+                                            ui.label(
+                                                egui::RichText::new("–").color(theme::TEXT_MUTED),
+                                            );
+                                            open_picker |= theme::date_chip(ui, g.end).clicked();
+                                        }
+                                        if open_picker {
+                                            settings.editing = None;
+                                            settings.picker = Some(OpenDatePicker {
+                                                target: DateTarget::Resource(
+                                                    name.clone(),
+                                                    g.start,
+                                                ),
+                                                state: datepicker::DatePickerState::range(
+                                                    g.start, None,
+                                                ),
+                                                anchor,
+                                                armed: false,
+                                            });
+                                        }
+                                        if let Some(p) = &mut settings.picker {
+                                            if p.target
+                                                == DateTarget::Resource(name.clone(), g.start)
                                             {
-                                                if let Ok(nd) = chrono::NaiveDate::parse_from_str(
-                                                    settings.edit_buf.trim(),
-                                                    "%Y-%m-%d",
-                                                ) {
-                                                    let old = g.start;
-                                                    if let Some(rb) =
-                                                        model.resource_blocks.get_mut(&rb_id)
-                                                    {
-                                                        for nwd in &mut rb.non_working_dates {
-                                                            if nwd.date == old {
-                                                                nwd.date = nd;
-                                                                changed = true;
-                                                                break;
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                                settings.editing = None;
-                                            }
-                                        } else {
-                                            // Single date or range chips.
-                                            let cr = theme::date_chip(ui, g.start);
-                                            if g.start != g.end {
-                                                ui.label(
-                                                    egui::RichText::new("–")
-                                                        .color(theme::TEXT_MUTED),
-                                                );
-                                                theme::date_chip(ui, g.end);
-                                            }
-                                            if cr.clicked() {
-                                                settings.editing =
-                                                    Some(SettingsEdit::ResourceDate(
-                                                        name.clone(),
-                                                        g.start,
-                                                    ));
-                                                settings.edit_buf =
-                                                    g.start.format("%Y-%m-%d").to_string();
+                                                p.anchor = anchor;
                                             }
                                         }
 
@@ -2633,15 +2618,17 @@ fn settings_flyout_ui(
                                     rb.non_working_dates.retain(|x| !dts.contains(&x.date));
                                     changed = true;
                                 }
-                                let stale = match &settings.editing {
+                                let stale = matches!(&settings.editing,
                                     Some(SettingsEdit::ResourceLabel(rn, d))
-                                    | Some(SettingsEdit::ResourceDate(rn, d)) => {
-                                        rn.as_str() == name.as_str() && dts.contains(d)
-                                    }
-                                    _ => false,
-                                };
+                                    if rn.as_str() == name.as_str() && dts.contains(d));
                                 if stale {
                                     settings.editing = None;
+                                }
+                                if matches!(&settings.picker, Some(p) if matches!(&p.target,
+                                    DateTarget::Resource(rn, d)
+                                    if rn.as_str() == name.as_str() && dts.contains(d)))
+                                {
+                                    settings.picker = None;
                                 }
                             }
 
@@ -2775,6 +2762,54 @@ fn settings_flyout_ui(
                     });
                 }); // ScrollArea::vertical
         });
+
+    // ── Date-range picker popup ───────────────────────────────────────────────
+    // Drawn over the panel as a foreground Area anchored under the clicked row.
+    // Committing a date re-anchors that group's span; Esc or a click outside the
+    // popup dismisses it without change.
+    if let Some(mut open) = settings.picker.take() {
+        let area = egui::Area::new(egui::Id::new("settings_date_picker"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(open.anchor)
+            .show(ctx, |ui| {
+                datepicker::aurora_date_picker(ui, &mut open.state)
+            });
+        let committed = area.inner;
+        let area_rect = area.response.rect;
+        let esc = ctx.input(|i| i.key_pressed(egui::Key::Escape));
+        let click_outside = open.armed
+            && ctx.input(|i| {
+                i.pointer.any_click()
+                    && i.pointer
+                        .interact_pos()
+                        .is_some_and(|p| !area_rect.contains(p))
+            });
+        if let Some(result) = committed {
+            let applied = match &open.target {
+                DateTarget::Holiday(start) => {
+                    apply_date_pick(&mut model.calendar.non_working_dates, *start, &result)
+                }
+                DateTarget::Resource(rn, start) => {
+                    let rb_id = model
+                        .resource_blocks
+                        .values()
+                        .find(|r| r.name.eq_ignore_ascii_case(rn))
+                        .map(|r| r.id);
+                    match rb_id.and_then(|id| model.resource_blocks.get_mut(&id)) {
+                        Some(rb) => apply_date_pick(&mut rb.non_working_dates, *start, &result),
+                        None => false,
+                    }
+                }
+            };
+            changed |= applied;
+            // Committed → leave `settings.picker` cleared (closed).
+        } else if esc || click_outside {
+            // Dismissed → leave cleared.
+        } else {
+            open.armed = true;
+            settings.picker = Some(open); // still open next frame
+        }
+    }
 
     if close {
         settings.open = false;
@@ -3119,12 +3154,8 @@ enum SettingsEdit {
     StartDate,
     /// Holiday group's label — keyed by the group's start date (unique).
     HolidayLabel(chrono::NaiveDate),
-    /// A single calendar date entry being moved to a new date.
-    HolidayDate(chrono::NaiveDate),
     /// Per-resource time-off label — (resource name, group start date).
     ResourceLabel(String, chrono::NaiveDate),
-    /// Per-resource time-off date being moved.
-    ResourceDate(String, chrono::NaiveDate),
 }
 
 /// Whether the keyboard-shortcuts help modal is open. Mirrors `SettingsState.open`.
@@ -3239,6 +3270,8 @@ pub struct SettingsState {
     editing: Option<SettingsEdit>,
     /// Shared text buffer for whichever field is in `editing`.
     edit_buf: String,
+    /// Open Aurora date-range picker popup, if any (one at a time).
+    picker: Option<OpenDatePicker>,
 }
 
 /// Transient state for the CSV import modal.
@@ -3537,6 +3570,79 @@ mod tests {
         assert_eq!(xmas.end, d(12, 26));
         assert_eq!(xmas.dates.len(), 3);
         assert_eq!(xmas.description, "Christmas");
+    }
+
+    #[test]
+    fn expand_date_range_inclusive_and_clamped() {
+        let d = |m, dd| NaiveDate::from_ymd_opt(2025, m, dd).unwrap();
+        // Inclusive multi-day span.
+        assert_eq!(
+            expand_date_range(d(7, 1), d(7, 3)),
+            vec![d(7, 1), d(7, 2), d(7, 3)]
+        );
+        // end == start is a single day.
+        assert_eq!(expand_date_range(d(7, 1), d(7, 1)), vec![d(7, 1)]);
+        // end < start collapses to a single day at start.
+        assert_eq!(expand_date_range(d(7, 5), d(7, 1)), vec![d(7, 5)]);
+        // A wildly large span is clamped to start + 366 days inclusive.
+        let huge = expand_date_range(d(1, 1), NaiveDate::from_ymd_opt(2030, 1, 1).unwrap());
+        assert_eq!(huge.len(), 367, "clamped to start + 366 days inclusive");
+    }
+
+    #[test]
+    fn set_date_range_replaces_group_and_dedups() {
+        let d = |m, dd| NaiveDate::from_ymd_opt(2025, m, dd).unwrap();
+        let nwd = |date, desc: &str| model::NonWorkingDate {
+            date,
+            description: desc.to_string(),
+        };
+        // A 2-day "Trip" group plus an unrelated holiday.
+        let mut dates = vec![
+            nwd(d(7, 1), "Trip"),
+            nwd(d(7, 2), "Trip"),
+            nwd(d(1, 1), "NY"),
+        ];
+        // Re-anchor the Trip group to a 3-day span starting one day later.
+        set_date_range(&mut dates, &[d(7, 1), d(7, 2)], d(7, 2), d(7, 4), "Trip");
+        let mut trip: Vec<_> = dates
+            .iter()
+            .filter(|x| x.description == "Trip")
+            .map(|x| x.date)
+            .collect();
+        trip.sort();
+        assert_eq!(trip, vec![d(7, 2), d(7, 3), d(7, 4)]);
+        // Unrelated holiday is untouched; no duplicate dates.
+        assert!(dates
+            .iter()
+            .any(|x| x.date == d(1, 1) && x.description == "NY"));
+        assert_eq!(dates.len(), 4);
+    }
+
+    #[test]
+    fn apply_date_pick_range_reanchors_group() {
+        use crate::datepicker::DatePickerResult;
+        let d = |m, dd| NaiveDate::from_ymd_opt(2025, m, dd).unwrap();
+        let nwd = |date, desc: &str| model::NonWorkingDate {
+            date,
+            description: desc.to_string(),
+        };
+        let mut dates = vec![nwd(d(7, 1), "PTO")];
+        let applied = apply_date_pick(
+            &mut dates,
+            d(7, 1),
+            &DatePickerResult::Range(d(7, 1), d(7, 3)),
+        );
+        assert!(applied);
+        let mut got: Vec<_> = dates.iter().map(|x| x.date).collect();
+        got.sort();
+        assert_eq!(got, vec![d(7, 1), d(7, 2), d(7, 3)]);
+        assert!(dates.iter().all(|x| x.description == "PTO"));
+        // A start that matches no group applies nothing.
+        assert!(!apply_date_pick(
+            &mut dates,
+            d(12, 25),
+            &DatePickerResult::Single(d(12, 25))
+        ));
     }
 
     #[test]
