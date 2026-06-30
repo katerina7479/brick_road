@@ -41,7 +41,7 @@ ditto -c -k --sequesterRsrc --keepParent "$APP_PATH" "$ZIP"
 echo "    created $ZIP ($(du -h "$ZIP" | cut -f1))"
 
 if [ "${1:-}" = "--publish" ]; then
-    echo "==> Publishing GitHub release $TAG…"
+    echo "==> Publishing GitHub release ${TAG}…"
     NOTES="$(cat <<EOF
 **Brick Road $TAG** — macOS (unsigned, built for \`$(uname -m)\`).
 
