@@ -2826,6 +2826,7 @@ pub(crate) fn paste_clipboard(
             entry.duration_days = wb.duration_days;
             entry.color = wb.color;
             entry.description = wb.description.clone();
+            entry.url = wb.url.clone();
             entry.priority = wb.priority;
             entry.t_shirt_size = wb.t_shirt_size.clone();
             entry.rollup = wb.rollup;
@@ -3509,6 +3510,22 @@ mod tests {
         assert_eq!(c, egui::Color32::from_rgb(255, 255, 255));
     }
 
+    // ── normalized_url ────────────────────────────────────────────────────────
+
+    #[test]
+    fn normalized_url_prepends_scheme_only_when_missing() {
+        assert_eq!(
+            normalized_url("https://example.com/a"),
+            "https://example.com/a"
+        );
+        assert_eq!(normalized_url("http://example.com"), "http://example.com");
+        assert_eq!(normalized_url("example.com/x"), "https://example.com/x");
+        assert_eq!(
+            normalized_url("  github.com/a/b  "),
+            "https://github.com/a/b"
+        );
+    }
+
     // ── block_color ───────────────────────────────────────────────────────────
 
     fn make_block_with_color(color: Option<[f32; 3]>) -> crate::model::WorkBlock {
@@ -3517,6 +3534,7 @@ mod tests {
             id: WorkBlockId(1),
             name: "test".to_string(),
             description: String::new(),
+            url: String::new(),
             start_day: 0,
             duration_days: 1,
             parent: None,
@@ -3654,6 +3672,7 @@ mod tests {
             id: WorkBlockId(1),
             name: String::new(),
             description: String::new(),
+            url: String::new(),
             start_day: 0,
             duration_days: 5,
             parent: None,
@@ -4153,6 +4172,7 @@ pub struct BlockInspectorState {
     pub bound: Option<WorkBlockId>,
     pub name_buf: String,
     pub desc_buf: String,
+    pub url_buf: String,
     /// Whether the multi-step reparent picker is open.
     pub reparent_open: bool,
     /// Which plan the user has selected for the parent pick (None = choosing plan).
@@ -4185,13 +4205,14 @@ fn hdr_swatch_color(rgb: [f32; 3]) -> egui::Color32 {
     egui::Color32::from_rgb(enc(rgb[0]), enc(rgb[1]), enc(rgb[2]))
 }
 
-/// Flush the inspector's name/description buffers to `id`, saving only if either
-/// actually changed. A blank name is ignored (a block must keep a name).
+/// Flush the inspector's name/description/url buffers to `id`, saving only if
+/// any actually changed. A blank name is ignored (a block must keep a name).
 fn flush_inspector_buffers(
     model: &mut model::Model,
     id: WorkBlockId,
     name_buf: &str,
     desc_buf: &str,
+    url_buf: &str,
     conn: &rusqlite::Connection,
 ) {
     let mut changed = false;
@@ -4205,10 +4226,77 @@ fn flush_inspector_buffers(
             wb.description = desc_buf.to_string();
             changed = true;
         }
+        let url = url_buf.trim();
+        if wb.url != url {
+            wb.url = url.to_string();
+            changed = true;
+        }
     }
     if changed {
         if let Err(e) = db::save_model(conn, model) {
             error!("save_model failed: {e}");
+        }
+    }
+}
+
+/// A block URL as launched: trimmed, with `https://` prepended when no scheme
+/// is present, so "github.com/x" opens in the browser instead of failing.
+fn normalized_url(raw: &str) -> String {
+    let url = raw.trim();
+    if url.contains("://") {
+        url.to_string()
+    } else {
+        format!("https://{url}")
+    }
+}
+
+/// Hand `url` to the platform's default handler (fire-and-forget). The URL is
+/// passed as a single exec argument — no shell interpolation.
+fn open_url_in_browser(raw: &str) {
+    let url = normalized_url(raw);
+    #[cfg(target_os = "macos")]
+    let spawned = std::process::Command::new("open").arg(&url).spawn();
+    #[cfg(target_os = "linux")]
+    let spawned = std::process::Command::new("xdg-open").arg(&url).spawn();
+    #[cfg(target_os = "windows")]
+    let spawned = std::process::Command::new("cmd")
+        .args(["/C", "start", "", &url])
+        .spawn();
+    if let Err(e) = spawned {
+        error!("failed to open URL {url}: {e}");
+    }
+}
+
+/// Ctrl/Cmd+O opens the selected block's URL in the default browser. Inert
+/// while a rename is in flight or egui owns the keyboard (e.g. typing in the
+/// inspector's URL field), and when the block has no URL.
+pub fn handle_open_url(
+    mut egui_ctx: EguiContexts,
+    keyboard: Res<ButtonInput<KeyCode>>,
+    name_edit: Res<NameEditState>,
+    selected: Res<SelectedBlock>,
+    lane_selected: Res<crate::bands::LaneSelection>,
+    model: Res<model::Model>,
+) {
+    if name_edit.editing.is_some() {
+        return;
+    }
+    if let Ok(ctx) = egui_ctx.ctx_mut() {
+        if ctx.wants_keyboard_input() {
+            return;
+        }
+    }
+    let ctrl = keyboard.any_pressed([KeyCode::ControlLeft, KeyCode::ControlRight])
+        || keyboard.any_pressed([KeyCode::SuperLeft, KeyCode::SuperRight]);
+    if !ctrl || !keyboard.just_pressed(KeyCode::KeyO) {
+        return;
+    }
+    let Some(id) = effective_inspector_id(selected.0, lane_selected.0) else {
+        return;
+    };
+    if let Some(wb) = model.work_blocks.get(&id) {
+        if !wb.url.trim().is_empty() {
+            open_url_in_browser(&wb.url);
         }
     }
 }
@@ -4460,12 +4548,17 @@ pub fn block_inspector_flyout_ui(
     // previously bound block's pending edits so nothing is lost on a quick switch.
     if state.bound != Some(id) {
         if let Some(prev) = state.bound {
-            let (n, d) = (state.name_buf.clone(), state.desc_buf.clone());
-            flush_inspector_buffers(&mut model, prev, &n, &d, &conn);
+            let (n, d, u) = (
+                state.name_buf.clone(),
+                state.desc_buf.clone(),
+                state.url_buf.clone(),
+            );
+            flush_inspector_buffers(&mut model, prev, &n, &d, &u, &conn);
         }
         if let Some(wb) = model.work_blocks.get(&id) {
             state.name_buf = wb.name.clone();
             state.desc_buf = wb.description.clone();
+            state.url_buf = wb.url.clone();
         }
         state.bound = Some(id);
         state.reparent_open = false;
@@ -4475,8 +4568,12 @@ pub fn block_inspector_flyout_ui(
     // Escape deselects — unless a text field is capturing the key, in which case
     // egui uses it to defocus the field first.
     if keys.just_pressed(KeyCode::Escape) && !ctx.wants_keyboard_input() {
-        let (n, d) = (state.name_buf.clone(), state.desc_buf.clone());
-        flush_inspector_buffers(&mut model, id, &n, &d, &conn);
+        let (n, d, u) = (
+            state.name_buf.clone(),
+            state.desc_buf.clone(),
+            state.url_buf.clone(),
+        );
+        flush_inspector_buffers(&mut model, id, &n, &d, &u, &conn);
         selected.0 = None;
         state.bound = None;
         return;
@@ -4503,6 +4600,8 @@ pub fn block_inspector_flyout_ui(
 
     let mut commit_name = false;
     let mut commit_desc = false;
+    let mut commit_url = false;
+    let mut open_url: Option<String> = None;
     // (size-map editing lives in the settings fly-out's SIZES section; the
     // inspector only selects a size, writing chosen_size.)
     let mut chosen_size: Option<(String, Day)> = None;
@@ -4557,6 +4656,29 @@ pub fn block_inspector_flyout_ui(
             if resp.lost_focus() {
                 commit_desc = true;
             }
+
+            // ── URL ────────────────────────────────────────────────────────
+            inspector_section(ui, "URL");
+            ui.horizontal(|ui| {
+                let has_url = !state.url_buf.trim().is_empty();
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let open_btn = ui.add_enabled(
+                        has_url,
+                        egui::Button::new(egui::RichText::new("↗").size(13.0).color(theme::ACCENT)),
+                    );
+                    if open_btn.on_hover_text("Open (Ctrl/Cmd+O)").clicked() {
+                        open_url = Some(state.url_buf.clone());
+                    }
+                    let resp = ui.add(
+                        egui::TextEdit::singleline(&mut state.url_buf)
+                            .desired_width(ui.available_width())
+                            .hint_text("https://…"),
+                    );
+                    if resp.lost_focus() {
+                        commit_url = true;
+                    }
+                });
+            });
 
             // ── Size ───────────────────────────────────────────────────────
             inspector_section(ui, "SIZE");
@@ -4721,11 +4843,19 @@ pub fn block_inspector_flyout_ui(
             }
         });
 
-    // Apply the recorded intent. Name/description go through the buffer flush
-    // (which saves only on a real change); the discrete pickers mutate directly.
-    if commit_name || commit_desc {
-        let (n, d) = (state.name_buf.clone(), state.desc_buf.clone());
-        flush_inspector_buffers(&mut model, id, &n, &d, &conn);
+    if let Some(url) = open_url {
+        open_url_in_browser(&url);
+    }
+    // Apply the recorded intent. Name/description/url go through the buffer
+    // flush (which saves only on a real change); the discrete pickers mutate
+    // directly.
+    if commit_name || commit_desc || commit_url {
+        let (n, d, u) = (
+            state.name_buf.clone(),
+            state.desc_buf.clone(),
+            state.url_buf.clone(),
+        );
+        flush_inspector_buffers(&mut model, id, &n, &d, &u, &conn);
     }
     // Only take a mutable borrow when there is something to apply — otherwise
     // `get_mut` would trip `Model`'s change-detection every frame the fly-out is
@@ -4768,8 +4898,12 @@ pub fn block_inspector_flyout_ui(
         state.reparent_plan_id = None;
     }
     if close {
-        let (n, d) = (state.name_buf.clone(), state.desc_buf.clone());
-        flush_inspector_buffers(&mut model, id, &n, &d, &conn);
+        let (n, d, u) = (
+            state.name_buf.clone(),
+            state.desc_buf.clone(),
+            state.url_buf.clone(),
+        );
+        flush_inspector_buffers(&mut model, id, &n, &d, &u, &conn);
         selected.0 = None;
         state.bound = None;
     }
