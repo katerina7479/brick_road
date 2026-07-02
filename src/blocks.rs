@@ -1698,6 +1698,10 @@ pub fn handle_block_drag(
                 undo.last_batch_edit = None;
             }
 
+            // A block dragged onto the Events row leaves every branch: events
+            // never repeat into plans (also swept at startup for old saves).
+            model.prune_event_ghosts_from_branches();
+
             if let Err(e) = db::save_model(&conn, &model) {
                 error!("save_model failed: {e}");
             }

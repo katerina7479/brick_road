@@ -439,7 +439,13 @@ fn setup_db(world: &mut World) {
     let conn = rusqlite::Connection::open(&db_path)
         .unwrap_or_else(|e| panic!("failed to open DB at {db_path:?}: {e}"));
     db::create_tables(&conn).expect("failed to create DB tables");
-    let model = db::load_model(&conn).expect("failed to load model");
+    let mut model = db::load_model(&conn).expect("failed to load model");
+    // Events never repeat into plans; sweep ghosts saved before that rule.
+    if model.prune_event_ghosts_from_branches() {
+        if let Err(e) = db::save_model(&conn, &model) {
+            error!("save_model failed: {e}");
+        }
+    }
     world.insert_resource(model);
     world.insert_non_send_resource(conn);
 }
