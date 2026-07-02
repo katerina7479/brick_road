@@ -148,16 +148,17 @@ pub fn update_visible_blocks(
     {
         return;
     }
-    let new_ids: Vec<WorkBlockId> = if view.kind == crate::ViewKind::Resource {
-        person_view.0.visible.clone()
-    } else {
-        match model.main_plan_id() {
+    let new_ids: Vec<WorkBlockId> = match view.kind {
+        crate::ViewKind::Resource => person_view.0.visible.clone(),
+        // Flow draws its own ribbons; no standard block sprites at all.
+        crate::ViewKind::Flow => Vec::new(),
+        crate::ViewKind::Plan => match model.main_plan_id() {
             Some(main_id) => visible_blocks(&model, main_id, drill.current())
                 .into_iter()
                 .map(|wb| wb.id)
                 .collect(),
             None => Vec::new(),
-        }
+        },
     };
     if new_ids != cache.ids {
         cache.ids = new_ids;
