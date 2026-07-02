@@ -7,7 +7,7 @@ use bevy::{
 };
 
 use crate::{
-    constants::{PIXELS_PER_DAY, ROW_HEIGHT},
+    constants::{EVENTS_ROW, PIXELS_PER_DAY, ROW_HEIGHT},
     model::Model,
     schedule,
 };
@@ -17,6 +17,10 @@ const HOME_LEFT_MARGIN: f32 = 24.0;
 /// Top-edge margin (px) for the first row anchor on Home / Fit.
 /// Sized to clear the egui top bar (~34 px) plus comfortable padding.
 const HOME_TOP_MARGIN: f32 = 84.0;
+/// World-Y of the top edge of the Events row — the highest usable strip.
+/// Home / Fit anchor here (not row 0) so the Events row is always visible
+/// below the pinned calendar ruler.
+const CANVAS_TOP_Y: f32 = (0.5 - EVENTS_ROW as f32) * ROW_HEIGHT;
 
 /// Desired camera state. Input systems write here; the smoothing system reads it.
 #[derive(Resource)]
@@ -51,7 +55,7 @@ pub fn home_target(
         zoom: 1.0,
         pos: Vec2::new(
             today_x + w * 0.5 - HOME_LEFT_MARGIN,
-            ROW_HEIGHT * 0.5 - (h * 0.5 - HOME_TOP_MARGIN),
+            CANVAS_TOP_Y - (h * 0.5 - HOME_TOP_MARGIN),
         ),
     }
 }
@@ -80,7 +84,7 @@ pub fn frame_day_span(
         zoom,
         pos: Vec2::new(
             (x_min + x_max) * 0.5,
-            ROW_HEIGHT * 0.5 - (h * 0.5 - HOME_TOP_MARGIN) * zoom,
+            CANVAS_TOP_Y - (h * 0.5 - HOME_TOP_MARGIN) * zoom,
         ),
     }
 }
@@ -242,12 +246,14 @@ pub fn fit_to_blocks(
         .iter()
         .map(|wb| crate::calendar::day_to_x(wb.start_day + wb.duration_days, &off, &model.calendar))
         .fold(f32::NEG_INFINITY, f32::max);
-    // Rows are explicit and can be sparse/negative, so frame the real lane range.
+    // Rows are explicit and can be sparse/negative, so frame the real lane
+    // range — always including the Events row so Fit leaves it visible up top.
     let min_row = visible
         .iter()
         .map(|wb| model.block_row(plan_id, wb.id))
         .min()
-        .unwrap_or(0) as f32;
+        .unwrap_or(0)
+        .min(EVENTS_ROW) as f32;
     let max_row = visible
         .iter()
         .map(|wb| model.block_row(plan_id, wb.id))
@@ -323,7 +329,9 @@ mod tests {
         let t = home_target(&win, today_day, &cfg);
         let today_x = day_to_x(today_day, &cfg.global_off_days(), &cfg);
         assert_eq!(t.pos.x, today_x + w * 0.5 - HOME_LEFT_MARGIN);
-        assert_eq!(t.pos.y, ROW_HEIGHT * 0.5 - (h * 0.5 - HOME_TOP_MARGIN));
+        // The anchor leaves the Events row (row −1) visible above row 0.
+        assert_eq!(t.pos.y, CANVAS_TOP_Y - (h * 0.5 - HOME_TOP_MARGIN));
+        assert_eq!(CANVAS_TOP_Y, ROW_HEIGHT * 1.5);
     }
 
     #[test]

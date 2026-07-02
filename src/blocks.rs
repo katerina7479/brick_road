@@ -92,6 +92,53 @@ pub fn block_edges_x(
     (left, right.max(left))
 }
 
+/// Main-canvas geometry `(left_x, right_x, center_y)` of `id` when it is a
+/// block on main's Events row (holiday-aware over the global off-days — the
+/// Events row has no resource). `None` for anything else. Cross-space
+/// dependency gestures and lane dep drawing anchor edges at the event with it.
+pub fn event_block_geom(model: &model::Model, id: WorkBlockId) -> Option<(f32, f32, f32)> {
+    let main_id = model.main_plan_id()?;
+    if !model.is_event_block(main_id, id) || !model.plans[&main_id].root_blocks.contains(&id) {
+        return None;
+    }
+    let wb = model.work_blocks.get(&id)?;
+    if wb.duration_days <= 0 {
+        return None;
+    }
+    let off = model.calendar.global_off_days();
+    let (left, w) = block_span_x(wb, &off, &model.calendar);
+    let (y, _) = block_extent(EVENTS_ROW);
+    Some((left, left + w, y))
+}
+
+/// The main Events-row block under `world`, as `(id, left_x, right_x)`. Lets
+/// the lane dep gesture drop onto an event across spaces.
+pub fn event_block_at(model: &model::Model, world: Vec2) -> Option<(WorkBlockId, f32, f32)> {
+    let main_id = model.main_plan_id()?;
+    let (_, height) = block_extent(EVENTS_ROW);
+    let roots = model.plans.get(&main_id)?.root_blocks.clone();
+    for id in roots {
+        let Some((l, r, y)) = event_block_geom(model, id) else {
+            continue;
+        };
+        if world.x >= l && world.x <= r && (world.y - y).abs() <= height * 0.5 {
+            return Some((id, l, r));
+        }
+    }
+    None
+}
+
+/// Default duration for a new top-level block created on `row`: events
+/// (external targets/milestones on the Events row) are single-day marks;
+/// work blocks default to a week.
+fn default_new_block_duration(row: i32) -> Day {
+    if row == EVENTS_ROW {
+        1
+    } else {
+        5
+    }
+}
+
 /// Maps a resolved canvas world position to its `(day, row)` cell.
 /// Returns `None` when `world.y <= bands_top` (swimlane territory); pass
 /// `bands_top = None` when drilled in or there are no bands to skip that guard.
@@ -1275,7 +1322,7 @@ pub fn handle_canvas_create(
         let id = model.create_work_block("New Block");
         if let Some(wb) = model.work_blocks.get_mut(&id) {
             wb.start_day = raw_start.max(branch_min);
-            wb.duration_days = 5;
+            wb.duration_days = default_new_block_duration(row);
         }
         if let Some(plan) = model.plans.get_mut(&plan_id) {
             plan.root_blocks.push(id);
@@ -2278,23 +2325,14 @@ pub fn handle_dep_drag(
     // successor_finish), so pass the drop/finish flags in that order.)
     if mouse.just_released(MouseButton::Left) {
         if let Some(succ_id) = drag.from.take() {
-            if let Some((pred_id, pred_finish)) = block_at(world_pos) {
-                if pred_id != succ_id {
-                    let dep_type = dep_type_from_edges(pred_finish, drag.from_right);
-                    // Create only (idempotent); deletion is click-the-edge + Delete.
-                    let exists = model.dependencies.values().any(|d| {
-                        d.predecessor == pred_id
-                            && d.successor == succ_id
-                            && d.dependency_type == dep_type
-                    });
-                    if !exists {
-                        model.create_dependency(pred_id, succ_id, dep_type);
-                        if let Err(e) = crate::db::save_model(&conn, &model) {
-                            error!("save_model failed: {e}");
-                        }
-                    }
-                }
-            }
+            finish_dep_drop(
+                &mut model,
+                &conn,
+                succ_id,
+                drag.from_right,
+                world_pos,
+                block_at(world_pos),
+            );
         }
     }
 
@@ -2306,21 +2344,63 @@ pub fn handle_dep_drag(
 
     if mouse.just_released(MouseButton::Right) {
         if let Some(succ_id) = drag.from.take() {
-            if let Some((pred_id, pred_finish)) = block_at(world_pos) {
-                if pred_id != succ_id {
-                    let dep_type = dep_type_from_edges(pred_finish, drag.from_right);
-                    let exists = model.dependencies.values().any(|d| {
-                        d.predecessor == pred_id
-                            && d.successor == succ_id
-                            && d.dependency_type == dep_type
-                    });
-                    if !exists {
-                        model.create_dependency(pred_id, succ_id, dep_type);
-                        if let Err(e) = crate::db::save_model(&conn, &model) {
-                            error!("save_model failed: {e}");
-                        }
-                    }
-                }
+            finish_dep_drop(
+                &mut model,
+                &conn,
+                succ_id,
+                drag.from_right,
+                world_pos,
+                block_at(world_pos),
+            );
+        }
+    }
+}
+
+/// Completes a dep drag on release. A drop on a main-canvas block creates a
+/// main-plan dependency (existing behavior). When the dragged handle belongs
+/// to an Events-row block and the drop lands on a lane block instead, the dep
+/// is created branch-local with the event as successor: the plan block must
+/// precede the event, and slipping past it flags a violation without ever
+/// moving the event (deps never move main blocks from a branch).
+fn finish_dep_drop(
+    model: &mut model::Model,
+    conn: &rusqlite::Connection,
+    succ_id: WorkBlockId,
+    from_right: bool,
+    world_pos: Vec2,
+    main_hit: Option<(WorkBlockId, bool)>,
+) {
+    if let Some((pred_id, pred_finish)) = main_hit {
+        if pred_id == succ_id {
+            return;
+        }
+        let dep_type = dep_type_from_edges(pred_finish, from_right);
+        // Create only (idempotent); deletion is click-the-edge + Delete.
+        let exists = model.dependencies.values().any(|d| {
+            d.predecessor == pred_id && d.successor == succ_id && d.dependency_type == dep_type
+        });
+        if !exists {
+            model.create_dependency(pred_id, succ_id, dep_type);
+            if let Err(e) = crate::db::save_model(conn, model) {
+                error!("save_model failed: {e}");
+            }
+        }
+    } else if event_block_geom(model, succ_id).is_some() {
+        let Some(hit) = crate::bands::lane_block_at(model, world_pos) else {
+            return;
+        };
+        let pred_finish = world_pos.x >= (hit.left_x + hit.right_x) * 0.5;
+        let dep_type = dep_type_from_edges(pred_finish, from_right);
+        let exists = model.dependencies.values().any(|d| {
+            d.plan_id == hit.plan
+                && d.predecessor == hit.id
+                && d.successor == succ_id
+                && d.dependency_type == dep_type
+        });
+        if !exists {
+            model.create_dependency_in(hit.plan, hit.id, succ_id, dep_type);
+            if let Err(e) = crate::db::save_model(conn, model) {
+                error!("save_model failed: {e}");
             }
         }
     }
@@ -3602,6 +3682,40 @@ mod tests {
         assert_eq!(c, egui::Color32::from_rgb(255, 255, 255));
     }
 
+    // ── event geometry ───────────────────────────────────────────────────────
+
+    #[test]
+    fn event_block_geom_and_hit_test() {
+        let mut m = Model::default();
+        let plan = m.create_plan("main", None);
+        let ev = m.add_block_to_plan(plan, "GA", 2, 1, crate::constants::EVENTS_ROW);
+        let work = m.add_block_to_plan(plan, "work", 2, 1, 0);
+
+        assert!(
+            event_block_geom(&m, work).is_none(),
+            "a resource-row block has no event geometry"
+        );
+        let (l, r, y) = event_block_geom(&m, ev).expect("event has geometry");
+        assert!(r > l);
+        assert_eq!(y, ROW_HEIGHT, "the Events row centre sits one row above 0");
+
+        let mid = Vec2::new((l + r) * 0.5, y);
+        assert_eq!(event_block_at(&m, mid).map(|(id, _, _)| id), Some(ev));
+        assert!(
+            event_block_at(&m, Vec2::new((l + r) * 0.5, 0.0)).is_none(),
+            "row 0 is not the Events row"
+        );
+    }
+
+    // ── default_new_block_duration ───────────────────────────────────────────
+
+    #[test]
+    fn new_events_default_to_a_single_day() {
+        assert_eq!(default_new_block_duration(EVENTS_ROW), 1);
+        assert_eq!(default_new_block_duration(0), 5);
+        assert_eq!(default_new_block_duration(3), 5);
+    }
+
     // ── normalized_url ────────────────────────────────────────────────────────
 
     #[test]
@@ -4160,7 +4274,7 @@ pub fn draw_create_mode_overlay(
             let new_id = model.create_work_block(name);
             if let Some(wb) = model.work_blocks.get_mut(&new_id) {
                 wb.start_day = start_day;
-                wb.duration_days = 5;
+                wb.duration_days = default_new_block_duration(new_row);
             }
             if let Some(plan) = model.plans.get_mut(&plan_id) {
                 plan.root_blocks.push(new_id);
