@@ -236,6 +236,20 @@ pub(crate) fn ortho_scale(proj: &Projection) -> Option<f32> {
 
 /// True when `world` falls within the axis-aligned rectangle of `sprite`
 /// positioned by `transform`. Returns `false` for sprites without a custom size.
+/// The block a plain click on `hits` (stable order) should select: when the
+/// current selection is among the hits, the next one in cyclic order — so
+/// re-clicking the shared region of overlapping blocks toggles through them.
+/// Otherwise the first hit. A single non-overlapped block cycles to itself.
+pub(crate) fn cycle_hit(hits: &[WorkBlockId], current: Option<WorkBlockId>) -> Option<WorkBlockId> {
+    if hits.is_empty() {
+        return None;
+    }
+    match current.and_then(|c| hits.iter().position(|&h| h == c)) {
+        Some(i) => Some(hits[(i + 1) % hits.len()]),
+        None => hits.first().copied(),
+    }
+}
+
 pub(crate) fn sprite_hit(transform: &Transform, sprite: &Sprite, world: Vec2) -> bool {
     let Some(size) = sprite.custom_size else {
         return false;
@@ -605,7 +619,7 @@ pub fn sync_description_dots(
 #[allow(clippy::too_many_arguments)]
 pub fn sync_block_sprites(
     model: Res<model::Model>,
-    _selected: Res<SelectedBlock>,
+    selected: Res<SelectedBlock>,
     set: Res<SelectedBlocks>,
     today: Res<schedule::TodayMarker>,
     view: Res<crate::ViewMode>,
@@ -618,6 +632,33 @@ pub fn sync_block_sprites(
 
     let main_id = model.main_plan_id();
     let (global_offs, row_offs) = compute_row_offs(&model);
+
+    // Row resolution shared by the layout pass and the overlap sweep below.
+    let row_of = |id: WorkBlockId| -> i32 {
+        if view.by_person {
+            person_view.0.leaf_row.get(&id).copied().unwrap_or(0)
+        } else {
+            main_id.map(|m| model.block_row(m, id)).unwrap_or(0)
+        }
+    };
+
+    // Blocks sharing a row with a day-overlapping neighbour render slightly
+    // translucent so the collision is visible instead of one bar silently
+    // hiding the other.
+    let spans: Vec<(WorkBlockId, i32, model::Day, model::Day)> = query
+        .iter()
+        .filter_map(|(bs, _, _)| {
+            let wb = model.work_blocks.get(&bs.work_block_id)?;
+            Some((
+                bs.work_block_id,
+                row_of(bs.work_block_id),
+                wb.start_day,
+                wb.start_day + wb.duration_days,
+            ))
+        })
+        .collect();
+    let overlapping = overlapping_block_ids(&spans);
+
     for (block_sprite, mut transform, mut sprite) in &mut query {
         let id = block_sprite.work_block_id;
         let Some(wb) = model.work_blocks.get(&id) else {
@@ -625,11 +666,7 @@ pub fn sync_block_sprites(
         };
         // By-Person: use person row from cached layout; use global off-days for x.
         // By-Plan: read live model row so vertical drags track cursor immediately.
-        let row = if view.by_person {
-            person_view.0.leaf_row.get(&id).copied().unwrap_or(0)
-        } else {
-            main_id.map(|m| model.block_row(m, id)).unwrap_or(0)
-        };
+        let row = row_of(id);
         // By-Person uses only global off-days (per-person stretching is a later refinement).
         let off = if view.by_person {
             &global_offs
@@ -675,7 +712,51 @@ pub fn sync_block_sprites(
             let b = c.blue + (lum - c.blue) * desat;
             sprite.color = Color::from(LinearRgba::new(r * 0.85, g * 0.85, b * 0.85, 0.80));
         }
+
+        // Overlap feedback: colliding blocks go slightly translucent so the
+        // shared region reads as two bars, and the selected block pops above
+        // its partners (click-cycling brings each to the front in turn).
+        transform.translation.z = if selected.0 == Some(id) { 0.05 } else { 0.0 };
+        if overlapping.contains(&id) {
+            let mut c = sprite.color.to_linear();
+            c.alpha = c.alpha.min(0.82);
+            sprite.color = Color::from(c);
+        }
     }
+}
+
+/// Ids of blocks that share a row with another block whose `[start, end)` day
+/// span intersects theirs. Touching end-to-start is not an overlap; blocks
+/// with no duration never overlap.
+pub(crate) fn overlapping_block_ids(
+    spans: &[(WorkBlockId, i32, model::Day, model::Day)],
+) -> HashSet<WorkBlockId> {
+    let mut sorted: Vec<_> = spans.iter().copied().filter(|(_, _, s, e)| e > s).collect();
+    sorted.sort_by_key(|(id, row, start, _)| (*row, *start, id.0));
+    let mut out = HashSet::new();
+    let mut i = 0;
+    while i < sorted.len() {
+        let row = sorted[i].1;
+        // Sweep one row: a block starting before the running max end overlaps
+        // the block that owns that end (its start is ≤ ours, being sorted).
+        let mut active_end = model::Day::MIN;
+        let mut active_id: Option<WorkBlockId> = None;
+        while i < sorted.len() && sorted[i].1 == row {
+            let (id, _, start, end) = sorted[i];
+            if start < active_end {
+                out.insert(id);
+                if let Some(a) = active_id {
+                    out.insert(a);
+                }
+            }
+            if end > active_end {
+                active_end = end;
+                active_id = Some(id);
+            }
+            i += 1;
+        }
+    }
+    out
 }
 
 /// Spawns, updates, and despawns ghost block sprites overlaid on the timeline
@@ -1182,23 +1263,32 @@ pub fn handle_block_selection(
         selected_plan.0 = None;
     }
 
-    // Hit-test against the block sprites.
-    let mut clicked: Option<WorkBlockId> = None;
-    for (block_sprite, transform, sprite) in &block_query {
-        if sprite_hit(transform, sprite, world_pos) {
-            clicked = Some(block_sprite.work_block_id);
-            break;
-        }
-    }
+    // Hit-test against the block sprites — all of them, in stable id order,
+    // so a click on the shared region of overlapping blocks can cycle.
+    let mut hits: Vec<WorkBlockId> = block_query
+        .iter()
+        .filter(|(_, transform, sprite)| sprite_hit(transform, sprite, world_pos))
+        .map(|(bs, _, _)| bs.work_block_id)
+        .collect();
+    hits.sort_by_key(|id| id.0);
+
+    let shift = keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]);
+    let ctrl = keys.any_pressed([
+        KeyCode::ControlLeft,
+        KeyCode::ControlRight,
+        KeyCode::SuperLeft,
+        KeyCode::SuperRight,
+    ]);
+    // A plain click cycles through overlapping blocks (re-clicking the shared
+    // region selects the next one under the cursor); modifier clicks toggle
+    // the top hit so multi-select stays predictable.
+    let clicked = if shift || ctrl {
+        hits.first().copied()
+    } else {
+        cycle_hit(&hits, selected.0)
+    };
 
     if let Some(id) = clicked {
-        let shift = keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]);
-        let ctrl = keys.any_pressed([
-            KeyCode::ControlLeft,
-            KeyCode::ControlRight,
-            KeyCode::SuperLeft,
-            KeyCode::SuperRight,
-        ]);
         if shift || ctrl {
             // Toggle id in the multi-select set.
             if set.0.contains(&id) {
@@ -1535,6 +1625,7 @@ pub fn handle_block_drag(
     resize: Res<ResizeDragState>,
     dep_drag: Res<DepDragState>,
     set: Res<SelectedBlocks>,
+    selected: Res<SelectedBlock>,
     mut undo: ResMut<UndoStack>,
 ) {
     if dep_drag.from.is_some() {
@@ -1570,9 +1661,21 @@ pub fn handle_block_drag(
             return;
         }
         let off = model.calendar.global_off_days();
-        for (block_sprite, transform, sprite) in &block_query {
-            if sprite_hit(transform, sprite, world_pos) {
-                let id = block_sprite.work_block_id;
+        // Collect every sprite under the cursor and grab the selected one when
+        // it's among them: selection runs first this frame and may have cycled
+        // to a buried overlapping block — the drag must move what's selected.
+        let mut hits: Vec<WorkBlockId> = block_query
+            .iter()
+            .filter(|(_, transform, sprite)| sprite_hit(transform, sprite, world_pos))
+            .map(|(bs, _, _)| bs.work_block_id)
+            .collect();
+        hits.sort_by_key(|id| id.0);
+        let grab = selected
+            .0
+            .filter(|s| hits.contains(s))
+            .or_else(|| hits.first().copied());
+        if let Some(id) = grab {
+            {
                 let start_px = model
                     .work_blocks
                     .get(&id)
@@ -1615,7 +1718,6 @@ pub fn handle_block_drag(
 
                 // Selection is owned by handle_block_selection (which toggles on
                 // re-click); don't re-select here or a second click can't deselect.
-                break;
             }
         }
         return;
@@ -3705,6 +3807,46 @@ mod tests {
             event_block_at(&m, Vec2::new((l + r) * 0.5, 0.0)).is_none(),
             "row 0 is not the Events row"
         );
+    }
+
+    // ── overlap: click-cycling + detection ──────────────────────────────────
+
+    #[test]
+    fn cycle_hit_toggles_through_overlapping_blocks() {
+        let id = |n: u64| WorkBlockId(n);
+        let hits = [id(1), id(2), id(3)];
+        // Nothing selected (or selection not under cursor) → first hit.
+        assert_eq!(cycle_hit(&hits, None), Some(id(1)));
+        assert_eq!(cycle_hit(&hits, Some(id(9))), Some(id(1)));
+        // Selected among hits → the next one, wrapping.
+        assert_eq!(cycle_hit(&hits, Some(id(1))), Some(id(2)));
+        assert_eq!(cycle_hit(&hits, Some(id(3))), Some(id(1)));
+        // A single non-overlapped block cycles to itself (stable selection).
+        assert_eq!(cycle_hit(&[id(5)], Some(id(5))), Some(id(5)));
+        assert_eq!(cycle_hit(&[], Some(id(5))), None);
+    }
+
+    #[test]
+    fn overlapping_block_ids_flags_row_collisions_only() {
+        let id = |n: u64| WorkBlockId(n);
+        // A[0,10) overlaps B[2,3) and C[4,5) on row 0; D touches A end-to-start;
+        // E overlaps nothing on row 1 despite matching A's days.
+        let spans = [
+            (id(1), 0, 0, 10),
+            (id(2), 0, 2, 3),
+            (id(3), 0, 4, 5),
+            (id(4), 0, 10, 12),
+            (id(5), 1, 0, 10),
+        ];
+        let out = overlapping_block_ids(&spans);
+        assert!(out.contains(&id(1)));
+        assert!(out.contains(&id(2)));
+        assert!(out.contains(&id(3)));
+        assert!(!out.contains(&id(4)), "end-to-start touch is not overlap");
+        assert!(!out.contains(&id(5)), "other rows don't collide");
+        // Zero-duration blocks never overlap.
+        let out = overlapping_block_ids(&[(id(1), 0, 5, 5), (id(2), 0, 0, 10)]);
+        assert!(out.is_empty());
     }
 
     // ── default_new_block_duration ───────────────────────────────────────────
