@@ -267,7 +267,7 @@ pub fn draw_band_overlays(
     cam_q: Query<(&Transform, &Projection), With<Camera2d>>,
     windows: Query<&Window>,
 ) {
-    if view.by_person {
+    if view.kind != crate::ViewKind::Plan {
         return;
     }
     let Ok((cam_t, proj)) = cam_q.single() else {
@@ -353,7 +353,7 @@ pub fn sync_band_visuals(
     for e in ents.0.drain(..) {
         commands.entity(e).despawn();
     }
-    if !drill.path.is_empty() || view.by_person {
+    if !drill.path.is_empty() || view.kind != crate::ViewKind::Plan {
         return; // drilled in or by-person view: no branch lanes
     }
 

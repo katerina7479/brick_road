@@ -116,7 +116,7 @@ pub fn update_person_view(
     if !model.is_changed() && !view.is_changed() {
         return;
     }
-    if !view.by_person {
+    if view.kind != crate::ViewKind::Resource {
         return;
     }
     let plan_id = view.plan.or_else(|| model.main_plan_id());
@@ -148,7 +148,7 @@ pub fn update_visible_blocks(
     {
         return;
     }
-    let new_ids: Vec<WorkBlockId> = if view.by_person {
+    let new_ids: Vec<WorkBlockId> = if view.kind == crate::ViewKind::Resource {
         person_view.0.visible.clone()
     } else {
         match model.main_plan_id() {

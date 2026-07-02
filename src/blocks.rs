@@ -421,7 +421,7 @@ pub fn reconcile_block_sprites(
         let Some(wb) = model.work_blocks.get(&id) else {
             continue;
         };
-        let row = if view.by_person {
+        let row = if view.kind == crate::ViewKind::Resource {
             person_view.0.leaf_row.get(&id).copied().unwrap_or(0)
         } else {
             main_id.map(|m| model.block_row(m, id)).unwrap_or(0)
@@ -635,7 +635,7 @@ pub fn sync_block_sprites(
 
     // Row resolution shared by the layout pass and the overlap sweep below.
     let row_of = |id: WorkBlockId| -> i32 {
-        if view.by_person {
+        if view.kind == crate::ViewKind::Resource {
             person_view.0.leaf_row.get(&id).copied().unwrap_or(0)
         } else {
             main_id.map(|m| model.block_row(m, id)).unwrap_or(0)
@@ -668,7 +668,7 @@ pub fn sync_block_sprites(
         // By-Plan: read live model row so vertical drags track cursor immediately.
         let row = row_of(id);
         // By-Person uses only global off-days (per-person stretching is a later refinement).
-        let off = if view.by_person {
+        let off = if view.kind == crate::ViewKind::Resource {
             &global_offs
         } else {
             row_offs.get(&row).unwrap_or(&global_offs)
