@@ -3,6 +3,8 @@ use std::collections::{HashMap, HashSet};
 use bevy::prelude::Resource;
 use chrono::NaiveDate;
 
+use crate::constants::EVENTS_ROW;
+
 macro_rules! id_newtype {
     ($name:ident) => {
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -597,10 +599,61 @@ impl Model {
             .and_then(|p| p.row_name(scope, row))
     }
 
+    /// Whether `block` sits on the Events row within `plan`. Events are
+    /// plan-local markers (external targets/milestones): they never repeat
+    /// into branches — not at fork, not via new-block propagation — and an
+    /// accept-as-main keeps main's events untouched.
+    pub fn is_event_block(&self, plan: PlanId, block: WorkBlockId) -> bool {
+        self.block_row(plan, block) == EVENTS_ROW
+    }
+
+    /// Removes from every branch any ghost whose block sits on main's Events
+    /// row, along with the branch's lane entry and any branch-local dependency
+    /// touching it. Events never repeat into plans; this sweeps ghosts that
+    /// predate that rule or that appeared by moving a block onto the Events
+    /// row after branches inherited it. Returns whether anything changed (the
+    /// caller persists).
+    pub fn prune_event_ghosts_from_branches(&mut self) -> bool {
+        let Some(main_id) = self.main_plan_id() else {
+            return false;
+        };
+        let events: HashSet<WorkBlockId> = self.plans[&main_id]
+            .root_blocks
+            .iter()
+            .copied()
+            .filter(|id| self.is_event_block(main_id, *id))
+            .collect();
+        if events.is_empty() {
+            return false;
+        }
+        let mut changed = false;
+        let mut branch_ids: HashSet<PlanId> = HashSet::new();
+        for plan in self.plans.values_mut() {
+            if plan.branch_start_day.is_none() {
+                continue;
+            }
+            branch_ids.insert(plan.id);
+            let roots_before = plan.root_blocks.len();
+            plan.root_blocks.retain(|id| !events.contains(id));
+            let rows_before = plan.block_rows.len();
+            plan.block_rows.retain(|id, _| !events.contains(id));
+            changed |=
+                plan.root_blocks.len() != roots_before || plan.block_rows.len() != rows_before;
+        }
+        if changed {
+            self.dependencies.retain(|_, d| {
+                !(branch_ids.contains(&d.plan_id)
+                    && (events.contains(&d.predecessor) || events.contains(&d.successor)))
+            });
+        }
+        changed
+    }
+
     /// Forks `main` into a new branch at `fork_day`. The branch inherits main's
     /// blocks from the fork day forward by copying their ids (the blocks stay
     /// shared with main); blocks before the fork are shared trunk and not
-    /// copied. Returns the new branch's id, or `None` if there is no main plan.
+    /// copied. Events-row blocks stay main-only. Returns the new branch's id,
+    /// or `None` if there is no main plan.
     pub fn fork_main(&mut self, fork_day: Day) -> Option<PlanId> {
         let main_id = self.main_plan_id()?;
         let forward: Vec<WorkBlockId> = self.plans[&main_id]
@@ -608,9 +661,11 @@ impl Model {
             .iter()
             .copied()
             .filter(|id| {
-                self.work_blocks
-                    .get(id)
-                    .is_some_and(|wb| wb.start_day >= fork_day)
+                !self.is_event_block(main_id, *id)
+                    && self
+                        .work_blocks
+                        .get(id)
+                        .is_some_and(|wb| wb.start_day >= fork_day)
             })
             .collect();
         let row_names = self.plans[&main_id].row_names.clone();
@@ -650,8 +705,12 @@ impl Model {
             return;
         };
         // The lane to snapshot into each branch is main's current lane for the
-        // block (a freshly created block defaults to row 0).
+        // block (a freshly created block defaults to row 0). Events are
+        // main-local and never repeat into branches.
         let main_row = self.block_row(main_id, block_id);
+        if main_row == EVENTS_ROW {
+            return;
+        }
         for plan in self.plans.values_mut() {
             let Some(fork) = plan.branch_start_day else {
                 continue; // branches only
@@ -799,16 +858,18 @@ impl Model {
         let b_block_rows = branch.block_rows.clone();
 
         // --- Step 1: new main membership = trunk (< F) ++ B's future, deduped. ---
+        // Events ride along with the trunk: the branch never inherited them
+        // (see fork_main), so their absence from B is not a removal.
         let old_main_roots = self.plans[&main_id].root_blocks.clone();
         let mut new_main_roots: Vec<WorkBlockId> = Vec::new();
         let mut seen: HashSet<WorkBlockId> = HashSet::new();
-        // Trunk first, in main's existing order.
+        // Trunk (and events) first, in main's existing order.
         for &id in &old_main_roots {
             let is_trunk = self
                 .work_blocks
                 .get(&id)
                 .is_some_and(|wb| wb.start_day < fork_day);
-            if is_trunk && seen.insert(id) {
+            if (is_trunk || self.is_event_block(main_id, id)) && seen.insert(id) {
                 new_main_roots.push(id);
             }
         }
@@ -1159,6 +1220,111 @@ mod tests {
         assert!(m.plans[&main].root_blocks.contains(&b));
         assert!(m.plans[&branch].root_blocks.contains(&b));
         assert_eq!(m.work_blocks.len(), 1, "no duplicate block was created");
+    }
+
+    #[test]
+    fn fork_does_not_inherit_events_row_blocks() {
+        // An event (block on the Events row) qualifies by start_day but must
+        // stay main-only at fork.
+        let mut m = Model::default();
+        let main = m.create_plan("main", None);
+        let work = placed(&mut m, main, "work", 5, 5);
+        let event = m.add_block_to_plan(main, "GA Launch", 10, 1, EVENTS_ROW);
+        let branch = m.fork_main(0).unwrap();
+        assert!(m.plans[&branch].root_blocks.contains(&work));
+        assert!(
+            !m.plans[&branch].root_blocks.contains(&event),
+            "events must not repeat into the branch"
+        );
+        assert!(!m.plans[&branch].block_rows.contains_key(&event));
+        assert!(m.plans[&main].root_blocks.contains(&event));
+    }
+
+    #[test]
+    fn new_event_does_not_propagate_to_branches() {
+        // Creating an event in main after a branch exists must not link it
+        // through as a ghost.
+        let mut m = Model::default();
+        let main = m.create_plan("main", None);
+        let branch = m.fork_main(0).unwrap();
+        let event = m.add_block_to_plan(main, "Beta cutoff", 5, 1, EVENTS_ROW);
+        m.link_main_block_to_branches(event);
+        assert!(
+            !m.plans[&branch].root_blocks.contains(&event),
+            "an event must not propagate to existing branches"
+        );
+        // A normal block from the same starting state still propagates.
+        let work = placed(&mut m, main, "work", 5, 5);
+        m.link_main_block_to_branches(work);
+        assert!(m.plans[&branch].root_blocks.contains(&work));
+    }
+
+    #[test]
+    fn prune_removes_stale_event_ghosts_from_branches() {
+        // Simulate a pre-rule save: the branch inherited a block that later
+        // became (or already was) a main event, plus a branch-local dep on it.
+        let mut m = Model::default();
+        let main = m.create_plan("main", None);
+        let event = placed(&mut m, main, "GA Launch", 10, 1);
+        let work = placed(&mut m, main, "work", 5, 5);
+        let branch = m.fork_main(0).unwrap();
+        assert!(m.plans[&branch].root_blocks.contains(&event));
+        m.create_dependency_in(branch, work, event, DependencyType::FinishToStart);
+        // The block moves onto main's Events row.
+        m.set_block_row(main, event, EVENTS_ROW);
+
+        assert!(m.prune_event_ghosts_from_branches());
+
+        assert!(
+            !m.plans[&branch].root_blocks.contains(&event),
+            "the event's ghost must leave the branch"
+        );
+        assert!(!m.plans[&branch].block_rows.contains_key(&event));
+        assert!(
+            !m.dependencies
+                .values()
+                .any(|d| d.plan_id == branch && (d.predecessor == event || d.successor == event)),
+            "branch-local deps touching the event are pruned"
+        );
+        assert!(
+            m.plans[&branch].root_blocks.contains(&work),
+            "other ghosts stay"
+        );
+        assert!(
+            m.plans[&main].root_blocks.contains(&event),
+            "main keeps the event"
+        );
+        // Idempotent: a second sweep finds nothing.
+        assert!(!m.prune_event_ghosts_from_branches());
+    }
+
+    #[test]
+    fn accept_keeps_main_events_and_siblings_do_not_gain_them() {
+        // The branch never inherited main's event, so its absence from the
+        // branch is not a removal: accept must keep the event in main, and the
+        // post-accept rebase must not leak it into siblings.
+        let mut m = Model::default();
+        let main = m.create_plan("main", None);
+        let event = m.add_block_to_plan(main, "GA Launch", 10, 1, EVENTS_ROW);
+        let accepted = m.fork_main(0).unwrap();
+        let sibling = m.fork_main(0).unwrap();
+
+        m.accept_plan_as_main(accepted);
+
+        assert!(
+            m.work_blocks.contains_key(&event),
+            "accept must not delete main's event as a dropped ghost"
+        );
+        assert!(m.plans[&main].root_blocks.contains(&event));
+        assert_eq!(
+            m.block_row(main, event),
+            EVENTS_ROW,
+            "the event keeps its Events-row lane"
+        );
+        assert!(
+            !m.plans[&sibling].root_blocks.contains(&event),
+            "rebase must not add the event to siblings"
+        );
     }
 
     #[test]

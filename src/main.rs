@@ -439,7 +439,13 @@ fn setup_db(world: &mut World) {
     let conn = rusqlite::Connection::open(&db_path)
         .unwrap_or_else(|e| panic!("failed to open DB at {db_path:?}: {e}"));
     db::create_tables(&conn).expect("failed to create DB tables");
-    let model = db::load_model(&conn).expect("failed to load model");
+    let mut model = db::load_model(&conn).expect("failed to load model");
+    // Events never repeat into plans; sweep ghosts saved before that rule.
+    if model.prune_event_ghosts_from_branches() {
+        if let Err(e) = db::save_model(&conn, &model) {
+            error!("save_model failed: {e}");
+        }
+    }
     world.insert_resource(model);
     world.insert_non_send_resource(conn);
 }
@@ -1673,6 +1679,16 @@ fn resource_gutter_ui(
                         egui::FontId::proportional(13.0),
                         color,
                     );
+                } else if e.row < 0 {
+                    // The Events row: a fixed label, not a resource — no rename,
+                    // no resource picker, no drag-reorder.
+                    ui.painter().text(
+                        egui::pos2(rect.left() + 10.0, cy),
+                        egui::Align2::LEFT_CENTER,
+                        default_row_label(e.row),
+                        egui::FontId::proportional(13.0),
+                        egui::Color32::from_rgb(206, 190, 164),
+                    );
                 } else {
                     let hot = egui::Rect::from_min_max(
                         egui::pos2(rect.left(), cy - half),
@@ -1836,7 +1852,9 @@ fn resource_gutter_ui(
                     .collect::<Vec<_>>();
                 let lane = lane_rows.first().map(|e| {
                     let row0_y = e.world_y + e.row as f32 * rh;
-                    let max_row = lane_rows.iter().map(|e| e.row).max().unwrap_or(0);
+                    // Floor at 0: the Events row (−1) is never a reorder target,
+                    // and clamp(0, max) needs max ≥ 0 even in an Events-only lane.
+                    let max_row = lane_rows.iter().map(|e| e.row).max().unwrap_or(0).max(0);
                     (row0_y, max_row)
                 });
                 if let (Some((row0_y, max_row)), Some(p)) = (lane, ptr) {
@@ -2052,9 +2070,13 @@ fn apply_row_reorder(
 }
 
 /// The default label for resource row `row` (0-based) when the user hasn't
-/// named it.
+/// named it. The fixed Events row above the resources has its own name.
 fn default_row_label(row: i32) -> String {
-    format!("Resource {}", row + 1)
+    if row == constants::EVENTS_ROW {
+        "Events".to_string()
+    } else {
+        format!("Resource {}", row + 1)
+    }
 }
 
 /// The accent colour marking a resource's type in the gutter and settings.
