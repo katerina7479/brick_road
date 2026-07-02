@@ -23,7 +23,7 @@ cargo install cargo-bundle   # one-time; installs the bundler
 cargo bundle --release       # produces target/release/bundle/osx/Brick Road.app
 ```
 
-The resulting `.app` is **unsigned**. On first launch on a new Mac, right-click → Open to bypass Gatekeeper. The DB is stored in `~/Library/Application Support/brick_road/brick_road.db` (not inside the bundle), so replacing the `.app` with a new build never clobbers user data. Code-signing + notarization for wider distribution is a separate future step.
+The resulting `.app` is **unsigned**. On first launch on a new Mac, right-click → Open to bypass Gatekeeper. Documents live outside the bundle (see § Documents below), so replacing the `.app` with a new build never clobbers user data. Code-signing + notarization for wider distribution is a separate future step.
 
 There is **no hosted CI** (no GitHub Actions — deliberately, to avoid paid CI minutes). All checks run **locally via git hooks** before commit/push (see below). The Rust toolchain is pinned via `rust-toolchain.toml` (1.96.0, with the `rustfmt` and `clippy` components) and `rustfmt.toml` pins `edition`/`style_edition` to 2021, so `cargo fmt` and `cargo clippy` produce identical output on every host (no cross-version formatting churn). Keep everything else at `cargo fmt` / `cargo clippy` defaults.
 
@@ -34,7 +34,9 @@ Two repo-tracked hooks live in `.githooks/` — **not active until you enable th
 
 The pre-push hook is the gate that replaces hosted CI — it runs fmt + clippy (`-D warnings`) + the schema guard locally before anything leaves the machine. Run `cargo test` yourself too (also a full compile, too slow to hook per-push).
 
-The app opens/creates `brick_road.db` (gitignored SQLite file) in the working directory on launch. Delete it to reset to a freshly seeded demo plan.
+### Documents
+
+The app is multi-document (`src/document.rs`): a document is one `.brickroad` file (a SQLite DB with the standard schema). At launch it reopens the most recent document from the `recent_documents` sidecar in the per-user data dir (`~/Library/Application Support/com.katerina7479.brick_road/` on macOS); first run falls back to the legacy default `brick_road.db` in that same dir (deleting it resets to a freshly seeded demo plan). The top-bar FILE menu does New / Open / Duplicate and lists recents; switching documents is applied by the exclusive `apply_document_request` system in `main.rs` (swaps `Connection` + `Model`, resets per-document transient state, rebuilds `Schedule`, re-homes the camera). The sidecar is app state — it is *not* part of any document's schema.
 
 ## Architecture
 

@@ -13,6 +13,7 @@ pub mod constants;
 pub mod csv_export;
 pub mod datepicker;
 pub mod db;
+pub mod document;
 pub mod graph;
 pub mod labels;
 pub mod model;
@@ -70,6 +71,10 @@ fn main() {
         .insert_resource(bands::LaneDrag::default())
         .insert_resource(bands::LaneBlockRename::default())
         .insert_resource(bands::LaneDepDrag::default())
+        .insert_resource(document::PendingDocument::default())
+        .insert_resource(document::FileMenuState::default())
+        .add_systems(Update, apply_document_request)
+        .add_systems(Update, sync_window_title)
         .add_systems(Startup, (setup_db, setup_camera))
         .add_systems(Startup, setup_demo_schedule.after(setup_db))
         .add_systems(
@@ -369,13 +374,7 @@ fn migrate_legacy_db(cwd_db: &std::path::Path, new_db: &std::path::Path) {
 /// (e.g. running as a service with no home).  Performs a one-time migration of
 /// any legacy `./brick_road.db` before returning the new path.
 fn resolve_db_path() -> std::path::PathBuf {
-    let data_dir = directories::ProjectDirs::from("com", "katerina7479", "brick_road")
-        .map(|d| d.data_dir().to_path_buf())
-        .unwrap_or_else(|| {
-            eprintln!("warning: could not resolve user data directory — using cwd");
-            std::path::PathBuf::from(".")
-        });
-
+    let data_dir = document::app_data_dir();
     if let Err(e) = std::fs::create_dir_all(&data_dir) {
         eprintln!("warning: could not create data dir {data_dir:?}: {e}");
     }
@@ -435,7 +434,12 @@ mod db_path_tests {
 }
 
 fn setup_db(world: &mut World) {
-    let db_path = resolve_db_path();
+    // Reopen the most recent document; first run (or all recents deleted)
+    // falls back to the legacy default DB, which resolve_db_path migrates.
+    let db_path = document::load_recents()
+        .into_iter()
+        .next()
+        .unwrap_or_else(resolve_db_path);
     let conn = rusqlite::Connection::open(&db_path)
         .unwrap_or_else(|e| panic!("failed to open DB at {db_path:?}: {e}"));
     db::create_tables(&conn).expect("failed to create DB tables");
@@ -446,8 +450,168 @@ fn setup_db(world: &mut World) {
             error!("save_model failed: {e}");
         }
     }
+    document::remember_document(&db_path);
+    world.insert_resource(document::CurrentDocument(db_path));
     world.insert_resource(model);
     world.insert_non_send_resource(conn);
+}
+
+/// Keeps the OS window title in sync with the open document.
+fn sync_window_title(doc: Res<document::CurrentDocument>, mut windows: Query<&mut Window>) {
+    if !doc.is_changed() {
+        return;
+    }
+    let Ok(mut window) = windows.single_mut() else {
+        return;
+    };
+    window.title = format!("brick_road — {}", document::doc_display_name(&doc.0));
+}
+
+/// Applies a pending FILE-menu request at a safe point in the frame.
+///
+/// `Open`/`New` swap in the target document wholesale: new DB connection and
+/// `Model`, per-document transient state reset (selection, drill, undo,
+/// inspector, compare, in-flight gestures), the derived `Schedule` rebuilt,
+/// and the camera sent Home on the new calendar. The `Clipboard` deliberately
+/// survives — paste re-mints ids, so blocks copy across documents. Sprite maps
+/// are left alone: reconciliation diffs them against the new visible set.
+///
+/// `Duplicate` writes the current model to the new file and re-points the
+/// connection at it; all working state carries over (same content, new file).
+///
+/// Any failure (unwritable path, not a brick_road document) logs and leaves
+/// the current document untouched.
+fn apply_document_request(world: &mut World) {
+    let Some(req) = world.resource_mut::<document::PendingDocument>().0.take() else {
+        return;
+    };
+    let path = match &req {
+        document::DocRequest::Open(p)
+        | document::DocRequest::New(p)
+        | document::DocRequest::Duplicate(p) => p.clone(),
+    };
+
+    // New/Duplicate write a fresh file. The native save dialog already
+    // confirmed any overwrite, so clear stale content instead of merging
+    // tables into whatever the file held before.
+    if !matches!(req, document::DocRequest::Open(_)) && path.exists() {
+        if let Err(e) = std::fs::remove_file(&path) {
+            error!("could not overwrite {path:?}: {e}");
+            return;
+        }
+    }
+
+    let conn = match rusqlite::Connection::open(&path) {
+        Ok(c) => c,
+        Err(e) => {
+            error!("could not open {path:?}: {e}");
+            return;
+        }
+    };
+    if let Err(e) = db::create_tables(&conn) {
+        error!("{path:?} is not a usable brick_road document: {e}");
+        return;
+    }
+
+    // Duplicate: persist the current model into the copy and keep working.
+    if matches!(req, document::DocRequest::Duplicate(_)) {
+        {
+            let model = world.resource::<model::Model>();
+            if let Err(e) = db::save_model(&conn, model) {
+                error!("duplicate to {path:?} failed: {e}");
+                return;
+            }
+        }
+        world.insert_non_send_resource(conn);
+        world.insert_resource(document::CurrentDocument(path.clone()));
+        document::remember_document(&path);
+        return;
+    }
+
+    let mut model = match req {
+        document::DocRequest::New(_) => {
+            let m = document::blank_document_model(&path);
+            if let Err(e) = db::save_model(&conn, &m) {
+                error!("could not initialise {path:?}: {e}");
+                return;
+            }
+            m
+        }
+        _ => match db::load_model(&conn) {
+            Ok(m) => m,
+            Err(e) => {
+                error!("{path:?} is not a brick_road document: {e}");
+                return;
+            }
+        },
+    };
+    if model.prune_event_ghosts_from_branches() {
+        if let Err(e) = db::save_model(&conn, &model) {
+            error!("save_model failed: {e}");
+        }
+    }
+
+    // Derived state computed from the local model before it moves into the
+    // world: the Schedule (mirrors setup_demo_schedule's loaded-data path)
+    // and the Home camera target on the new calendar.
+    let sched = model
+        .plans
+        .values()
+        .min_by_key(|p| (p.branch_start_day.is_some(), p.id.0))
+        .cloned()
+        .and_then(|plan| {
+            let g = graph::build_graph(&model, &plan);
+            schedule::forward_pass(&model, &g).ok()
+        })
+        .unwrap_or_default();
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let today_date = calendar::unix_secs_to_date(secs);
+    let today_day = calendar::today_marker_day(today_date, &model.calendar);
+    let camera_target = {
+        let mut q = world.query::<&Window>();
+        q.single(world)
+            .ok()
+            .map(|w| camera::home_target(w, today_day, &model.calendar))
+    };
+
+    world.insert_non_send_resource(conn);
+    world.insert_resource(document::CurrentDocument(path.clone()));
+    document::remember_document(&path);
+    world.insert_resource(model);
+    world.insert_resource(sched);
+    if let Some(target) = camera_target {
+        world.insert_resource(target);
+    }
+
+    // Per-document transient state: anything holding ids, gestures, or edits
+    // from the previous document resets to defaults. Sprite/entity maps stay —
+    // the reconcile systems despawn stale entities against the new model.
+    world.insert_resource(schedule::DrillScope::default());
+    world.insert_resource(blocks::SelectedBlock::default());
+    world.insert_resource(blocks::SelectedBlocks::default());
+    world.insert_resource(blocks::SelectedDependency::default());
+    world.insert_resource(blocks::UndoStack::default());
+    world.insert_resource(blocks::NameEditState::default());
+    world.insert_resource(blocks::BlockInspectorState::default());
+    world.insert_resource(blocks::DragState::default());
+    world.insert_resource(blocks::ResizeDragState::default());
+    world.insert_resource(blocks::DepDragState::default());
+    world.insert_resource(blocks::MarqueeState::default());
+    world.insert_resource(blocks::CreateModeState::default());
+    world.insert_resource(blocks::ComparePlanState::default());
+    world.insert_resource(blocks::CompareScheduleCache::default());
+    world.insert_resource(bands::LaneSelection::default());
+    world.insert_resource(bands::LaneDepDrag::default());
+    world.insert_resource(bands::LaneDrag::default());
+    world.insert_resource(bands::LaneBlockRename::default());
+    world.insert_resource(bands::PlanRenameState::default());
+    world.insert_resource(SelectedPlan::default());
+    world.insert_resource(RowRename::default());
+    world.insert_resource(SettingsState::default());
+    world.insert_resource(ImportState::default());
 }
 
 fn setup_camera(mut commands: Commands) {
@@ -3035,6 +3199,9 @@ fn top_bar_ui(
     mut import_state: ResMut<ImportState>,
     mut selected_plan: ResMut<SelectedPlan>,
     mut view: ResMut<ViewMode>,
+    mut pending_doc: ResMut<document::PendingDocument>,
+    mut file_menu: ResMut<document::FileMenuState>,
+    current_doc: Res<document::CurrentDocument>,
     windows: Query<&Window>,
     today: Res<schedule::TodayMarker>,
     conn: NonSend<rusqlite::Connection>,
@@ -3071,6 +3238,119 @@ fn top_bar_ui(
                     {
                         *target = new_target;
                     }
+                }
+
+                // Current document name + FILE menu (New / Open / Duplicate /
+                // recent documents). Selections go through PendingDocument and
+                // are applied by `apply_document_request`.
+                let doc_name = document::doc_display_name(&current_doc.0);
+                let file_btn = theme::pill_button(ui, &format!("▤ {doc_name}"), file_menu.open)
+                    .on_hover_text(current_doc.0.to_string_lossy().to_string());
+                if file_btn.clicked() {
+                    file_menu.open = !file_menu.open;
+                    file_menu.armed = false;
+                }
+                if file_menu.open {
+                    let menu_item = |ui: &mut egui::Ui, label: &str| {
+                        ui.add(
+                            egui::Label::new(
+                                egui::RichText::new(label).size(13.0).color(theme::TEXT),
+                            )
+                            .selectable(false)
+                            .sense(egui::Sense::click()),
+                        )
+                    };
+                    let area = egui::Area::new(egui::Id::new("file_menu"))
+                        .fixed_pos(egui::pos2(
+                            file_btn.rect.left(),
+                            file_btn.rect.bottom() + 4.0,
+                        ))
+                        .order(egui::Order::Foreground)
+                        .show(ui.ctx(), |ui| {
+                            egui::Frame::new()
+                                .fill(theme::PANEL_HI)
+                                .stroke(egui::Stroke::new(1.0, theme::STROKE))
+                                .corner_radius(egui::CornerRadius::same(6))
+                                .inner_margin(egui::Margin::same(8))
+                                .show(ui, |ui| {
+                                    ui.set_min_width(200.0);
+                                    if menu_item(ui, "＋ New…").clicked() {
+                                        if let Some(p) = rfd::FileDialog::new()
+                                            .set_file_name("untitled.brickroad")
+                                            .add_filter("Brick Road", &[document::DOC_EXTENSION])
+                                            .save_file()
+                                        {
+                                            pending_doc.0 = Some(document::DocRequest::New(
+                                                document::with_doc_extension(p),
+                                            ));
+                                        }
+                                        file_menu.open = false;
+                                    }
+                                    ui.add_space(2.0);
+                                    if menu_item(ui, "▸ Open…").clicked() {
+                                        if let Some(p) = rfd::FileDialog::new()
+                                            .add_filter(
+                                                "Brick Road",
+                                                &[document::DOC_EXTENSION, "db"],
+                                            )
+                                            .pick_file()
+                                        {
+                                            pending_doc.0 = Some(document::DocRequest::Open(p));
+                                        }
+                                        file_menu.open = false;
+                                    }
+                                    ui.add_space(2.0);
+                                    if menu_item(ui, "⧉ Duplicate…").clicked() {
+                                        if let Some(p) = rfd::FileDialog::new()
+                                            .set_file_name(format!("{doc_name} copy.brickroad"))
+                                            .add_filter("Brick Road", &[document::DOC_EXTENSION])
+                                            .save_file()
+                                        {
+                                            pending_doc.0 = Some(document::DocRequest::Duplicate(
+                                                document::with_doc_extension(p),
+                                            ));
+                                        }
+                                        file_menu.open = false;
+                                    }
+                                    let recents: Vec<std::path::PathBuf> = document::load_recents()
+                                        .into_iter()
+                                        .filter(|p| *p != current_doc.0)
+                                        .collect();
+                                    if !recents.is_empty() {
+                                        ui.add_space(4.0);
+                                        ui.separator();
+                                        ui.add_space(2.0);
+                                        ui.label(
+                                            egui::RichText::new("RECENT")
+                                                .size(10.5)
+                                                .color(theme::TEXT_MUTED),
+                                        );
+                                        for p in recents {
+                                            let resp =
+                                                menu_item(ui, &document::doc_display_name(&p))
+                                                    .on_hover_text(p.to_string_lossy().to_string());
+                                            if resp.clicked() {
+                                                pending_doc.0 = Some(document::DocRequest::Open(p));
+                                                file_menu.open = false;
+                                            }
+                                        }
+                                    }
+                                });
+                        });
+                    // Esc or a click outside the popup dismisses it; `armed` is
+                    // false on the opening frame so the opening click doesn't.
+                    let esc = ui.ctx().input(|i| i.key_pressed(egui::Key::Escape));
+                    let clicked_out = file_menu.armed
+                        && ui.ctx().input(|i| {
+                            i.pointer.any_click()
+                                && i.pointer.interact_pos().is_some_and(|p| {
+                                    !area.response.rect.contains(p) && !file_btn.rect.contains(p)
+                                })
+                        });
+                    if esc || clicked_out {
+                        file_menu.open = false;
+                    }
+                    file_menu.armed = true;
                 }
 
                 // Drill-in breadcrumb: Plan / Block / Block… Click a crumb to
