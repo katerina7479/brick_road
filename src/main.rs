@@ -14,6 +14,7 @@ pub mod csv_export;
 pub mod datepicker;
 pub mod db;
 pub mod document;
+pub mod flow;
 pub mod graph;
 pub mod labels;
 pub mod model;
@@ -71,6 +72,7 @@ fn main() {
         .insert_resource(bands::LaneDrag::default())
         .insert_resource(bands::LaneBlockRename::default())
         .insert_resource(bands::LaneDepDrag::default())
+        .insert_resource(flow::FlowCache::default())
         .insert_resource(document::PendingDocument::default())
         .insert_resource(document::FileMenuState::default())
         .add_systems(Update, apply_document_request)
@@ -159,7 +161,12 @@ fn main() {
             Update,
             bands::clear_lane_selection_on_main_select.after(blocks::handle_block_selection),
         )
-        .add_systems(Update, handle_fork_hover.run_if(at_plan_level))
+        .add_systems(
+            Update,
+            handle_fork_hover
+                .run_if(at_plan_level)
+                .run_if(editing_enabled),
+        )
         .add_systems(
             Update,
             handle_branch_selection
@@ -193,6 +200,14 @@ fn main() {
                 .before(blocks::draw_dependency_edges)
                 .before(blocks::draw_block_handles)
                 .after(schedule::update_person_view)
+                .after(blocks::handle_block_delete)
+                .after(blocks::handle_undo)
+                .after(blocks::handle_paste),
+        )
+        .add_systems(
+            Update,
+            (flow::update_flow_view, flow::sync_flow_sprites)
+                .chain()
                 .after(blocks::handle_block_delete)
                 .after(blocks::handle_undo)
                 .after(blocks::handle_paste),
@@ -1603,6 +1618,7 @@ fn resource_gutter_ui(
     visible: Res<schedule::VisibleBlocks>,
     view: Res<ViewMode>,
     person_view: Res<schedule::PersonViewCache>,
+    flow_cache: Res<flow::FlowCache>,
     mut rename: ResMut<RowRename>,
     conn: NonSend<rusqlite::Connection>,
     keys: Res<ButtonInput<KeyCode>>,
@@ -1668,7 +1684,20 @@ fn resource_gutter_ui(
     // until there's real work on a row.
     let mut entries: Vec<GutterRow> = Vec::new();
 
-    if view.kind == ViewKind::Resource {
+    if view.kind == ViewKind::Flow {
+        // Flow: one read-only label at each stream's first ribbon level.
+        let dummy_plan = model.main_plan_id().unwrap_or(model::PlanId(0));
+        for (i, lane) in flow_cache.0.lanes.iter().enumerate() {
+            entries.push(GutterRow {
+                plan_id: dummy_plan,
+                scope: None,
+                row: i as i32,
+                world_y: flow::flow_level_y(&flow_cache.0.lanes, i, 0),
+                name: Some(lane.name.clone()),
+                kind: None,
+            });
+        }
+    } else if view.kind == ViewKind::Resource {
         // By-resource: one read-only label at each group's first row. A group
         // spanning extra sub-rows (concurrent work) is labelled only once.
         let dummy_plan = model.main_plan_id().unwrap_or(model::PlanId(0));
@@ -1838,7 +1867,7 @@ fn resource_gutter_ui(
                     if resp.lost_focus() && act.is_none() {
                         act = Some(Act::CommitNew);
                     }
-                } else if view.kind == ViewKind::Resource {
+                } else if view.kind != ViewKind::Plan {
                     // By-person: read-only label + dot, no click interaction.
                     let (text, color) = match name {
                         Some(n) => (n.clone(), egui::Color32::from_rgb(206, 190, 164)),
@@ -3494,6 +3523,12 @@ fn top_bar_ui(
                             view.plan = model.main_plan_id();
                         }
                     }
+                    if theme::pill_button(ui, "FLOW", view.kind == ViewKind::Flow).clicked() {
+                        view.kind = ViewKind::Flow;
+                        if view.plan.is_none() {
+                            view.plan = model.main_plan_id();
+                        }
+                    }
                     if view.kind != ViewKind::Plan {
                         ui.add_space(4.0);
                         let current = view.plan.or_else(|| model.main_plan_id());
@@ -3630,6 +3665,9 @@ pub enum ViewKind {
     Plan,
     /// Read-only: leaves grouped one row-group per resource, overlap stacked.
     Resource,
+    /// Read-only Sankey-style flow: one stream per top-level block, thickness
+    /// = staffing depth per day, ribbons coloured by resource (#326).
+    Flow,
 }
 
 #[derive(Resource, Default)]
