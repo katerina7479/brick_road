@@ -608,11 +608,13 @@ impl Model {
     }
 
     /// Removes from every branch any ghost whose block sits on main's Events
-    /// row, along with the branch's lane entry and any branch-local dependency
-    /// touching it. Events never repeat into plans; this sweeps ghosts that
-    /// predate that rule or that appeared by moving a block onto the Events
-    /// row after branches inherited it. Returns whether anything changed (the
-    /// caller persists).
+    /// row (membership and lane entry). Events never repeat into plans; this
+    /// sweeps ghosts that predate that rule or that appeared by moving a block
+    /// onto the Events row after branches inherited it. Branch-local
+    /// dependencies touching an event are deliberately kept — a plan block may
+    /// depend on a main event (drawn as a cross-space edge), and an old
+    /// ghost-dep simply re-anchors to the main event. Returns whether anything
+    /// changed (the caller persists).
     pub fn prune_event_ghosts_from_branches(&mut self) -> bool {
         let Some(main_id) = self.main_plan_id() else {
             return false;
@@ -627,24 +629,16 @@ impl Model {
             return false;
         }
         let mut changed = false;
-        let mut branch_ids: HashSet<PlanId> = HashSet::new();
         for plan in self.plans.values_mut() {
             if plan.branch_start_day.is_none() {
                 continue;
             }
-            branch_ids.insert(plan.id);
             let roots_before = plan.root_blocks.len();
             plan.root_blocks.retain(|id| !events.contains(id));
             let rows_before = plan.block_rows.len();
             plan.block_rows.retain(|id, _| !events.contains(id));
             changed |=
                 plan.root_blocks.len() != roots_before || plan.block_rows.len() != rows_before;
-        }
-        if changed {
-            self.dependencies.retain(|_, d| {
-                !(branch_ids.contains(&d.plan_id)
-                    && (events.contains(&d.predecessor) || events.contains(&d.successor)))
-            });
         }
         changed
     }
@@ -1281,10 +1275,10 @@ mod tests {
         );
         assert!(!m.plans[&branch].block_rows.contains_key(&event));
         assert!(
-            !m.dependencies
+            m.dependencies
                 .values()
-                .any(|d| d.plan_id == branch && (d.predecessor == event || d.successor == event)),
-            "branch-local deps touching the event are pruned"
+                .any(|d| d.plan_id == branch && d.predecessor == work && d.successor == event),
+            "the branch dep survives, re-anchored to the main event"
         );
         assert!(
             m.plans[&branch].root_blocks.contains(&work),

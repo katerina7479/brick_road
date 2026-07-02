@@ -735,16 +735,16 @@ pub fn draw_plan_rename_overlay(
 /// A lane block under the cursor, with the geometry needed to drag, resize, and
 /// detect dependency edges. `owned` distinguishes the branch's own blocks
 /// (editable) from inherited ghosts (selectable + removable only).
-struct LaneHit {
-    id: WorkBlockId,
-    plan: PlanId,
-    left_x: f32,
-    right_x: f32,
+pub(crate) struct LaneHit {
+    pub(crate) id: WorkBlockId,
+    pub(crate) plan: PlanId,
+    pub(crate) left_x: f32,
+    pub(crate) right_x: f32,
     owned: bool,
 }
 
 /// Finds the lane block (ghost or owned) under `world`, if any.
-fn lane_block_at(model: &Model, world: Vec2) -> Option<LaneHit> {
+pub(crate) fn lane_block_at(model: &Model, world: Vec2) -> Option<LaneHit> {
     for band in layout_bands(model) {
         for b in &band.blocks {
             let hw = b.w * 0.5;
@@ -1027,20 +1027,24 @@ pub fn handle_lane_dep_drag(
         return;
     }
 
-    // Release on another block in the same lane creates the dependency. You drag
-    // FROM the dependent (successor) TO the block it depends on (predecessor).
+    // Release on another block in the same lane — or on a main Events block up
+    // top (cross-space target) — creates the dependency. You drag FROM the
+    // dependent (successor) TO the block it depends on (predecessor).
     if mouse.just_released(MouseButton::Left) {
         let Some((succ_id, plan)) = drag.from.take() else {
             return;
         };
-        let Some(hit) = lane_block_at(&model, world) else {
+        let (pred_id, pred_left, pred_right) = if let Some(hit) = lane_block_at(&model, world) {
+            if hit.plan != plan || hit.id == succ_id {
+                return;
+            }
+            (hit.id, hit.left_x, hit.right_x)
+        } else if let Some((id, l, r)) = crate::blocks::event_block_at(&model, world) {
+            (id, l, r)
+        } else {
             return;
         };
-        if hit.plan != plan || hit.id == succ_id {
-            return;
-        }
-        let pred_id = hit.id;
-        let pred_finish = world.x >= (hit.left_x + hit.right_x) * 0.5;
+        let pred_finish = world.x >= (pred_left + pred_right) * 0.5;
         // dep_type_from_edges is (predecessor_finish, successor_finish).
         let dep_type = crate::blocks::dep_type_from_edges(pred_finish, drag.from_right);
         let exists = model.dependencies.values().any(|d| {
@@ -1081,12 +1085,20 @@ pub fn draw_lane_dependencies(
             .map(|b| (b.id, (b.cx - b.w * 0.5, b.cx + b.w * 0.5, b.cy)))
             .collect();
 
+        // A dep endpoint that isn't in this lane can still be a main Events
+        // block (cross-space dep): anchor that end at the event's main-canvas
+        // position.
+        let geom_of = |id: WorkBlockId| {
+            geom.get(&id)
+                .copied()
+                .or_else(|| crate::blocks::event_block_geom(&model, id))
+        };
         for dep in model.dependencies.values() {
             if dep.plan_id != band.plan_id {
                 continue;
             }
-            let (Some(&(pxl, pxr, py)), Some(&(sxl, sxr, sy))) =
-                (geom.get(&dep.predecessor), geom.get(&dep.successor))
+            let (Some((pxl, pxr, py)), Some((sxl, sxr, sy))) =
+                (geom_of(dep.predecessor), geom_of(dep.successor))
             else {
                 continue;
             };
