@@ -641,7 +641,7 @@ fn at_plan_level(drill: Res<schedule::DrillScope>) -> bool {
 }
 
 fn editing_enabled(view: Res<ViewMode>) -> bool {
-    !view.by_person
+    view.kind == ViewKind::Plan
 }
 
 /// On a drill-in/out change, reframe the camera: drilling into a block frames
@@ -1624,7 +1624,7 @@ fn resource_gutter_ui(
     // By-Person) up front. Both the editable field and the Enter/lost-focus
     // commit key off `rename.editing`, so leaving it set is a read-only escape
     // that could `commit_row_name` on a main lane.
-    if view.by_person
+    if view.kind != ViewKind::Plan
         && (rename.editing.is_some() || rename.picker_open.is_some() || rename.drag.is_some())
     {
         rename.editing = None;
@@ -1668,7 +1668,7 @@ fn resource_gutter_ui(
     // until there's real work on a row.
     let mut entries: Vec<GutterRow> = Vec::new();
 
-    if view.by_person {
+    if view.kind == ViewKind::Resource {
         // By-resource: one read-only label at each group's first row. A group
         // spanning extra sub-rows (concurrent work) is labelled only once.
         let dummy_plan = model.main_plan_id().unwrap_or(model::PlanId(0));
@@ -1838,7 +1838,7 @@ fn resource_gutter_ui(
                     if resp.lost_focus() && act.is_none() {
                         act = Some(Act::CommitNew);
                     }
-                } else if view.by_person {
+                } else if view.kind == ViewKind::Resource {
                     // By-person: read-only label + dot, no click interaction.
                     let (text, color) = match name {
                         Some(n) => (n.clone(), egui::Color32::from_rgb(206, 190, 164)),
@@ -3483,16 +3483,18 @@ fn top_bar_ui(
                     }
                     ui.add_space(8.0);
                     // By Plan / By Person view toggle.
-                    if theme::pill_button(ui, "BY PLAN", !view.by_person).clicked() {
-                        view.by_person = false;
+                    if theme::pill_button(ui, "BY PLAN", view.kind == ViewKind::Plan).clicked() {
+                        view.kind = ViewKind::Plan;
                     }
-                    if theme::pill_button(ui, "BY RESOURCE", view.by_person).clicked() {
-                        view.by_person = true;
+                    if theme::pill_button(ui, "BY RESOURCE", view.kind == ViewKind::Resource)
+                        .clicked()
+                    {
+                        view.kind = ViewKind::Resource;
                         if view.plan.is_none() {
                             view.plan = model.main_plan_id();
                         }
                     }
-                    if view.by_person {
+                    if view.kind != ViewKind::Plan {
                         ui.add_space(4.0);
                         let current = view.plan.or_else(|| model.main_plan_id());
                         let current_name = current
@@ -3618,12 +3620,22 @@ fn plan_is_acceptable(model: &model::Model, plan_id: model::PlanId) -> bool {
 #[derive(Resource, Default)]
 pub struct SelectedPlan(pub Option<model::PlanId>);
 
-/// View mode: By Plan (default) vs By Person. In By-Person mode all editing and
-/// drilling is disabled (run-condition `editing_enabled`) and branch swimlanes are
-/// hidden.
+/// Which timeline view is active. `Plan` is the interactive editor; every
+/// other kind is a read-only projection of the same model (run-condition
+/// `editing_enabled`) with branch swimlanes hidden.
+#[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ViewKind {
+    /// The interactive plan editor (default).
+    #[default]
+    Plan,
+    /// Read-only: leaves grouped one row-group per resource, overlap stacked.
+    Resource,
+}
+
 #[derive(Resource, Default)]
 pub struct ViewMode {
-    pub by_person: bool,
+    pub kind: ViewKind,
+    /// The plan the read-only views project (`None` = main).
     pub plan: Option<model::PlanId>,
 }
 
@@ -4432,16 +4444,19 @@ mod tests {
     }
 
     #[test]
-    fn editing_enabled_reflects_by_person() {
+    fn editing_enabled_only_in_plan_view() {
+        // Editing (and the plan-only UI) is gated on ViewKind::Plan; every
+        // other kind is a read-only projection.
+        assert_eq!(ViewKind::default(), ViewKind::Plan);
         let by_plan = ViewMode {
-            by_person: false,
+            kind: ViewKind::Plan,
             plan: None,
         };
-        assert!(!by_plan.by_person, "By-Plan: by_person is false");
-        let by_person = ViewMode {
-            by_person: true,
+        assert_eq!(by_plan.kind, ViewKind::Plan);
+        let by_resource = ViewMode {
+            kind: ViewKind::Resource,
             plan: None,
         };
-        assert!(by_person.by_person, "By-Person: by_person is true");
+        assert_ne!(by_resource.kind, ViewKind::Plan);
     }
 }
