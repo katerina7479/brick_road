@@ -2064,6 +2064,20 @@ fn apply_date_pick(
     true
 }
 
+/// Display order for the settings SIZES list: indices into `sizes` sorted by
+/// `days` ascending (stable, so ties keep insertion order). While `frozen` and
+/// the cached order still covers the current list, the cache is returned
+/// unchanged so rows don't re-sort (and steal focus) mid-edit; any add or
+/// remove invalidates the cache and falls back to a fresh sort.
+fn sizes_display_order(sizes: &[model::TShirtSize], cached: &[usize], frozen: bool) -> Vec<usize> {
+    if frozen && cached.len() == sizes.len() {
+        return cached.to_vec();
+    }
+    let mut order: Vec<usize> = (0..sizes.len()).collect();
+    order.sort_by_key(|&i| sizes[i].days);
+    order
+}
+
 /// Which date group an open Aurora picker is editing — a calendar holiday or a
 /// specific resource's time-off, keyed by the group's (current) start date.
 #[derive(Clone, PartialEq)]
@@ -2678,11 +2692,17 @@ fn settings_flyout_ui(
                     ui.add_space(SETTINGS_SECTION_GAP);
                     theme::section_header(ui, "SIZES", Some(model.t_shirt_sizes.len()));
 
-                    let mut sorted_indices: Vec<usize> = (0..model.t_shirt_sizes.len()).collect();
-                    sorted_indices.sort_by_key(|&i| model.t_shirt_sizes[i].days);
+                    // Re-sorting is frozen while a row is being edited so rows
+                    // don't jump (and drop focus) as the days value changes.
+                    let order = sizes_display_order(
+                        &model.t_shirt_sizes,
+                        &settings.sizes_order,
+                        settings.sizes_editing,
+                    );
 
+                    let mut sizes_editing_now = false;
                     let mut remove_size: Option<usize> = None;
-                    for &idx in &sorted_indices {
+                    for &idx in &order {
                         let mut trash_rect = egui::Rect::NOTHING;
                         let mut trash_clicked = false;
                         let mut trash_hovered = false;
@@ -2691,25 +2711,29 @@ fn settings_flyout_ui(
                             let trash_w = 22.0;
                             let right_reserve = 58.0 + trash_w + ui.spacing().item_spacing.x * 2.0;
                             let label_w = (ui.available_width() - right_reserve).max(40.0);
-                            if ui
-                                .add(
-                                    egui::TextEdit::singleline(&mut model.t_shirt_sizes[idx].label)
-                                        .desired_width(label_w),
-                                )
-                                .changed()
-                            {
+                            let label_resp = ui.add(
+                                egui::TextEdit::singleline(&mut model.t_shirt_sizes[idx].label)
+                                    .desired_width(label_w),
+                            );
+                            if label_resp.changed() {
                                 changed = true;
                             }
-                            if ui
-                                .add(
-                                    egui::DragValue::new(&mut model.t_shirt_sizes[idx].days)
-                                        .range(1..=400)
-                                        .suffix(" d"),
-                                )
-                                .changed()
-                            {
+                            if settings.sizes_focus == Some(idx) {
+                                label_resp.request_focus();
+                                settings.sizes_focus = None;
+                                sizes_editing_now = true;
+                            }
+                            let days_resp = ui.add(
+                                egui::DragValue::new(&mut model.t_shirt_sizes[idx].days)
+                                    .range(1..=400)
+                                    .suffix(" d"),
+                            );
+                            if days_resp.changed() {
                                 changed = true;
                             }
+                            sizes_editing_now |= label_resp.has_focus()
+                                || days_resp.has_focus()
+                                || days_resp.dragged();
                             // Always allocate the 🗑 slot; only paint and act on hover.
                             let (tr, tresp) = ui.allocate_exact_size(
                                 egui::vec2(trash_w, 16.0),
@@ -2739,6 +2763,8 @@ fn settings_flyout_ui(
                         }
                         ui.add_space(2.0);
                     }
+                    settings.sizes_order = order;
+                    settings.sizes_editing = sizes_editing_now;
                     if let Some(i) = remove_size {
                         if i < model.t_shirt_sizes.len() {
                             model.t_shirt_sizes.remove(i);
@@ -2752,6 +2778,7 @@ fn settings_flyout_ui(
                                 label: "New".to_string(),
                                 days: 5,
                             });
+                            settings.sizes_focus = Some(model.t_shirt_sizes.len() - 1);
                             changed = true;
                         }
                         ui.label(
@@ -3272,6 +3299,13 @@ pub struct SettingsState {
     edit_buf: String,
     /// Open Aurora date-range picker popup, if any (one at a time).
     picker: Option<OpenDatePicker>,
+    /// Cached SIZES display order (indices into `model.t_shirt_sizes`), kept
+    /// frozen while a size row is being edited (see `sizes_display_order`).
+    sizes_order: Vec<usize>,
+    /// True while a SIZES row widget had focus last frame — freezes re-sorting.
+    sizes_editing: bool,
+    /// Model index of a just-added size whose label should grab focus.
+    sizes_focus: Option<usize>,
 }
 
 /// Transient state for the CSV import modal.
@@ -3643,6 +3677,25 @@ mod tests {
             d(12, 25),
             &DatePickerResult::Single(d(12, 25))
         ));
+    }
+
+    #[test]
+    fn sizes_display_order_sorts_and_freezes() {
+        let s = |label: &str, days| model::TShirtSize {
+            label: label.to_string(),
+            days,
+        };
+        let sizes = vec![s("M", 15), s("XS", 5), s("L", 25)];
+        // Unfrozen: sorted by days ascending.
+        assert_eq!(sizes_display_order(&sizes, &[], false), vec![1, 0, 2]);
+        // Frozen with a still-valid cache: cache wins even though it no longer
+        // matches the sorted order (a mid-edit days change must not re-sort).
+        assert_eq!(sizes_display_order(&sizes, &[0, 1, 2], true), vec![0, 1, 2]);
+        // Frozen but the cache is stale (a size was added/removed): re-sort.
+        assert_eq!(sizes_display_order(&sizes, &[0, 1], true), vec![1, 0, 2]);
+        // Ties keep insertion order (stable sort).
+        let tied = vec![s("A", 5), s("B", 5)];
+        assert_eq!(sizes_display_order(&tied, &[], false), vec![0, 1]);
     }
 
     #[test]
