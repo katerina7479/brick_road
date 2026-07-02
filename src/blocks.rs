@@ -9,7 +9,7 @@ use bevy::sprite::Anchor;
 use bevy::window::{CursorIcon, SystemCursorIcon};
 
 use crate::{
-    constants::{PIXELS_PER_DAY, ROW_HEIGHT},
+    constants::{EVENTS_ROW, PIXELS_PER_DAY, ROW_HEIGHT},
     db, graph,
     model::{self, Day, DependencyType, PlanId, WorkBlockId},
     schedule, theme,
@@ -95,7 +95,8 @@ pub fn block_edges_x(
 /// Maps a resolved canvas world position to its `(day, row)` cell.
 /// Returns `None` when `world.y <= bands_top` (swimlane territory); pass
 /// `bands_top = None` when drilled in or there are no bands to skip that guard.
-/// Row is clamped to ≥ 0; day is clamped to ≥ 0.
+/// Row is clamped to ≥ `EVENTS_ROW` (clicking above the first resource row
+/// lands in the Events row); day is clamped to ≥ 0.
 pub fn canvas_cursor_cell(
     world: Vec2,
     bands_top: Option<f32>,
@@ -107,7 +108,7 @@ pub fn canvas_cursor_cell(
             return None;
         }
     }
-    let row = (-world.y / ROW_HEIGHT).round().max(0.0) as i32;
+    let row = ((-world.y / ROW_HEIGHT).round() as i32).max(EVENTS_ROW);
     let day = crate::calendar::x_to_day(world.x, off, calendar).max(0);
     Some((day, row))
 }
@@ -1428,17 +1429,18 @@ pub fn handle_block_resize(
 }
 
 /// Computes target positions for a uniform group drag, capping the delta so
-/// that no member falls below `floor` while relative day-offsets are preserved.
+/// that no member falls below `floor` (days) or above `EVENTS_ROW` (rows)
+/// while relative offsets are preserved.
 ///
 /// * `anchor_pre_day` — the anchor block's start_day before the drag began.
 /// * `anchor_raw_day` — cursor-derived target day (before any floor clamping).
-/// * `anchor_new_row` — cursor-derived target row (rows are never clamped).
+/// * `anchor_new_row` — cursor-derived target row (before the row clamp).
 /// * `offsets` — `(id, day_off, row_off)` per peer, where
 ///   `day_off = peer_pre_day − anchor_pre_day`.
 /// * `floor` — minimum allowed `start_day` (0 for main plan, `branch_start_day`
 ///   for branch plans).
 ///
-/// Returns `(anchor_day, peer_targets)` where `peer_targets` is
+/// Returns `(anchor_day, anchor_row, peer_targets)` where `peer_targets` is
 /// `(id, new_day, new_row)` for each entry in `offsets`.
 pub(crate) fn group_targets(
     anchor_pre_day: i32,
@@ -1446,7 +1448,7 @@ pub(crate) fn group_targets(
     anchor_new_row: i32,
     offsets: &[(WorkBlockId, i32, i32)],
     floor: i32,
-) -> (i32, Vec<(WorkBlockId, i32, i32)>) {
+) -> (i32, i32, Vec<(WorkBlockId, i32, i32)>) {
     // The tightest floor constraint comes from the member with the most-negative
     // day offset (furthest left in the group).
     let min_day_off = offsets.iter().map(|(_, d, _)| *d).min().unwrap_or(0).min(0); // include anchor (offset 0) via the .min(0)
@@ -1454,11 +1456,15 @@ pub(crate) fn group_targets(
     // Cap the delta so that `anchor_pre_day + min_day_off + capped_delta >= floor`.
     let capped_delta = raw_delta.max(floor - anchor_pre_day - min_day_off);
     let anchor_day = anchor_pre_day + capped_delta;
+    // Same uniform cap vertically: the member with the most-negative row offset
+    // (highest in the group) must not rise above the Events row.
+    let min_row_off = offsets.iter().map(|(_, _, r)| *r).min().unwrap_or(0).min(0);
+    let anchor_row = anchor_new_row.max(EVENTS_ROW - min_row_off);
     let peers = offsets
         .iter()
-        .map(|(id, d, r)| (*id, anchor_day + d, anchor_new_row + r))
+        .map(|(id, d, r)| (*id, anchor_day + d, anchor_row + r))
         .collect();
-    (anchor_day, peers)
+    (anchor_day, anchor_row, peers)
 }
 
 /// Center-drag a block left or right to reposition its `start_day`.
@@ -1602,8 +1608,9 @@ pub fn handle_block_drag(
                 .map(|(_, d, _)| *d)
                 .unwrap_or(raw_day.max(branch_min));
             // Compute uniformly-clamped positions for anchor + all peers so that
-            // dragging into the day-0/fork floor never deforms relative offsets.
-            let (new_start, peer_targets) = group_targets(
+            // dragging into the day-0/fork floor (or above the Events row) never
+            // deforms relative offsets.
+            let (new_start, new_row, peer_targets) = group_targets(
                 anchor_pre_day,
                 raw_day,
                 new_row,
@@ -2955,7 +2962,7 @@ pub fn handle_paste(
     })();
     let off = model.calendar.global_off_days();
     let cursor_day = canvas_pos.map(|p| crate::calendar::x_to_day(p.x, &off, &model.calendar));
-    let cursor_row = canvas_pos.map(|p| (-p.y / ROW_HEIGHT).round() as i32);
+    let cursor_row = canvas_pos.map(|p| ((-p.y / ROW_HEIGHT).round() as i32).max(EVENTS_ROW));
 
     // Clone clipboard before mutating the model.
     let cb_blocks = clipboard.blocks.clone();
@@ -3136,12 +3143,16 @@ mod tests {
     }
 
     #[test]
-    fn row_derivation_never_negative_when_clamped() {
-        // handle_block_drag clamps with .max(0): a positive world_y (above the
-        // origin) must never produce a negative row.
-        let r = |y: f32| (-y / ROW_HEIGHT).round().max(0.0) as i32;
-        assert_eq!(r(40.0), 0);
-        assert_eq!(r(200.0), 0);
+    fn row_derivation_clamps_at_events_row() {
+        // handle_block_drag derives a raw cursor row and group_targets clamps
+        // it: a world_y above the Events row must never place a block past it.
+        let r = |y: f32| {
+            let raw = (-y / ROW_HEIGHT).round() as i32;
+            group_targets(0, 0, raw, &[], 0).1
+        };
+        assert_eq!(r(40.0), EVENTS_ROW); // one row above origin = Events
+        assert_eq!(r(200.0), EVENTS_ROW); // far above still clamps to Events
+        assert_eq!(r(0.0), 0); // origin row unaffected
     }
 
     // ── dep_type_from_edges ──────────────────────────────────────────────────
@@ -4998,7 +5009,7 @@ mod group_targets_tests {
 
     #[test]
     fn single_block_free_move() {
-        let (day, peers) = group_targets(5, 10, 0, &[], 0);
+        let (day, _, peers) = group_targets(5, 10, 0, &[], 0);
         assert_eq!(day, 10);
         assert!(peers.is_empty());
     }
@@ -5006,7 +5017,7 @@ mod group_targets_tests {
     #[test]
     fn single_block_clamped_at_floor() {
         // Cursor says move to day -3, floor is 0.
-        let (day, peers) = group_targets(5, -3, 0, &[], 0);
+        let (day, _, peers) = group_targets(5, -3, 0, &[], 0);
         assert_eq!(day, 0);
         assert!(peers.is_empty());
     }
@@ -5014,7 +5025,7 @@ mod group_targets_tests {
     #[test]
     fn single_block_branch_floor() {
         // Branch floor at day 10; cursor tries to move block to day 7.
-        let (day, _) = group_targets(15, 7, 0, &[], 10);
+        let (day, _, _) = group_targets(15, 7, 0, &[], 10);
         assert_eq!(day, 10);
     }
 
@@ -5024,7 +5035,7 @@ mod group_targets_tests {
     fn group_moves_by_same_delta() {
         // Anchor at 5, peer at 3 (day_off = -2). Move anchor to 8 (delta +3).
         let offsets = [(id(2), -2, 0)];
-        let (anchor, peers) = group_targets(5, 8, 0, &offsets, 0);
+        let (anchor, _, peers) = group_targets(5, 8, 0, &offsets, 0);
         assert_eq!(anchor, 8);
         assert_eq!(peers[0], (id(2), 6, 0)); // 8 + (-2) = 6
     }
@@ -5033,7 +5044,7 @@ mod group_targets_tests {
     fn group_rows_shifted_uniformly() {
         // Row offsets should pass through unchanged.
         let offsets = [(id(1), 0, -1), (id(2), 0, 2)];
-        let (_, peers) = group_targets(0, 0, 3, &offsets, 0);
+        let (_, _, peers) = group_targets(0, 0, 3, &offsets, 0);
         assert_eq!(peers[0].2, 2); // 3 + (-1)
         assert_eq!(peers[1].2, 5); // 3 + 2
     }
@@ -5047,7 +5058,7 @@ mod group_targets_tests {
         // Minimum allowed delta = floor - anchor_pre - min_off = 0 - 5 - (-3) = -2.
         // So capped_delta = max(-6, -2) = -2.
         let offsets = [(id(2), -3, 0)];
-        let (anchor, peers) = group_targets(5, -1, 0, &offsets, 0);
+        let (anchor, _, peers) = group_targets(5, -1, 0, &offsets, 0);
         assert_eq!(anchor, 3); // 5 + (-2)
         assert_eq!(peers[0].1, 0); // 3 + (-3) = 0, exactly at floor
     }
@@ -5059,7 +5070,7 @@ mod group_targets_tests {
         // min_day_off = min(3, 0) = 0 (anchor is leftmost).
         // Minimum allowed delta = 0 - 2 - 0 = -2.
         let offsets = [(id(2), 3, 0)];
-        let (anchor, peers) = group_targets(2, -4, 0, &offsets, 0);
+        let (anchor, _, peers) = group_targets(2, -4, 0, &offsets, 0);
         assert_eq!(anchor, 0); // 2 + (-2) = 0
         assert_eq!(peers[0].1, 3); // 0 + 3
     }
@@ -5068,7 +5079,7 @@ mod group_targets_tests {
     fn group_no_clamp_when_moving_right() {
         // Moving away from boundary — no clamping should occur.
         let offsets = [(id(2), -3, 0)];
-        let (anchor, peers) = group_targets(5, 20, 0, &offsets, 0);
+        let (anchor, _, peers) = group_targets(5, 20, 0, &offsets, 0);
         assert_eq!(anchor, 20);
         assert_eq!(peers[0].1, 17); // 20 + (-3)
     }
@@ -5078,7 +5089,7 @@ mod group_targets_tests {
         // Anchor at 2, leftmost peer at 0 (day_off = -2). Floor = 0.
         // Trying to move left further — delta must be 0.
         let offsets = [(id(2), -2, 0)];
-        let (anchor, peers) = group_targets(2, -5, 0, &offsets, 0);
+        let (anchor, _, peers) = group_targets(2, -5, 0, &offsets, 0);
         assert_eq!(anchor, 2); // no movement
         assert_eq!(peers[0].1, 0); // peer stays at floor
     }
@@ -5089,10 +5100,41 @@ mod group_targets_tests {
         // Minimum allowed delta = 0 - 10 - (-6) = -4.
         // Try to move to day 2 (raw_delta = -8 → clamped to -4).
         let offsets = [(id(2), -3, 0), (id(3), -6, 0)];
-        let (anchor, peers) = group_targets(10, 2, 0, &offsets, 0);
+        let (anchor, _, peers) = group_targets(10, 2, 0, &offsets, 0);
         assert_eq!(anchor, 6); // 10 + (-4)
         assert_eq!(peers[0].1, 3); // 6 + (-3)
         assert_eq!(peers[1].1, 0); // 6 + (-6) = 0, at floor
+    }
+
+    // ── Row clamp at the Events row ──────────────────────────────────────────
+
+    #[test]
+    fn single_block_row_clamped_at_events_row() {
+        // Cursor says row -4 — the block stops at the Events row (-1).
+        let (_, row, _) = group_targets(0, 0, -4, &[], 0);
+        assert_eq!(row, EVENTS_ROW);
+        // The Events row itself is reachable.
+        let (_, row, _) = group_targets(0, 0, EVENTS_ROW, &[], 0);
+        assert_eq!(row, EVENTS_ROW);
+    }
+
+    #[test]
+    fn group_row_clamped_by_highest_peer() {
+        // Peer sits one row above the anchor (row_off = -1). Dragging the
+        // anchor toward the top stops when the PEER reaches the Events row,
+        // keeping the group's shape.
+        let offsets = [(id(2), 0, -1)];
+        let (_, row, peers) = group_targets(0, 0, -3, &offsets, 0);
+        assert_eq!(row, EVENTS_ROW + 1); // anchor held one row below
+        assert_eq!(peers[0].2, EVENTS_ROW); // peer exactly at Events
+    }
+
+    #[test]
+    fn group_row_unclamped_when_moving_down() {
+        let offsets = [(id(2), 0, -1)];
+        let (_, row, peers) = group_targets(0, 0, 5, &offsets, 0);
+        assert_eq!(row, 5);
+        assert_eq!(peers[0].2, 4);
     }
 }
 
@@ -5178,13 +5220,17 @@ mod canvas_cursor_cell_tests {
     }
 
     #[test]
-    fn above_row_zero_clamps_row_to_zero() {
+    fn above_row_zero_lands_in_events_row() {
         let off = HashSet::new();
         let cal = cal();
-        // Positive world.y is above row 0 — row should clamp to 0.
+        // One row above row 0 is the Events row — clicks there create in it.
         let world = Vec2::new(0.0, 50.0);
         let (_, row) = canvas_cursor_cell(world, None, &off, &cal).unwrap();
-        assert_eq!(row, 0);
+        assert_eq!(row, EVENTS_ROW);
+        // Far above the Events row still clamps to it — no rows beyond.
+        let world = Vec2::new(0.0, 500.0);
+        let (_, row) = canvas_cursor_cell(world, None, &off, &cal).unwrap();
+        assert_eq!(row, EVENTS_ROW);
     }
 
     #[test]
