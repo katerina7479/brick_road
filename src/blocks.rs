@@ -16,8 +16,6 @@ use crate::{
 };
 
 const BLOCK_HEIGHT: f32 = 28.0;
-/// Minimum logical block width (px) below which the inline name label is hidden.
-const MIN_LABEL_WIDTH: f32 = 20.0;
 /// Approximate pixel width per character at font_size 13 (used for truncation).
 const LABEL_CHAR_WIDTH: f32 = 8.0;
 
@@ -395,8 +393,10 @@ pub fn reconcile_block_sprites(
                 Transform::from_xyz(x, y, 0.0),
             ));
 
-            // Inline name label — only when the bar is wide enough to be readable.
-            if width >= MIN_LABEL_WIDTH {
+            // Name label — spawned for every block; `sync_block_labels` decides
+            // each frame whether it renders inside the bar, beside a bar too
+            // narrow for readable text, or not at all (zoomed out past LOD).
+            {
                 let available_chars = ((width - 8.0) / LABEL_CHAR_WIDTH) as usize;
                 let display = if wb.name.chars().count() > available_chars && available_chars > 0 {
                     let truncated: String = wb
@@ -787,49 +787,78 @@ pub fn sync_compare_overlays(
 /// Counter-scales both so labels remain at constant screen-space size.
 /// Applies LOD-based text and moves the shadow 1 screen-pixel down-right
 /// (shadow offset = scale world units, which equals 1 screen pixel at all zooms).
-/// Fits a block label to the block's on-screen width. Returns the text to show
-/// (truncated with "…" when needed) or `None` when the block is too narrow — or
-/// the view too zoomed out — to show any label. Hidden labels are still readable
-/// via the hover tooltip, so a label never spills past its block's edges.
-fn fit_label(full_name: &str, block_world_w: f32, scale: f32) -> Option<String> {
+/// How a block's name label renders at the current zoom.
+#[derive(Debug, PartialEq)]
+enum LabelFit {
+    /// Text (possibly "…"-truncated) centered inside the bar.
+    Inside(String),
+    /// The bar is too narrow for readable text — the full name sits just past
+    /// the bar's right edge instead (milestone-style, e.g. 1-day targets).
+    Outside(String),
+    /// Zoomed out past the label LOD.
+    Hidden,
+}
+
+/// When a name doesn't fit and the bar has capacity for at most this many
+/// characters, truncating would leave an unreadable stub — the label moves
+/// beside the bar instead.
+const LABEL_OUTSIDE_MAX_CHARS: f32 = 3.0;
+
+/// Screen-pixel gap between a bar's right edge and its outside label.
+const LABEL_OUTSIDE_PAD: f32 = 4.0;
+
+/// Fits a block label to the block's on-screen width: inside (truncated with
+/// "…" when needed), outside-right in full when the bar is too narrow for a
+/// readable truncation, or hidden when zoomed out past the label LOD.
+fn fit_label(full_name: &str, block_world_w: f32, scale: f32) -> LabelFit {
     if scale > LOD_FAR_MIN {
-        return None;
+        return LabelFit::Hidden;
     }
     // The label renders at a constant screen size, so compare against the block's
     // width in screen pixels (world width / zoom scale).
     let screen_w = block_world_w / scale;
     let max_chars = ((screen_w - LABEL_CHAR_WIDTH) / LABEL_CHAR_WIDTH).floor();
-    if max_chars < 1.0 {
-        return None;
+    if full_name.chars().count() as f32 <= max_chars {
+        return LabelFit::Inside(full_name.to_string());
     }
-    let max_chars = max_chars as usize;
-    if full_name.chars().count() <= max_chars {
-        Some(full_name.to_string())
-    } else if max_chars == 1 {
-        Some("…".to_string())
+    if max_chars <= LABEL_OUTSIDE_MAX_CHARS {
+        return LabelFit::Outside(full_name.to_string());
+    }
+    let kept: String = full_name.chars().take(max_chars as usize - 1).collect();
+    LabelFit::Inside(format!("{kept}…"))
+}
+
+/// The anchor and local translation for a block-name label: centered in the
+/// bar, or left-anchored just past the bar's visual right edge when outside.
+/// `visual_w` must match the sprite's rendered width (gap inset + min-width
+/// floor from `sync_block_sprites`), not the block's logical span.
+fn label_placement(outside: bool, visual_w: f32, scale: f32, z: f32) -> (Anchor, Vec3) {
+    if outside {
+        (
+            Anchor::CENTER_LEFT,
+            Vec3::new(visual_w * 0.5 + LABEL_OUTSIDE_PAD * scale, 0.0, z),
+        )
     } else {
-        let kept: String = full_name.chars().take(max_chars - 1).collect();
-        Some(format!("{kept}…"))
+        (Anchor::CENTER, Vec3::new(0.0, 0.0, z))
     }
 }
+
+/// The mutable display components `sync_block_labels` drives each frame for a
+/// block-name label or its shadow.
+type LabelDisplay = (
+    &'static mut Text2d,
+    &'static mut Visibility,
+    &'static mut Transform,
+    &'static mut Anchor,
+    &'static mut TextColor,
+);
 
 pub fn sync_block_labels(
     cam_q: Query<&Projection, With<Camera2d>>,
     model: Res<model::Model>,
     name_edit: Res<NameEditState>,
-    mut label_q: Query<
-        (&BlockLabel, &mut Text2d, &mut Visibility, &mut Transform),
-        Without<BlockLabelShadow>,
-    >,
-    mut shadow_q: Query<
-        (
-            &BlockLabelShadow,
-            &mut Text2d,
-            &mut Visibility,
-            &mut Transform,
-        ),
-        Without<BlockLabel>,
-    >,
+    mut label_q: Query<(&BlockLabel, LabelDisplay), Without<BlockLabelShadow>>,
+    mut shadow_q: Query<(&BlockLabelShadow, LabelDisplay), Without<BlockLabel>>,
 ) {
     let Ok(proj) = cam_q.single() else { return };
     let Projection::Orthographic(ortho) = proj else {
@@ -845,8 +874,11 @@ pub fn sync_block_labels(
             .map(|wb| block_span_x(wb, &off, &model.calendar).1)
             .unwrap_or(0.0)
     };
+    // The sprite's rendered width: gap-inset with a min-width floor, mirroring
+    // `sync_block_sprites` so the outside label hugs the visual right edge.
+    let visual_width = |logical_w: f32| (logical_w - 2.0 * scale).max(8.0 * scale);
 
-    for (label, mut text2d, mut vis, mut transform) in &mut label_q {
+    for (label, (mut text2d, mut vis, mut transform, mut anchor, mut color)) in &mut label_q {
         // The block being renamed shows the seamless in-place editor instead;
         // hide its baked label so the live text and the editor don't overlap.
         if name_edit.editing == Some(label.work_block_id) {
@@ -854,30 +886,55 @@ pub fn sync_block_labels(
             continue;
         }
         transform.scale = Vec3::splat(scale);
-        transform.translation = Vec3::new(0.0, 0.0, 0.15);
-        match fit_label(&label.full_name, block_width(&label.work_block_id), scale) {
-            Some(display) => {
+        let logical_w = block_width(&label.work_block_id);
+        match fit_label(&label.full_name, logical_w, scale) {
+            LabelFit::Inside(display) => {
                 *vis = Visibility::Inherited;
                 *text2d = Text2d::new(display);
+                (*anchor, transform.translation) = label_placement(false, 0.0, scale, 0.15);
+                // Dark text on the light bar.
+                *color = TextColor(Color::srgba(0.10, 0.10, 0.13, 1.0));
             }
-            None => *vis = Visibility::Hidden,
+            LabelFit::Outside(display) => {
+                *vis = Visibility::Inherited;
+                *text2d = Text2d::new(display);
+                (*anchor, transform.translation) =
+                    label_placement(true, visual_width(logical_w), scale, 0.15);
+                // Light text on the dark canvas.
+                *color = TextColor(Color::srgba(0.81, 0.75, 0.64, 1.0));
+            }
+            LabelFit::Hidden => *vis = Visibility::Hidden,
         }
     }
 
-    for (shadow, mut text2d, mut vis, mut transform) in &mut shadow_q {
+    for (shadow, (mut text2d, mut vis, mut transform, mut anchor, mut color)) in &mut shadow_q {
         if name_edit.editing == Some(shadow.work_block_id) {
             *vis = Visibility::Hidden;
             continue;
         }
         transform.scale = Vec3::splat(scale);
-        // Shift by 1 screen pixel — in local space that's `scale` world units.
-        transform.translation = Vec3::new(scale, -scale, 0.08);
-        match fit_label(&shadow.full_name, block_width(&shadow.work_block_id), scale) {
-            Some(display) => {
+        let logical_w = block_width(&shadow.work_block_id);
+        match fit_label(&shadow.full_name, logical_w, scale) {
+            LabelFit::Inside(display) => {
                 *vis = Visibility::Inherited;
                 *text2d = Text2d::new(display);
+                let (a, t) = label_placement(false, 0.0, scale, 0.08);
+                *anchor = a;
+                // Shift by 1 screen pixel — in local space that's `scale` world units.
+                transform.translation = t + Vec3::new(scale, -scale, 0.0);
+                // Light halo behind the dark inside text.
+                *color = TextColor(Color::srgba(1.0, 1.0, 1.0, 0.55));
             }
-            None => *vis = Visibility::Hidden,
+            LabelFit::Outside(display) => {
+                *vis = Visibility::Inherited;
+                *text2d = Text2d::new(display);
+                let (a, t) = label_placement(true, visual_width(logical_w), scale, 0.08);
+                *anchor = a;
+                transform.translation = t + Vec3::new(scale, -scale, 0.0);
+                // Dark halo behind the light outside text.
+                *color = TextColor(Color::srgba(0.0, 0.0, 0.0, 0.60));
+            }
+            LabelFit::Hidden => *vis = Visibility::Hidden,
         }
     }
 }
@@ -3228,7 +3285,7 @@ mod tests {
     fn fit_label_short_name_fits_unchanged() {
         // 200 world px / 1.0 scale = 200 screen px → max_chars = (200-8)/8 = 24
         let result = fit_label("Hello", 200.0, 1.0);
-        assert_eq!(result, Some("Hello".to_string()));
+        assert_eq!(result, LabelFit::Inside("Hello".to_string()));
     }
 
     #[test]
@@ -3236,21 +3293,37 @@ mod tests {
         // 80 world px / 1.0 scale = 80 screen px → max_chars = (80-8)/8 = 9
         // 9 chars: keep 8, append "…"
         let result = fit_label("Hello World Long", 80.0, 1.0);
-        assert_eq!(result, Some("Hello Wo…".to_string()));
+        assert_eq!(result, LabelFit::Inside("Hello Wo…".to_string()));
     }
 
     #[test]
-    fn fit_label_too_narrow_returns_none() {
-        // 8 world px / 1.0 scale = 8 screen px → max_chars = (8-8)/8 = 0 < 1
-        let result = fit_label("Hi", 8.0, 1.0);
-        assert_eq!(result, None);
+    fn fit_label_too_narrow_goes_outside_in_full() {
+        // 8 world px / 1.0 scale = 8 screen px → max_chars = 0: no inside text
+        // possible; the full name renders beside the bar (e.g. 1-day targets).
+        let result = fit_label("GA Launch", 8.0, 1.0);
+        assert_eq!(result, LabelFit::Outside("GA Launch".to_string()));
     }
 
     #[test]
-    fn fit_label_scale_beyond_far_lod_returns_none() {
-        // scale > LOD_FAR_MIN (6.0) → always None regardless of block width
+    fn fit_label_unreadable_truncation_goes_outside() {
+        // 32 world px → max_chars = (32-8)/8 = 3 ≤ LABEL_OUTSIDE_MAX_CHARS and
+        // the name doesn't fit → outside in full instead of a "GA…" stub.
+        let result = fit_label("GA Launch", 32.0, 1.0);
+        assert_eq!(result, LabelFit::Outside("GA Launch".to_string()));
+    }
+
+    #[test]
+    fn fit_label_short_name_stays_inside_a_narrow_bar() {
+        // 24 world px → max_chars = 2; "Hi" fits entirely → inside, not outside.
+        let result = fit_label("Hi", 24.0, 1.0);
+        assert_eq!(result, LabelFit::Inside("Hi".to_string()));
+    }
+
+    #[test]
+    fn fit_label_scale_beyond_far_lod_hides() {
+        // scale > LOD_FAR_MIN (6.0) → always hidden regardless of block width
         let result = fit_label("Hello", 1000.0, 7.0);
-        assert_eq!(result, None);
+        assert_eq!(result, LabelFit::Hidden);
     }
 
     #[test]
@@ -3258,15 +3331,19 @@ mod tests {
         // scale == LOD_FAR_MIN is NOT > LOD_FAR_MIN, so it falls through to the
         // length check. Block is wide enough for the full name.
         let result = fit_label("Hi", 200.0, LOD_FAR_MIN);
-        assert_eq!(result, Some("Hi".to_string()));
+        assert_eq!(result, LabelFit::Inside("Hi".to_string()));
     }
 
     #[test]
-    fn fit_label_one_char_max_returns_ellipsis_only() {
-        // 16 world px / 1.0 = 16 screen px → max_chars = (16-8)/8 = 1
-        // Name is longer than 1 char → "…"
-        let result = fit_label("Hi", 16.0, 1.0);
-        assert_eq!(result, Some("…".to_string()));
+    fn label_placement_outside_left_anchors_past_right_edge() {
+        let (anchor, pos) = label_placement(true, 40.0, 2.0, 0.15);
+        assert_eq!(anchor, Anchor::CENTER_LEFT);
+        // Half the visual width + the pad in world units (4 px × scale 2).
+        assert_eq!(pos.x, 20.0 + 8.0);
+        assert_eq!(pos.z, 0.15);
+        let (anchor, pos) = label_placement(false, 40.0, 2.0, 0.15);
+        assert_eq!(anchor, Anchor::CENTER);
+        assert_eq!(pos, Vec3::new(0.0, 0.0, 0.15));
     }
 
     // ── undo snapshot round-trip ─────────────────────────────────────────────
