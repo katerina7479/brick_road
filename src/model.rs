@@ -38,6 +38,9 @@ pub struct WorkBlock {
     pub color: Option<[f32; 3]>,
     /// Free-form notes displayed on hover; not shown in the block bar.
     pub description: String,
+    /// Optional link to an external resource (ticket, doc, …). Empty = none.
+    /// Opened via Ctrl/Cmd+O or the inspector's OPEN button.
+    pub url: String,
     /// User-set priority: 0=Low, 1=Normal (default), 2=High, 3=Critical.
     /// Conveyed visually as border weight on the block bar.
     pub priority: u8,
@@ -243,6 +246,7 @@ impl Model {
                 duration_days: 0,
                 color: None,
                 description: String::new(),
+                url: String::new(),
                 priority: 1,
                 t_shirt_size: None,
                 rollup: false,

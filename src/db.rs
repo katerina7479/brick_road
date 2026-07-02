@@ -13,6 +13,8 @@ pub fn create_tables(conn: &Connection) -> Result<()> {
     // — CREATE_TABLES_SQL below will create the column in the initial schema).
     for sql in [
         "ALTER TABLE calendar_non_working_dates ADD COLUMN description TEXT NOT NULL DEFAULT ''",
+        // Block link to an external resource (schema-change-approved: #315).
+        "ALTER TABLE work_blocks ADD COLUMN url TEXT NOT NULL DEFAULT ''",
     ] {
         match conn.execute_batch(sql) {
             Ok(()) => {}
@@ -212,9 +214,9 @@ pub fn save_model(conn: &Connection, model: &Model) -> Result<()> {
         tx.execute(
             "INSERT INTO work_blocks
                  (id, name,
-                  start_day, duration_days, color_r, color_g, color_b, description, priority,
-                  t_shirt_size, parent_id, rollup)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+                  start_day, duration_days, color_r, color_g, color_b, description, url,
+                  priority, t_shirt_size, parent_id, rollup)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
              ON CONFLICT(id) DO UPDATE SET
                  name = excluded.name,
                  start_day = excluded.start_day,
@@ -223,6 +225,7 @@ pub fn save_model(conn: &Connection, model: &Model) -> Result<()> {
                  color_g = excluded.color_g,
                  color_b = excluded.color_b,
                  description = excluded.description,
+                 url = excluded.url,
                  priority = excluded.priority,
                  t_shirt_size = excluded.t_shirt_size,
                  parent_id = excluded.parent_id,
@@ -236,6 +239,7 @@ pub fn save_model(conn: &Connection, model: &Model) -> Result<()> {
                 wb.color.map(|c| c[1] as f64),
                 wb.color.map(|c| c[2] as f64),
                 &wb.description,
+                &wb.url,
                 wb.priority as i64,
                 &wb.t_shirt_size,
                 wb.parent.map(|p| p.0 as i64),
@@ -521,8 +525,8 @@ pub fn load_model(conn: &Connection) -> Result<Model> {
     {
         let mut stmt = conn.prepare(
             "SELECT id, name,
-                    start_day, duration_days, color_r, color_g, color_b, description, priority,
-                    t_shirt_size, parent_id, rollup
+                    start_day, duration_days, color_r, color_g, color_b, description, url,
+                    priority, t_shirt_size, parent_id, rollup
              FROM work_blocks",
         )?;
         let rows = stmt.query_map([], |row| {
@@ -535,10 +539,11 @@ pub fn load_model(conn: &Connection) -> Result<Model> {
                 row.get::<_, Option<f64>>(5)?,
                 row.get::<_, Option<f64>>(6)?,
                 row.get::<_, String>(7)?,
-                row.get::<_, i64>(8)?,
-                row.get::<_, Option<String>>(9)?,
-                row.get::<_, Option<i64>>(10)?,
-                row.get::<_, i64>(11)?,
+                row.get::<_, String>(8)?,
+                row.get::<_, i64>(9)?,
+                row.get::<_, Option<String>>(10)?,
+                row.get::<_, Option<i64>>(11)?,
+                row.get::<_, i64>(12)?,
             ))
         })?;
         for row in rows {
@@ -551,6 +556,7 @@ pub fn load_model(conn: &Connection) -> Result<Model> {
                 cg,
                 cb,
                 description,
+                url,
                 priority,
                 t_shirt_size,
                 parent_id,
@@ -571,6 +577,7 @@ pub fn load_model(conn: &Connection) -> Result<Model> {
                     duration_days: duration_days as i32,
                     color,
                     description,
+                    url,
                     priority: priority.clamp(0, 3) as u8,
                     t_shirt_size,
                     rollup: rollup != 0,
@@ -877,6 +884,7 @@ CREATE TABLE IF NOT EXISTS work_blocks (
     color_g              REAL,
     color_b              REAL,
     description          TEXT    NOT NULL DEFAULT '',
+    url                  TEXT    NOT NULL DEFAULT '',
     priority             INTEGER NOT NULL DEFAULT 1,
     t_shirt_size         TEXT,
     parent_id            INTEGER,
@@ -1531,6 +1539,55 @@ mod tests {
             NaiveDate::from_ymd_opt(2025, 7, 4).unwrap()
         );
         assert_eq!(loaded.calendar.non_working_dates[0].description, "");
+    }
+
+    #[test]
+    fn work_block_url_round_trip() {
+        let conn = open_in_memory();
+        let mut m = Model::default();
+        let id = m.create_work_block("Linked");
+        m.work_blocks.get_mut(&id).unwrap().url = "https://example.com/ticket/42".to_string();
+
+        save_model(&conn, &m).unwrap();
+        let loaded = load_model(&conn).unwrap();
+
+        assert_eq!(
+            loaded.work_blocks.get(&id).unwrap().url,
+            "https://example.com/ticket/42"
+        );
+        assert_eq!(m.work_blocks, loaded.work_blocks);
+    }
+
+    #[test]
+    fn migration_adds_url_to_work_blocks() {
+        // Simulate a pre-#315 DB: work_blocks exists without the url column.
+        // create_tables must add it (guarded ALTER) and load must default ''.
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE work_blocks (
+                 id            INTEGER PRIMARY KEY,
+                 name          TEXT    NOT NULL,
+                 start_day     INTEGER NOT NULL DEFAULT 0,
+                 duration_days INTEGER NOT NULL DEFAULT 0,
+                 color_r       REAL,
+                 color_g       REAL,
+                 color_b       REAL,
+                 description   TEXT    NOT NULL DEFAULT '',
+                 priority      INTEGER NOT NULL DEFAULT 1,
+                 t_shirt_size  TEXT,
+                 parent_id     INTEGER,
+                 rollup        INTEGER NOT NULL DEFAULT 0
+             );
+             INSERT INTO work_blocks (id, name, duration_days) VALUES (1, 'Old', 5);",
+        )
+        .unwrap();
+
+        create_tables(&conn).unwrap();
+
+        let loaded = load_model(&conn).unwrap();
+        let wb = loaded.work_blocks.get(&WorkBlockId(1)).unwrap();
+        assert_eq!(wb.name, "Old");
+        assert_eq!(wb.url, "", "pre-migration blocks default to no URL");
     }
 
     #[test]

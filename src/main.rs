@@ -208,6 +208,7 @@ fn main() {
         .add_systems(Update, blocks::handle_undo)
         .add_systems(Update, blocks::handle_copy)
         .add_systems(Update, blocks::handle_paste.after(blocks::handle_copy))
+        .add_systems(Update, blocks::handle_open_url)
         .add_systems(
             Update,
             blocks::handle_create_mode_toggle.after(blocks::handle_block_drill),
@@ -3384,6 +3385,7 @@ const HELP_KEYMAP: &[(&str, &[(&str, &str)])] = &[
             ("Ctrl/Cmd + C", "Copy selection"),
             ("Ctrl/Cmd + V", "Paste at cursor"),
             ("Ctrl/Cmd + Z", "Undo"),
+            ("Ctrl/Cmd + O", "Open the selected block's URL"),
         ],
     ),
 ];
