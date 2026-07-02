@@ -1,6 +1,6 @@
 [package]
 name = "brick_road"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 
 [features]
@@ -22,7 +22,7 @@ tempfile = "3"
 [package.metadata.bundle]
 name = "Brick Road"
 identifier = "com.katerina7479.brickroad"
-version = "0.1.0"
+version = "0.2.0"
 category = "public.app-category.productivity"
 icon = ["assets/icon.icns"]
 
