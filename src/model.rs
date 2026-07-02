@@ -599,6 +599,22 @@ impl Model {
             .and_then(|p| p.row_name(scope, row))
     }
 
+    /// The resource name shown for `leaf` (scope = its parent) within `plan`:
+    /// the resolved row name, or the row's placeholder label when unnamed.
+    /// Shared by the by-resource layout and the flow view so both group work
+    /// under the same names the plan view displays.
+    pub fn leaf_resource_name(
+        &self,
+        plan: PlanId,
+        leaf: WorkBlockId,
+        scope: Option<WorkBlockId>,
+    ) -> String {
+        let row = self.block_row(plan, leaf);
+        self.resolved_row_name(plan, scope, row)
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| default_row_label(row))
+    }
+
     /// Whether `block` sits on the Events row within `plan`. Events are
     /// plan-local markers (external targets/milestones): they never repeat
     /// into branches — not at fork, not via new-block propagation — and an
@@ -1145,11 +1161,7 @@ pub fn person_view_layout(model: &Model, plan_id: PlanId) -> PersonView {
         let Some(wb) = model.work_blocks.get(&leaf) else {
             continue;
         };
-        let row = model.block_row(plan_id, leaf);
-        let name = model
-            .resolved_row_name(plan_id, wb.parent, row)
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| default_row_label(row));
+        let name = model.leaf_resource_name(plan_id, leaf, wb.parent);
         let kind = model.resource_kind(&name);
         person_leaves.push((leaf, name, kind));
     }
