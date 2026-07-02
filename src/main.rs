@@ -1438,9 +1438,12 @@ fn resource_gutter_ui(
     // By-Person) up front. Both the editable field and the Enter/lost-focus
     // commit key off `rename.editing`, so leaving it set is a read-only escape
     // that could `commit_row_name` on a main lane.
-    if view.by_person && (rename.editing.is_some() || rename.picker_open.is_some()) {
+    if view.by_person
+        && (rename.editing.is_some() || rename.picker_open.is_some() || rename.drag.is_some())
+    {
         rename.editing = None;
         rename.picker_open = None;
+        rename.drag = None;
         rename.buf.clear();
     }
 
@@ -1562,6 +1565,7 @@ fn resource_gutter_ui(
     let world_to_screen_y = |wy: f32| win_h * 0.5 + (cam_y - wy) / scale;
     let editing = rename.editing;
     let picker_open = rename.picker_open;
+    let dragging = rename.drag;
 
     let known_resources = model.named_resources();
     let resource_kinds: Vec<Option<model::ResourceType>> = known_resources
@@ -1578,9 +1582,14 @@ fn resource_gutter_ui(
         StartNew(model::PlanId, Option<model::WorkBlockId>, i32),
         CommitNew,
         CancelNew,
+        StartDrag(model::PlanId, Option<model::WorkBlockId>, i32),
+        DropRow(model::PlanId, Option<model::WorkBlockId>, i32, i32),
+        CancelDrag,
     }
     let mut act: Option<Act> = if keys.just_pressed(KeyCode::Escape) {
-        if editing.is_some() {
+        if dragging.is_some() {
+            Some(Act::CancelDrag)
+        } else if editing.is_some() {
             Some(Act::CancelNew)
         } else if picker_open.is_some() {
             Some(Act::ClosePicker)
@@ -1671,8 +1680,14 @@ fn resource_gutter_ui(
                     let resp = ui.interact(
                         hot,
                         ui.id().with(("gutter_row", e.plan_id.0, e.row)),
-                        egui::Sense::click(),
+                        egui::Sense::click_and_drag(),
                     );
+                    if resp.drag_started() && act.is_none() && dragging.is_none() {
+                        act = Some(Act::StartDrag(e.plan_id, e.scope, e.row));
+                    }
+                    if resp.hovered() && dragging.is_none() {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
+                    }
                     let (text, color) = match name {
                         Some(n) => (n.clone(), egui::Color32::from_rgb(206, 190, 164)),
                         None => (
@@ -1806,6 +1821,57 @@ fn resource_gutter_ui(
                     }
                 }
             }
+
+            // An active drag-reorder: track the pointer with a ghost of the
+            // dragged name, mark the candidate slot, and drop on release. The
+            // target comes from the pointer's world-Y so the drop works even
+            // when the source row has scrolled out of the culled label range.
+            if let Some((pid, sc, from)) = dragging {
+                let released = !ui.ctx().input(|i| i.pointer.primary_down());
+                let ptr = ui.ctx().input(|i| i.pointer.latest_pos());
+                let lane_rows = entries
+                    .iter()
+                    .filter(|e| e.plan_id == pid && e.scope == sc)
+                    .collect::<Vec<_>>();
+                let lane = lane_rows.first().map(|e| {
+                    let row0_y = e.world_y + e.row as f32 * rh;
+                    let max_row = lane_rows.iter().map(|e| e.row).max().unwrap_or(0);
+                    (row0_y, max_row)
+                });
+                if let (Some((row0_y, max_row)), Some(p)) = (lane, ptr) {
+                    let world_y = cam_y - (p.y - win_h * 0.5) * scale;
+                    let target = (((row0_y - world_y) / rh).round() as i32).clamp(0, max_row);
+                    if released {
+                        if act.is_none() {
+                            act = Some(Act::DropRow(pid, sc, from, target));
+                        }
+                    } else {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+                        let ty = world_to_screen_y(row0_y - target as f32 * rh);
+                        ui.painter().line_segment(
+                            [
+                                egui::pos2(rect.left() + 2.0, ty),
+                                egui::pos2(rect.right() - 2.0, ty),
+                            ],
+                            egui::Stroke::new(1.5, theme::ACCENT),
+                        );
+                        let name = lane_rows
+                            .iter()
+                            .find(|e| e.row == from)
+                            .and_then(|e| e.name.clone())
+                            .unwrap_or_else(|| default_row_label(from));
+                        ui.painter().text(
+                            egui::pos2(rect.left() + 10.0, p.y),
+                            egui::Align2::LEFT_CENTER,
+                            name,
+                            egui::FontId::proportional(13.0),
+                            egui::Color32::from_rgba_unmultiplied(236, 224, 204, 200),
+                        );
+                    }
+                } else if released && act.is_none() {
+                    act = Some(Act::CancelDrag);
+                }
+            }
         });
 
     match act {
@@ -1837,6 +1903,19 @@ fn resource_gutter_ui(
         Some(Act::CancelNew) => {
             rename.editing = None;
             rename.buf.clear();
+        }
+        Some(Act::StartDrag(pid, sc, r)) => {
+            rename.drag = Some((pid, sc, r));
+            rename.picker_open = None;
+        }
+        Some(Act::DropRow(pid, sc, from, to)) => {
+            if from != to {
+                apply_row_reorder(&mut model, &conn, pid, sc, from, to);
+            }
+            rename.drag = None;
+        }
+        Some(Act::CancelDrag) => {
+            rename.drag = None;
         }
         None => {}
     }
@@ -1893,6 +1972,79 @@ fn commit_row_name(
         plan.set_row_name(scope, row, name);
     }
 
+    if let Err(e) = db::save_model(conn, model) {
+        error!("save_model failed: {e}");
+    }
+}
+
+/// New index for `row` after a drag-reorder that moves row `from` to `to`
+/// (list-insert semantics: the rows between them shift one step toward
+/// `from`; rows outside the span are untouched).
+fn reordered_row(row: i32, from: i32, to: i32) -> i32 {
+    if row == from {
+        to
+    } else if from < to && row > from && row <= to {
+        row - 1
+    } else if to < from && row >= to && row < from {
+        row + 1
+    } else {
+        row
+    }
+}
+
+/// Permutes a scope's row-name list for a `from`→`to` drag, growing it with
+/// empty placeholders so both indices are addressable and trimming trailing
+/// empties afterwards (mirroring `reordered_row`'s mapping).
+fn reorder_row_names(names: &mut Vec<String>, from: i32, to: i32) {
+    let (Ok(from), Ok(to)) = (usize::try_from(from), usize::try_from(to)) else {
+        return;
+    };
+    if from == to {
+        return;
+    }
+    let need = from.max(to) + 1;
+    if names.len() < need {
+        names.resize(need, String::new());
+    }
+    let moved = names.remove(from);
+    names.insert(to, moved);
+    while names.last().is_some_and(|s| s.is_empty()) {
+        names.pop();
+    }
+}
+
+/// Applies a gutter drag-reorder within `(plan, scope)`: row `from` moves to
+/// `to` and the rows between shift one step. The blocks visible at that scope
+/// follow their rows, the row-name list is permuted to match, and the result
+/// autosaves. Per-plan by construction — a branch reorder never touches main.
+fn apply_row_reorder(
+    model: &mut model::Model,
+    conn: &rusqlite::Connection,
+    plan_id: model::PlanId,
+    scope: Option<model::WorkBlockId>,
+    from: i32,
+    to: i32,
+) {
+    if from == to {
+        return;
+    }
+    let moves: Vec<(model::WorkBlockId, i32)> = schedule::visible_blocks(model, plan_id, scope)
+        .iter()
+        .map(|wb| (wb.id, model.block_row(plan_id, wb.id)))
+        .collect();
+    for (id, row) in moves {
+        let new_row = reordered_row(row, from, to);
+        if new_row != row {
+            model.set_block_row(plan_id, id, new_row);
+        }
+    }
+    if let Some(names) = model
+        .plans
+        .get_mut(&plan_id)
+        .and_then(|p| p.row_names.get_mut(&scope))
+    {
+        reorder_row_names(names, from, to);
+    }
     if let Err(e) = db::save_model(conn, model) {
         error!("save_model failed: {e}");
     }
@@ -3173,6 +3325,8 @@ pub struct RowRename {
     pub editing: Option<(model::PlanId, Option<model::WorkBlockId>, i32)>,
     pub buf: String,
     pub picker_open: Option<(model::PlanId, Option<model::WorkBlockId>, i32)>,
+    /// An in-progress gutter drag-reorder: (plan, scope, source row).
+    pub drag: Option<(model::PlanId, Option<model::WorkBlockId>, i32)>,
 }
 
 /// Which settings field is currently being edited in-place (one at a time).
@@ -3211,6 +3365,7 @@ const HELP_KEYMAP: &[(&str, &[(&str, &str)])] = &[
             ("Double-click block", "Drill into it"),
             ("N", "Toggle create mode"),
             ("Drag block", "Move it (the whole selection if several)"),
+            ("Drag gutter name", "Reorder resource rows"),
             ("Type a letter", "Rename the selected block"),
             ("Enter · Esc", "Commit · cancel an edit"),
         ],
@@ -3875,6 +4030,95 @@ mod tests {
             None,
             "source row name cleared"
         );
+    }
+
+    #[test]
+    fn reordered_row_insert_semantics() {
+        // Moving row 0 down to 2: rows 1..=2 shift up one; outside untouched.
+        assert_eq!(reordered_row(0, 0, 2), 2);
+        assert_eq!(reordered_row(1, 0, 2), 0);
+        assert_eq!(reordered_row(2, 0, 2), 1);
+        assert_eq!(reordered_row(3, 0, 2), 3);
+        // Moving row 3 up to 1: rows 1..=2 shift down one.
+        assert_eq!(reordered_row(3, 3, 1), 1);
+        assert_eq!(reordered_row(1, 3, 1), 2);
+        assert_eq!(reordered_row(2, 3, 1), 3);
+        assert_eq!(reordered_row(0, 3, 1), 0);
+        assert_eq!(reordered_row(4, 3, 1), 4);
+        // A no-move drag maps every row to itself.
+        assert_eq!(reordered_row(5, 2, 2), 5);
+        assert_eq!(reordered_row(2, 2, 2), 2);
+    }
+
+    #[test]
+    fn reorder_row_names_moves_grows_and_trims() {
+        let names = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        // Down-move permutes like reordered_row.
+        let mut v = names(&["A", "B", "C"]);
+        reorder_row_names(&mut v, 0, 2);
+        assert_eq!(v, names(&["B", "C", "A"]));
+        // Up-move.
+        let mut v = names(&["A", "B", "C"]);
+        reorder_row_names(&mut v, 2, 0);
+        assert_eq!(v, names(&["C", "A", "B"]));
+        // A short list grows so the drag is addressable, then trailing
+        // empties are trimmed: only "A" moving to index 2 survives.
+        let mut v = names(&["A"]);
+        reorder_row_names(&mut v, 0, 2);
+        assert_eq!(v, names(&["", "", "A"]));
+        // Moving an unnamed high row up shifts names down and trims the tail.
+        let mut v = names(&["A", "B"]);
+        reorder_row_names(&mut v, 3, 0);
+        assert_eq!(v, names(&["", "A", "B"]));
+    }
+
+    #[test]
+    fn apply_row_reorder_moves_blocks_and_names_together() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        db::create_tables(&conn).unwrap();
+
+        let mut m = model::Model::default();
+        let plan_id = m.create_plan("main", None);
+        let scope: Option<model::WorkBlockId> = None;
+
+        let block_on_row = |m: &mut model::Model, name: &str, row: i32| {
+            let id = m.create_work_block(name);
+            m.work_blocks.get_mut(&id).unwrap().duration_days = 5;
+            m.plans.get_mut(&plan_id).unwrap().root_blocks.push(id);
+            m.set_block_row(plan_id, id, row);
+            id
+        };
+        let a = block_on_row(&mut m, "A", 0);
+        let b = block_on_row(&mut m, "B", 1);
+        let c = block_on_row(&mut m, "C", 2);
+        for (row, name) in [(0, "Ann"), (1, "Bob"), (2, "Cat")] {
+            m.plans
+                .get_mut(&plan_id)
+                .unwrap()
+                .set_row_name(scope, row, name.to_string());
+        }
+        // A child block (visible only when drilled into A) sits on row 1 of
+        // its own scope and must not move with a top-level reorder.
+        let child = m.create_work_block("A.1");
+        m.work_blocks.get_mut(&child).unwrap().duration_days = 2;
+        m.work_blocks.get_mut(&child).unwrap().parent = Some(a);
+        m.set_block_row(plan_id, child, 1);
+        db::save_model(&conn, &m).unwrap();
+
+        // Drag Ann's row (0) below Cat's (2).
+        apply_row_reorder(&mut m, &conn, plan_id, scope, 0, 2);
+
+        assert_eq!(m.block_row(plan_id, a), 2, "dragged row's block lands at 2");
+        assert_eq!(m.block_row(plan_id, b), 0, "rows between shift up");
+        assert_eq!(m.block_row(plan_id, c), 1, "rows between shift up");
+        assert_eq!(
+            m.block_row(plan_id, child),
+            1,
+            "drilled-scope block is not visible at top level and stays put"
+        );
+        assert_eq!(m.plans[&plan_id].row_name(scope, 0), Some("Bob"));
+        assert_eq!(m.plans[&plan_id].row_name(scope, 1), Some("Cat"));
+        assert_eq!(m.plans[&plan_id].row_name(scope, 2), Some("Ann"));
     }
 
     #[test]
