@@ -1064,22 +1064,60 @@ impl Model {
     }
 }
 
-/// The computed by-person layout for one plan: rows correspond to individual
-/// contributors (Engineers / New Hires), leaves mapped to their person's row.
+/// The default label for resource row `row` (0-based) when the user hasn't
+/// named it. The fixed Events row above the resources has its own name.
+pub fn default_row_label(row: i32) -> String {
+    if row == EVENTS_ROW {
+        "Events".to_string()
+    } else {
+        format!("Resource {}", row + 1)
+    }
+}
+
+/// The computed by-resource layout for one plan: one group per distinct
+/// resource name (real names or placeholder row labels). A group occupies one
+/// visual row per concurrent block — overlapping work stacks on sub-rows, so
+/// an over-committed resource is immediately visible as a vertical pile.
 #[derive(Default)]
 pub struct PersonView {
-    /// Person name + kind in row order (index == row number).
-    pub rows: Vec<(String, ResourceType)>,
-    /// Leaf block id → its person's row index.
+    /// Gutter labels in display order: (resource name, kind when
+    /// registered/typed, the group's first visual row). A group's extra
+    /// sub-rows (concurrent work) carry no label of their own.
+    pub rows: Vec<(String, Option<ResourceType>, i32)>,
+    /// Leaf block id → its visual row (group base + overlap sub-lane).
     pub leaf_row: HashMap<WorkBlockId, i32>,
     /// The leaf ids that should be visible in by-person mode (keyed in leaf_row).
     pub visible: Vec<WorkBlockId>,
 }
 
-/// Computes the by-person layout for `plan_id`: finds every leaf block (no
-/// children) reachable from the plan's root_blocks, resolves each leaf's person
-/// via `resolved_row_name`, filters to IC types, and groups distinct people into
-/// sorted row indices.
+/// First-fit sub-lane assignment for possibly-overlapping `[start, end)`
+/// intervals: items are sorted by start and each takes the first lane whose
+/// previous occupant has ended. Disjoint work shares lane 0; each additional
+/// simultaneous block opens the next lane down.
+pub fn assign_sublanes(mut items: Vec<(WorkBlockId, Day, Day)>) -> Vec<(WorkBlockId, i32)> {
+    items.sort_by_key(|(id, s, _)| (*s, id.0));
+    let mut lane_ends: Vec<Day> = Vec::new();
+    let mut out = Vec::new();
+    for (id, s, e) in items {
+        let lane = match lane_ends.iter().position(|&end| end <= s) {
+            Some(l) => l,
+            None => {
+                lane_ends.push(Day::MIN);
+                lane_ends.len() - 1
+            }
+        };
+        lane_ends[lane] = e;
+        out.push((id, lane as i32));
+    }
+    out
+}
+
+/// Computes the by-resource layout for `plan_id`: finds every leaf block (no
+/// children) reachable from the plan's root_blocks, resolves each leaf's row
+/// name via `resolved_row_name` (placeholder row labels for unnamed rows),
+/// and groups distinct names into sorted row indices. Every resource gets a
+/// row — teams and individuals alike, registered (typed) or not; the type
+/// only drives the gutter dot.
 ///
 /// Returns an empty `PersonView` if the plan doesn't exist.
 pub fn person_view_layout(model: &Model, plan_id: PlanId) -> PersonView {
@@ -1099,45 +1137,57 @@ pub fn person_view_layout(model: &Model, plan_id: PlanId) -> PersonView {
         }
     }
 
-    // Resolve each leaf's person and filter to IC types.
-    let mut person_leaves: Vec<(WorkBlockId, String, ResourceType)> = Vec::new();
+    // Resolve each leaf's resource by row name, falling back to the row's
+    // placeholder label ("Resource 3") so unnamed rows still get a group —
+    // placeholder or not, the work should show somewhere.
+    let mut person_leaves: Vec<(WorkBlockId, String, Option<ResourceType>)> = Vec::new();
     for leaf in leaves {
         let Some(wb) = model.work_blocks.get(&leaf) else {
             continue;
         };
         let row = model.block_row(plan_id, leaf);
-        let Some(name) = model.resolved_row_name(plan_id, wb.parent, row) else {
-            continue;
-        };
-        let Some(kind) = model.resource_kind(name) else {
-            continue;
-        };
-        if !kind.is_individual() {
-            continue;
-        }
-        person_leaves.push((leaf, name.to_string(), kind));
+        let name = model
+            .resolved_row_name(plan_id, wb.parent, row)
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| default_row_label(row));
+        let kind = model.resource_kind(&name);
+        person_leaves.push((leaf, name, kind));
     }
 
-    // Collect distinct person names, sorted case-insensitively.
+    // Collect distinct resource names, sorted case-insensitively.
     let mut seen_names: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut rows: Vec<(String, ResourceType)> = Vec::new();
+    let mut groups: Vec<(String, Option<ResourceType>)> = Vec::new();
     for (_, name, kind) in &person_leaves {
         if seen_names.insert(name.clone()) {
-            rows.push((name.clone(), *kind));
+            groups.push((name.clone(), *kind));
         }
     }
-    rows.sort_by_key(|a| a.0.to_lowercase());
+    groups.sort_by_key(|a| a.0.to_lowercase());
 
-    let name_to_row: HashMap<String, i32> = rows
-        .iter()
-        .enumerate()
-        .map(|(i, (n, _))| (n.clone(), i as i32))
-        .collect();
-
-    let leaf_row: HashMap<WorkBlockId, i32> = person_leaves
-        .iter()
-        .filter_map(|(id, name, _)| name_to_row.get(name).map(|&r| (*id, r)))
-        .collect();
+    // Stack each group's overlapping blocks on sub-rows (first-fit lanes), so
+    // concurrent work piles up visibly instead of drawing on top of itself.
+    let mut rows: Vec<(String, Option<ResourceType>, i32)> = Vec::new();
+    let mut leaf_row: HashMap<WorkBlockId, i32> = HashMap::new();
+    let mut next_row: i32 = 0;
+    for (name, kind) in groups {
+        let intervals: Vec<(WorkBlockId, Day, Day)> = person_leaves
+            .iter()
+            .filter(|(_, n, _)| *n == name)
+            .filter_map(|(id, _, _)| {
+                model
+                    .work_blocks
+                    .get(id)
+                    .map(|wb| (*id, wb.start_day, wb.start_day + wb.duration_days))
+            })
+            .collect();
+        let lanes = assign_sublanes(intervals);
+        let height = lanes.iter().map(|(_, l)| l + 1).max().unwrap_or(1);
+        for (id, lane) in lanes {
+            leaf_row.insert(id, next_row + lane);
+        }
+        rows.push((name, kind, next_row));
+        next_row += height;
+    }
 
     let visible: Vec<WorkBlockId> = leaf_row.keys().copied().collect();
 
@@ -2231,33 +2281,101 @@ mod tests {
         let pv = person_view_layout(&m, plan);
         assert_eq!(pv.rows.len(), 1);
         assert_eq!(pv.rows[0].0, "Alice");
-        assert_eq!(pv.rows[0].1, ResourceType::Engineer);
+        assert_eq!(pv.rows[0].1, Some(ResourceType::Engineer));
+        assert_eq!(pv.rows[0].2, 0, "first group starts at row 0");
         assert_eq!(pv.leaf_row.get(&block), Some(&0));
         assert!(pv.visible.contains(&block));
     }
 
     #[test]
-    fn person_view_layout_team_assigned_excluded() {
+    fn person_view_layout_team_assigned_included() {
+        // Teams are resources too: a team-staffed plan must not render empty.
         let mut m = Model::default();
         let plan = m.create_plan("main", None);
-        let _block = m.add_block_to_plan(plan, "Task B", 0, 5, 0);
+        let block = m.add_block_to_plan(plan, "Task B", 0, 5, 0);
         m.set_resource_kind("Backend Team", ResourceType::Team);
         m.plans
             .get_mut(&plan)
             .unwrap()
             .set_row_name(None, 0, "Backend Team".to_string());
         let pv = person_view_layout(&m, plan);
-        assert!(pv.rows.is_empty(), "Team-assigned leaf must be excluded");
+        assert_eq!(pv.rows.len(), 1);
+        assert_eq!(pv.rows[0].0, "Backend Team");
+        assert_eq!(pv.rows[0].1, Some(ResourceType::Team));
+        assert!(pv.visible.contains(&block));
     }
 
     #[test]
-    fn person_view_layout_unassigned_excluded() {
+    fn person_view_layout_unassigned_grouped_under_placeholder() {
+        // An unnamed row's work still shows, grouped under the placeholder
+        // label the plan view displays for that row.
         let mut m = Model::default();
         let plan = m.create_plan("main", None);
-        let _block = m.add_block_to_plan(plan, "Task C", 0, 5, 0);
-        // No row name set and no resource registered → excluded.
+        let block = m.add_block_to_plan(plan, "Task C", 0, 5, 2);
         let pv = person_view_layout(&m, plan);
-        assert!(pv.rows.is_empty(), "Unassigned leaf must be excluded");
+        assert_eq!(pv.rows.len(), 1);
+        assert_eq!(pv.rows[0].0, "Resource 3");
+        assert_eq!(pv.rows[0].1, None, "placeholder rows carry no type");
+        assert!(pv.visible.contains(&block));
+    }
+
+    #[test]
+    fn person_view_layout_stacks_overlapping_work() {
+        // Two blocks on one resource at the same time occupy two sub-rows;
+        // a third that starts after the first ends reuses the top lane.
+        let mut m = Model::default();
+        let plan = m.create_plan("main", None);
+        m.set_resource_kind("Alice", ResourceType::Engineer);
+        m.plans
+            .get_mut(&plan)
+            .unwrap()
+            .set_row_name(None, 0, "Alice".to_string());
+        let a = m.add_block_to_plan(plan, "A", 0, 5, 0); // days 0-5
+        let b = m.add_block_to_plan(plan, "B", 2, 5, 0); // overlaps A
+        let c = m.add_block_to_plan(plan, "C", 5, 3, 0); // starts as A ends
+        let pv = person_view_layout(&m, plan);
+        assert_eq!(pv.rows.len(), 1, "one group");
+        assert_eq!(pv.leaf_row[&a], 0);
+        assert_eq!(pv.leaf_row[&b], 1, "concurrent work stacks below");
+        assert_eq!(pv.leaf_row[&c], 0, "disjoint work reuses the top lane");
+    }
+
+    #[test]
+    fn person_view_layout_group_heights_offset_later_groups() {
+        // Alice has 2 concurrent blocks → her group is 2 rows tall; Zara's
+        // group starts below it, not at index 1.
+        let mut m = Model::default();
+        let plan = m.create_plan("main", None);
+        m.set_resource_kind("Alice", ResourceType::Engineer);
+        m.set_resource_kind("Zara", ResourceType::Engineer);
+        {
+            let p = m.plans.get_mut(&plan).unwrap();
+            p.set_row_name(None, 0, "Alice".to_string());
+            p.set_row_name(None, 1, "Zara".to_string());
+        }
+        let _a1 = m.add_block_to_plan(plan, "A1", 0, 5, 0);
+        let _a2 = m.add_block_to_plan(plan, "A2", 0, 5, 0);
+        let z = m.add_block_to_plan(plan, "Z", 0, 5, 1);
+        let pv = person_view_layout(&m, plan);
+        assert_eq!(pv.rows[0].0, "Alice");
+        assert_eq!(pv.rows[0].2, 0);
+        assert_eq!(pv.rows[1].0, "Zara");
+        assert_eq!(pv.rows[1].2, 2, "Zara starts below Alice's 2-row group");
+        assert_eq!(pv.leaf_row[&z], 2);
+    }
+
+    #[test]
+    fn assign_sublanes_first_fit() {
+        let id = |n: u64| WorkBlockId(n);
+        // [0,5) and [2,7) overlap; [5,8) fits back into lane 0.
+        let lanes = assign_sublanes(vec![(id(1), 0, 5), (id(2), 2, 7), (id(3), 5, 8)]);
+        let lane_of = |n: u64| lanes.iter().find(|(i, _)| *i == id(n)).unwrap().1;
+        assert_eq!(lane_of(1), 0);
+        assert_eq!(lane_of(2), 1);
+        assert_eq!(lane_of(3), 0);
+        // Three-way overlap opens a third lane.
+        let lanes = assign_sublanes(vec![(id(1), 0, 9), (id(2), 1, 9), (id(3), 2, 9)]);
+        assert_eq!(lanes.iter().map(|(_, l)| *l).max(), Some(2));
     }
 
     #[test]

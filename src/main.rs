@@ -22,7 +22,7 @@ pub mod theme;
 
 use camera::{camera_nav_keys, smooth_camera, update_camera_target, CameraTarget};
 use constants::PIXELS_PER_DAY;
-use model::Day;
+use model::{default_row_label, Day};
 
 fn main() {
     App::new()
@@ -107,7 +107,12 @@ fn main() {
         .add_systems(Update, draw_parent_bounds)
         // Plan/branch UI only exists at the plan level — drilling into a block is
         // a focused view of just that block's children (no branches).
-        .add_systems(Update, draw_branch_markers.run_if(at_plan_level))
+        .add_systems(
+            Update,
+            draw_branch_markers
+                .run_if(at_plan_level)
+                .run_if(editing_enabled),
+        )
         .add_systems(Update, bands::draw_band_overlays.run_if(at_plan_level))
         .add_systems(Update, bands::sync_band_visuals)
         .add_systems(
@@ -144,7 +149,12 @@ fn main() {
             Update,
             bands::handle_lane_block_delete.run_if(at_plan_level),
         )
-        .add_systems(Update, bands::draw_lane_dependencies.run_if(at_plan_level))
+        .add_systems(
+            Update,
+            bands::draw_lane_dependencies
+                .run_if(at_plan_level)
+                .run_if(editing_enabled),
+        )
         .add_systems(
             Update,
             bands::clear_lane_selection_on_main_select.after(blocks::handle_block_selection),
@@ -280,7 +290,12 @@ fn main() {
         )
         .add_systems(Update, blocks::draw_block_handles)
         .add_systems(Update, blocks::update_cursor_icon)
-        .add_systems(Update, blocks::draw_dependency_edges)
+        // Dep edges/handles are positioned from plan rows — meaningless (and
+        // previously drawn as floating orphans) in the by-resource view.
+        .add_systems(
+            Update,
+            blocks::draw_dependency_edges.run_if(editing_enabled),
+        )
         .add_systems(
             Update,
             blocks::sync_block_labels.after(blocks::reconcile_block_sprites),
@@ -1654,16 +1669,17 @@ fn resource_gutter_ui(
     let mut entries: Vec<GutterRow> = Vec::new();
 
     if view.by_person {
-        // By-Person: one read-only label per individual contributor row.
+        // By-resource: one read-only label at each group's first row. A group
+        // spanning extra sub-rows (concurrent work) is labelled only once.
         let dummy_plan = model.main_plan_id().unwrap_or(model::PlanId(0));
-        for (i, (name, kind)) in person_view.0.rows.iter().enumerate() {
+        for (name, kind, base_row) in person_view.0.rows.iter() {
             entries.push(GutterRow {
                 plan_id: dummy_plan,
                 scope: None,
-                row: i as i32,
-                world_y: -(i as f32 * rh),
+                row: *base_row,
+                world_y: -(*base_row as f32 * rh),
                 name: Some(name.clone()),
-                kind: Some(*kind),
+                kind: *kind,
             });
         }
     } else {
@@ -2230,16 +2246,6 @@ fn apply_row_reorder(
     }
     if let Err(e) = db::save_model(conn, model) {
         error!("save_model failed: {e}");
-    }
-}
-
-/// The default label for resource row `row` (0-based) when the user hasn't
-/// named it. The fixed Events row above the resources has its own name.
-fn default_row_label(row: i32) -> String {
-    if row == constants::EVENTS_ROW {
-        "Events".to_string()
-    } else {
-        format!("Resource {}", row + 1)
     }
 }
 
@@ -3480,7 +3486,7 @@ fn top_bar_ui(
                     if theme::pill_button(ui, "BY PLAN", !view.by_person).clicked() {
                         view.by_person = false;
                     }
-                    if theme::pill_button(ui, "BY PERSON", view.by_person).clicked() {
+                    if theme::pill_button(ui, "BY RESOURCE", view.by_person).clicked() {
                         view.by_person = true;
                         if view.plan.is_none() {
                             view.plan = model.main_plan_id();
