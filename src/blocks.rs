@@ -4647,6 +4647,7 @@ pub fn block_inspector_flyout_ui(
     mut set: ResMut<SelectedBlocks>,
     mut undo: ResMut<UndoStack>,
     lane_selected: Res<crate::bands::LaneSelection>,
+    mut flyout: ResMut<crate::document::FlyoutWidth>,
 ) {
     // The settings fly-out owns the right slot while it is open.
     if settings.open {
@@ -4702,9 +4703,10 @@ pub fn block_inspector_flyout_ui(
         let mut chosen_color: Option<Option<[f32; 3]>> = None;
         let mut close = false;
 
-        egui::SidePanel::right("block_inspector_flyout")
-            .resizable(false)
-            .exact_width(272.0)
+        let panel = egui::SidePanel::right("right_flyout")
+            .resizable(true)
+            .default_width(flyout.0)
+            .width_range(crate::document::FLYOUT_MIN_WIDTH..=crate::document::FLYOUT_MAX_WIDTH)
             .frame(
                 egui::Frame::new()
                     .fill(theme::PANEL)
@@ -4811,6 +4813,12 @@ pub fn block_inspector_flyout_ui(
                     chosen_color = Some(None);
                 }
             });
+
+        // Track the live width (shared with the settings fly-out via id).
+        let w = crate::document::clamp_flyout_width(panel.response.rect.width());
+        if (w - flyout.0).abs() > 0.5 {
+            flyout.0 = w;
+        }
 
         // Apply batch edits (outside the closure so we can call `get_mut`).
         if chosen_size.is_some() || chosen_priority.is_some() || chosen_color.is_some() {
@@ -4929,9 +4937,10 @@ pub fn block_inspector_flyout_ui(
     let mut cancel_reparent = false;
     let mut pick_plan: Option<model::PlanId> = None;
 
-    egui::SidePanel::right("block_inspector_flyout")
-        .resizable(false)
-        .exact_width(272.0)
+    let panel = egui::SidePanel::right("right_flyout")
+        .resizable(true)
+        .default_width(flyout.0)
+        .width_range(crate::document::FLYOUT_MIN_WIDTH..=crate::document::FLYOUT_MAX_WIDTH)
         .frame(
             egui::Frame::new()
                 .fill(theme::PANEL)
@@ -5158,6 +5167,12 @@ pub fn block_inspector_flyout_ui(
                 }
             }
         });
+
+    // Track the live width (shared with the settings fly-out via id).
+    let w = crate::document::clamp_flyout_width(panel.response.rect.width());
+    if (w - flyout.0).abs() > 0.5 {
+        flyout.0 = w;
+    }
 
     if let Some(url) = open_url {
         open_url_in_browser(&url);

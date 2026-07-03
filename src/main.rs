@@ -78,6 +78,7 @@ fn main() {
         .insert_resource(bands::LaneBlockRename::default())
         .insert_resource(bands::LaneDepDrag::default())
         .insert_resource(flow::FlowCache::default())
+        .insert_resource(document::FlyoutWidth(document::load_flyout_width()))
         .insert_resource(db::SaveRequest::default())
         .insert_resource(document::PendingDocument::default())
         .insert_resource(document::FileMenuState::default())
@@ -86,6 +87,7 @@ fn main() {
         // runs inside PostUpdate, and the flush must see those marks same-frame.
         .add_systems(Last, db::flush_save_request)
         .add_systems(Update, sync_window_title)
+        .add_systems(Update, persist_flyout_width)
         .add_systems(Startup, (setup_db, setup_camera))
         .add_systems(Startup, setup_demo_schedule.after(setup_db))
         .add_systems(
@@ -497,6 +499,24 @@ fn setup_db(world: &mut World) {
     world.insert_resource(document::CurrentDocument(db_path));
     world.insert_resource(model);
     world.insert_non_send_resource(conn);
+}
+
+/// Saves the right fly-out's width once a resize drag ends (not per held
+/// frame). `Local` tracks the last persisted value, so an unchanged width
+/// never rewrites the sidecar.
+fn persist_flyout_width(
+    width: Res<document::FlyoutWidth>,
+    mouse: Res<ButtonInput<MouseButton>>,
+    mut last_saved: Local<Option<f32>>,
+) {
+    if mouse.pressed(MouseButton::Left) {
+        return;
+    }
+    let w = width.0;
+    if last_saved.is_none_or(|s| (s - w).abs() > 0.5) {
+        document::save_flyout_width(w);
+        *last_saved = Some(w);
+    }
 }
 
 /// Keeps the OS window title in sync with the open document.

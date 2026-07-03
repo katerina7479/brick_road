@@ -156,6 +156,7 @@ pub fn settings_flyout_ui(
     mut settings: ResMut<SettingsState>,
     mut model: ResMut<model::Model>,
     mut save: ResMut<db::SaveRequest>,
+    mut flyout: ResMut<crate::document::FlyoutWidth>,
 ) {
     if !settings.open {
         return;
@@ -165,9 +166,12 @@ pub fn settings_flyout_ui(
     let mut changed = false;
     let mut close = false;
 
-    egui::SidePanel::right("settings_flyout")
-        .resizable(false)
-        .exact_width(272.0)
+    // Shares the "right_flyout" id (and thus the user-dragged width) with the
+    // block inspector — the two are never open at once.
+    let panel = egui::SidePanel::right("right_flyout")
+        .resizable(true)
+        .default_width(flyout.0)
+        .width_range(crate::document::FLYOUT_MIN_WIDTH..=crate::document::FLYOUT_MAX_WIDTH)
         .frame(
             egui::Frame::new()
                 .fill(theme::PANEL)
@@ -839,6 +843,11 @@ pub fn settings_flyout_ui(
                     });
                 }); // ScrollArea::vertical
         });
+    // Track the live width so it persists across panels and launches.
+    let w = crate::document::clamp_flyout_width(panel.response.rect.width());
+    if (w - flyout.0).abs() > 0.5 {
+        flyout.0 = w;
+    }
 
     // ── Date-range picker popup ───────────────────────────────────────────────
     // Drawn over the panel as a foreground Area anchored under the clicked row.
