@@ -687,6 +687,8 @@ impl Model {
         changed
     }
 
+    /// See docs/branch-semantics.md for the full membership lifecycle.
+    ///
     /// Forks `main` into a new branch at `fork_day`. The branch inherits main's
     /// blocks from the fork day forward by copying their ids (the blocks stay
     /// shared with main); blocks before the fork are shared trunk and not
