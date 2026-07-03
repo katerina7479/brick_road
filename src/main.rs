@@ -21,6 +21,8 @@ pub mod labels;
 pub mod model;
 pub mod schedule;
 pub mod settings_ui;
+#[cfg(test)]
+pub mod testkit;
 pub mod theme;
 
 use camera::{camera_nav_keys, smooth_camera, update_camera_target, CameraTarget};
