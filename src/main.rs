@@ -73,9 +73,13 @@ fn main() {
         .insert_resource(bands::LaneBlockRename::default())
         .insert_resource(bands::LaneDepDrag::default())
         .insert_resource(flow::FlowCache::default())
+        .insert_resource(db::SaveRequest::default())
         .insert_resource(document::PendingDocument::default())
         .insert_resource(document::FileMenuState::default())
         .add_systems(Update, apply_document_request)
+        // Last (not PostUpdate): the egui pass — where UI systems mark saves —
+        // runs inside PostUpdate, and the flush must see those marks same-frame.
+        .add_systems(Last, db::flush_save_request)
         .add_systems(Update, sync_window_title)
         .add_systems(Startup, (setup_db, setup_camera))
         .add_systems(Startup, setup_demo_schedule.after(setup_db))
@@ -475,6 +479,7 @@ fn setup_db(world: &mut World) {
     db::create_tables(&conn).expect("failed to create DB tables");
     let mut model = db::load_model(&conn).expect("failed to load model");
     // Events never repeat into plans; sweep ghosts saved before that rule.
+    // Startup runs before the deferred-save system exists, so save directly.
     if model.prune_event_ghosts_from_branches() {
         if let Err(e) = db::save_model(&conn, &model) {
             error!("save_model failed: {e}");
@@ -520,6 +525,20 @@ fn apply_document_request(world: &mut World) {
         | document::DocRequest::New(p)
         | document::DocRequest::Duplicate(p) => p.clone(),
     };
+
+    // Flush any not-yet-saved edits to the CURRENT document before its
+    // connection is swapped out — a mark set earlier this frame would
+    // otherwise be flushed into the new document (or lost on failure).
+    if world.resource::<db::SaveRequest>().0 {
+        {
+            let model = world.resource::<model::Model>();
+            let conn = world.non_send_resource::<rusqlite::Connection>();
+            if let Err(e) = db::save_model(conn, model) {
+                error!("save_model failed: {e}");
+            }
+        }
+        world.resource_mut::<db::SaveRequest>().0 = false;
+    }
 
     // New/Duplicate write a fresh file. The native save dialog already
     // confirmed any overwrite, so clear stale content instead of merging
@@ -575,6 +594,7 @@ fn apply_document_request(world: &mut World) {
             }
         },
     };
+    // Exclusive system, model not yet in the world — save directly.
     if model.prune_event_ghosts_from_branches() {
         if let Err(e) = db::save_model(&conn, &model) {
             error!("save_model failed: {e}");
@@ -1225,7 +1245,7 @@ fn handle_fork_hover(
     mouse: Res<ButtonInput<MouseButton>>,
     keyboard: Res<ButtonInput<KeyCode>>,
     mut egui_ctx: EguiContexts,
-    conn: NonSend<rusqlite::Connection>,
+    mut save: ResMut<db::SaveRequest>,
 ) {
     let Ok(ctx) = egui_ctx.ctx_mut() else { return };
     if ctx.is_pointer_over_area() {
@@ -1254,9 +1274,7 @@ fn handle_fork_hover(
             // branch inherits main's blocks from the fork day forward; see
             // Model::fork_main for the semantics, which is unit-tested.
             if model.fork_main(fork_day.max(0)).is_some() {
-                if let Err(e) = db::save_model(&conn, &model) {
-                    error!("save_model failed: {e}");
-                }
+                save.mark();
             }
         }
     }
@@ -1620,7 +1638,7 @@ fn resource_gutter_ui(
     person_view: Res<schedule::PersonViewCache>,
     flow_cache: Res<flow::FlowCache>,
     mut rename: ResMut<RowRename>,
-    conn: NonSend<rusqlite::Connection>,
+    mut save: ResMut<db::SaveRequest>,
     keys: Res<ButtonInput<KeyCode>>,
     cam_q: Query<(&Transform, &Projection), With<Camera2d>>,
     windows: Query<&Window>,
@@ -2112,7 +2130,7 @@ fn resource_gutter_ui(
             rename.picker_open = None;
         }
         Some(Act::SelectResource(pid, sc, r, name)) => {
-            commit_row_name(&mut model, &conn, pid, sc, r, &name);
+            commit_row_name(&mut model, &mut save, pid, sc, r, &name);
             rename.picker_open = None;
         }
         Some(Act::StartNew(pid, sc, r)) => {
@@ -2123,7 +2141,7 @@ fn resource_gutter_ui(
         Some(Act::CommitNew) => {
             if let Some((pid, sc, r)) = rename.editing {
                 let raw = rename.buf.trim().to_string();
-                commit_row_name(&mut model, &conn, pid, sc, r, &raw);
+                commit_row_name(&mut model, &mut save, pid, sc, r, &raw);
             }
             rename.editing = None;
             rename.buf.clear();
@@ -2138,7 +2156,7 @@ fn resource_gutter_ui(
         }
         Some(Act::DropRow(pid, sc, from, to)) => {
             if from != to {
-                apply_row_reorder(&mut model, &conn, pid, sc, from, to);
+                apply_row_reorder(&mut model, &mut save, pid, sc, from, to);
             }
             rename.drag = None;
         }
@@ -2155,7 +2173,7 @@ fn resource_gutter_ui(
 /// kept. Otherwise the name is stored as this plan's override for the row.
 fn commit_row_name(
     model: &mut model::Model,
-    conn: &rusqlite::Connection,
+    save: &mut db::SaveRequest,
     plan_id: model::PlanId,
     scope: Option<model::WorkBlockId>,
     row: i32,
@@ -2223,9 +2241,7 @@ fn commit_row_name(
         }
     }
 
-    if let Err(e) = db::save_model(conn, model) {
-        error!("save_model failed: {e}");
-    }
+    save.mark();
 }
 
 /// New index for `row` after a drag-reorder that moves row `from` to `to`
@@ -2270,7 +2286,7 @@ fn reorder_row_names(names: &mut Vec<String>, from: i32, to: i32) {
 /// autosaves. Per-plan by construction — a branch reorder never touches main.
 fn apply_row_reorder(
     model: &mut model::Model,
-    conn: &rusqlite::Connection,
+    save: &mut db::SaveRequest,
     plan_id: model::PlanId,
     scope: Option<model::WorkBlockId>,
     from: i32,
@@ -2296,9 +2312,7 @@ fn apply_row_reorder(
     {
         reorder_row_names(names, from, to);
     }
-    if let Err(e) = db::save_model(conn, model) {
-        error!("save_model failed: {e}");
-    }
+    save.mark();
 }
 
 /// The accent colour marking a resource's type in the gutter and settings.
@@ -2502,7 +2516,7 @@ fn settings_flyout_ui(
     mut contexts: EguiContexts,
     mut settings: ResMut<SettingsState>,
     mut model: ResMut<model::Model>,
-    conn: NonSend<rusqlite::Connection>,
+    mut save: ResMut<db::SaveRequest>,
 ) {
     if !settings.open {
         return;
@@ -3239,9 +3253,7 @@ fn settings_flyout_ui(
         settings.open = false;
     }
     if changed {
-        if let Err(e) = db::save_model(&conn, &model) {
-            error!("save_model failed: {e}");
-        }
+        save.mark();
     }
 }
 
@@ -3262,7 +3274,7 @@ fn top_bar_ui(
     current_doc: Res<document::CurrentDocument>,
     windows: Query<&Window>,
     today: Res<schedule::TodayMarker>,
-    conn: NonSend<rusqlite::Connection>,
+    mut save: ResMut<db::SaveRequest>,
 ) {
     let Ok(ctx) = contexts.ctx_mut() else { return };
     let mut clear_all = false;
@@ -3634,9 +3646,7 @@ fn top_bar_ui(
     if clear_all {
         model.clear_all_work();
         *schedule = schedule::Schedule::default();
-        if let Err(e) = db::save_model(&conn, &model) {
-            error!("save_model failed: {e}");
-        }
+        save.mark();
     }
     if let Some(bid) = accept_branch {
         // Promote the branch to main, persist, and drop the now-gone selection.
@@ -3645,9 +3655,7 @@ fn top_bar_ui(
         // design (br-236/237 wontfix). Recovery is manual redo, not a guardrail.
         model.accept_plan_as_main(bid);
         selected_plan.0 = None;
-        if let Err(e) = db::save_model(&conn, &model) {
-            error!("save_model failed: {e}");
-        }
+        save.mark();
     }
     if let Some(len) = jump_to {
         drill.path.truncate(len);
@@ -3657,9 +3665,7 @@ fn top_bar_ui(
             wb.rollup = !wb.rollup;
         }
         model.recompute_rollup(id);
-        if let Err(e) = db::save_model(&conn, &model) {
-            error!("save_model failed: {e}");
-        }
+        save.mark();
     }
 }
 
@@ -3869,7 +3875,7 @@ fn import_modal_ui(
     mut import_state: ResMut<ImportState>,
     mut model: ResMut<model::Model>,
     mut schedule: ResMut<schedule::Schedule>,
-    conn: NonSend<rusqlite::Connection>,
+    mut save: ResMut<db::SaveRequest>,
 ) {
     if import_state.pending.is_none() {
         return;
@@ -3985,9 +3991,7 @@ fn import_modal_ui(
         }
 
         *schedule = schedule::Schedule::default();
-        if let Err(e) = db::save_model(&conn, &model) {
-            error!("save_model after import failed: {e}");
-        }
+        save.mark();
         *import_state = ImportState::default();
     }
 }
@@ -4088,7 +4092,7 @@ fn handle_branch_delete(
     name_edit: Res<blocks::NameEditState>,
     mut selected_plan: ResMut<SelectedPlan>,
     mut model: ResMut<model::Model>,
-    conn: NonSend<rusqlite::Connection>,
+    mut save: ResMut<db::SaveRequest>,
 ) {
     if name_edit.editing.is_some() {
         return;
@@ -4103,9 +4107,7 @@ fn handle_branch_delete(
     }
     if let Some(id) = selected_plan.0.take() {
         model.delete_plan(id);
-        if let Err(e) = db::save_model(&conn, &model) {
-            error!("save_model failed: {e}");
-        }
+        save.mark();
     }
 }
 
@@ -4363,7 +4365,9 @@ mod tests {
             .set_row_name(scope, 0, "Jefff".to_string());
         db::save_model(&conn, &m).unwrap();
 
-        commit_row_name(&mut m, &conn, plan_id, scope, 0, "Jeff");
+        let mut save = db::SaveRequest::default();
+        commit_row_name(&mut m, &mut save, plan_id, scope, 0, "Jeff");
+        assert!(save.0, "rename marks the deferred save");
 
         let rb = m.resource_by_name("Jeff").expect("registration carried");
         assert_eq!(rb.resource_type, model::ResourceType::Engineer);
@@ -4392,7 +4396,8 @@ mod tests {
         }
         db::save_model(&conn, &m).unwrap();
 
-        commit_row_name(&mut m, &conn, plan_id, None, 0, "Team Alpha");
+        let mut save = db::SaveRequest::default();
+        commit_row_name(&mut m, &mut save, plan_id, None, 0, "Team Alpha");
 
         assert!(
             m.resource_by_name("Team A").is_some(),
@@ -4418,7 +4423,8 @@ mod tests {
             .set_row_name(None, 0, "Old".to_string());
         db::save_model(&conn, &m).unwrap();
 
-        commit_row_name(&mut m, &conn, plan_id, None, 0, "Existing");
+        let mut save = db::SaveRequest::default();
+        commit_row_name(&mut m, &mut save, plan_id, None, 0, "Existing");
 
         assert!(m.resource_by_name("Old").is_some(), "Old entry untouched");
         assert_eq!(
@@ -4449,7 +4455,8 @@ mod tests {
         m.set_block_row(plan_id, block, 7);
         db::save_model(&conn, &m).unwrap();
 
-        commit_row_name(&mut m, &conn, plan_id, scope, 7, "Backend");
+        let mut save = db::SaveRequest::default();
+        commit_row_name(&mut m, &mut save, plan_id, scope, 7, "Backend");
 
         assert_eq!(
             m.block_row(plan_id, block),
@@ -4488,7 +4495,8 @@ mod tests {
         db::save_model(&conn, &m).unwrap();
 
         // Naming row 1 "Infra" must find the target at row 100.
-        commit_row_name(&mut m, &conn, plan_id, scope, 1, "Infra");
+        let mut save = db::SaveRequest::default();
+        commit_row_name(&mut m, &mut save, plan_id, scope, 1, "Infra");
 
         assert_eq!(
             m.block_row(plan_id, block),
@@ -4576,7 +4584,9 @@ mod tests {
         db::save_model(&conn, &m).unwrap();
 
         // Drag Ann's row (0) below Cat's (2).
-        apply_row_reorder(&mut m, &conn, plan_id, scope, 0, 2);
+        let mut save = db::SaveRequest::default();
+        apply_row_reorder(&mut m, &mut save, plan_id, scope, 0, 2);
+        assert!(save.0, "reorder marks the deferred save");
 
         assert_eq!(m.block_row(plan_id, a), 2, "dragged row's block lands at 2");
         assert_eq!(m.block_row(plan_id, b), 0, "rows between shift up");

@@ -10,7 +10,7 @@ use bevy::window::{CursorIcon, SystemCursorIcon};
 
 use crate::{
     constants::{EVENTS_ROW, PIXELS_PER_DAY, ROW_HEIGHT},
-    db, graph,
+    graph,
     model::{self, Day, DependencyType, PlanId, WorkBlockId},
     schedule, theme,
 };
@@ -1343,7 +1343,7 @@ pub fn handle_canvas_create(
     drill: Res<schedule::DrillScope>,
     mut selected: ResMut<SelectedBlock>,
     mut model: ResMut<model::Model>,
-    conn: NonSend<rusqlite::Connection>,
+    mut save: ResMut<crate::db::SaveRequest>,
     block_query: Query<(&BlockSprite, &Transform, &Sprite)>,
     mut last_click: Local<f32>,
 ) {
@@ -1422,9 +1422,7 @@ pub fn handle_canvas_create(
         model.link_main_block_to_branches(id);
         id
     };
-    if let Err(e) = db::save_model(&conn, &model) {
-        error!("save_model failed: {e}");
-    }
+    save.mark();
     selected.0 = Some(new_id);
 }
 
@@ -1473,7 +1471,7 @@ pub fn handle_block_resize(
     mouse: Res<ButtonInput<MouseButton>>,
     mut resize: ResMut<ResizeDragState>,
     mut model: ResMut<model::Model>,
-    conn: NonSend<rusqlite::Connection>,
+    mut save: ResMut<crate::db::SaveRequest>,
     block_query: Query<(&BlockSprite, &Transform, &Sprite)>,
     dep_drag: Res<DepDragState>,
 ) {
@@ -1558,9 +1556,7 @@ pub fn handle_block_resize(
             if let Some(parent) = model.work_blocks.get(&id).and_then(|wb| wb.parent) {
                 model.recompute_rollup(parent);
             }
-            if let Err(e) = db::save_model(&conn, &model) {
-                error!("save_model failed: {e}");
-            }
+            save.mark();
         }
     }
 }
@@ -1620,7 +1616,7 @@ pub fn handle_block_drag(
     mouse: Res<ButtonInput<MouseButton>>,
     mut drag: ResMut<DragState>,
     mut model: ResMut<model::Model>,
-    conn: NonSend<rusqlite::Connection>,
+    mut save: ResMut<crate::db::SaveRequest>,
     block_query: Query<(&BlockSprite, &Transform, &Sprite)>,
     resize: Res<ResizeDragState>,
     dep_drag: Res<DepDragState>,
@@ -1851,9 +1847,7 @@ pub fn handle_block_drag(
             // never repeat into plans (also swept at startup for old saves).
             model.prune_event_ghosts_from_branches();
 
-            if let Err(e) = db::save_model(&conn, &model) {
-                error!("save_model failed: {e}");
-            }
+            save.mark();
         }
     }
 }
@@ -2367,7 +2361,7 @@ pub fn handle_dep_drag(
     mut drag: ResMut<DepDragState>,
     mut model: ResMut<model::Model>,
     block_query: Query<(&BlockSprite, &Transform, &Sprite)>,
-    conn: NonSend<rusqlite::Connection>,
+    mut save: ResMut<crate::db::SaveRequest>,
 ) {
     if let Ok(ctx) = egui_ctx.ctx_mut() {
         if ctx.is_pointer_over_area() {
@@ -2429,7 +2423,7 @@ pub fn handle_dep_drag(
         if let Some(succ_id) = drag.from.take() {
             finish_dep_drop(
                 &mut model,
-                &conn,
+                &mut save,
                 succ_id,
                 drag.from_right,
                 world_pos,
@@ -2448,7 +2442,7 @@ pub fn handle_dep_drag(
         if let Some(succ_id) = drag.from.take() {
             finish_dep_drop(
                 &mut model,
-                &conn,
+                &mut save,
                 succ_id,
                 drag.from_right,
                 world_pos,
@@ -2466,7 +2460,7 @@ pub fn handle_dep_drag(
 /// moving the event (deps never move main blocks from a branch).
 fn finish_dep_drop(
     model: &mut model::Model,
-    conn: &rusqlite::Connection,
+    save: &mut crate::db::SaveRequest,
     succ_id: WorkBlockId,
     from_right: bool,
     world_pos: Vec2,
@@ -2483,9 +2477,7 @@ fn finish_dep_drop(
         });
         if !exists {
             model.create_dependency(pred_id, succ_id, dep_type);
-            if let Err(e) = crate::db::save_model(conn, model) {
-                error!("save_model failed: {e}");
-            }
+            save.mark();
         }
     } else if event_block_geom(model, succ_id).is_some() {
         let Some(hit) = crate::bands::lane_block_at(model, world_pos) else {
@@ -2501,9 +2493,7 @@ fn finish_dep_drop(
         });
         if !exists {
             model.create_dependency_in(hit.plan, hit.id, succ_id, dep_type);
-            if let Err(e) = crate::db::save_model(conn, model) {
-                error!("save_model failed: {e}");
-            }
+            save.mark();
         }
     }
 }
@@ -2657,7 +2647,7 @@ pub fn draw_name_edit_overlay(
     mut contexts: EguiContexts,
     mut name_edit: ResMut<NameEditState>,
     mut model: ResMut<model::Model>,
-    conn: NonSend<rusqlite::Connection>,
+    mut save: ResMut<crate::db::SaveRequest>,
     windows: Query<&Window>,
     camera: Query<(&Camera, &GlobalTransform)>,
     block_query: Query<(&BlockSprite, &Transform)>,
@@ -2734,9 +2724,7 @@ pub fn draw_name_edit_overlay(
             if let Some(wb) = model.work_blocks.get_mut(&edit_id) {
                 wb.name = new_name;
             }
-            if let Err(e) = db::save_model(&conn, &model) {
-                error!("save_model failed: {e}");
-            }
+            save.mark();
         }
         name_edit.editing = None;
         name_edit.text_buf.clear();
@@ -2878,7 +2866,7 @@ pub fn handle_block_delete(
     name_edit: Res<NameEditState>,
     mut model: ResMut<model::Model>,
     mut undo: ResMut<UndoStack>,
-    conn: NonSend<rusqlite::Connection>,
+    mut save: ResMut<crate::db::SaveRequest>,
 ) {
     if name_edit.editing.is_some() {
         return;
@@ -2892,9 +2880,7 @@ pub fn handle_block_delete(
         // A selected dependency edge deletes first; otherwise delete the block(s).
         if let Some(dep_id) = selected_dep.0.take() {
             model.dependencies.remove(&dep_id);
-            if let Err(e) = db::save_model(&conn, &model) {
-                error!("save_model failed: {e}");
-            }
+            save.mark();
         } else if !set.0.is_empty() {
             let ids: Vec<WorkBlockId> = set.0.iter().copied().collect();
             let snaps: Vec<DeletedBlockSnapshot> = ids
@@ -2908,9 +2894,7 @@ pub fn handle_block_delete(
             for id in ids {
                 delete_work_block(&mut model, id);
             }
-            if let Err(e) = db::save_model(&conn, &model) {
-                error!("save_model failed: {e}");
-            }
+            save.mark();
             set.0.clear();
             selected.0 = None;
         }
@@ -2924,7 +2908,7 @@ pub fn handle_undo(
     name_edit: Res<NameEditState>,
     mut model: ResMut<model::Model>,
     mut undo: ResMut<UndoStack>,
-    conn: NonSend<rusqlite::Connection>,
+    mut save: ResMut<crate::db::SaveRequest>,
 ) {
     if name_edit.editing.is_some() {
         return;
@@ -2941,9 +2925,7 @@ pub fn handle_undo(
             for snap in snaps {
                 restore_deletion_snapshot(&mut model, snap);
             }
-            if let Err(e) = db::save_model(&conn, &model) {
-                error!("save_model failed: {e}");
-            }
+            save.mark();
         } else if let Some(moves) = undo.last_move.take() {
             if let Some(plan_id) = model.main_plan_id() {
                 for (id, prev_start, prev_row) in moves {
@@ -2953,16 +2935,12 @@ pub fn handle_undo(
                     model.set_block_row(plan_id, id, prev_row);
                 }
             }
-            if let Err(e) = db::save_model(&conn, &model) {
-                error!("save_model failed: {e}");
-            }
+            save.mark();
         } else if let Some(pasted_ids) = undo.last_paste.take() {
             for id in pasted_ids {
                 delete_work_block(&mut model, id);
             }
-            if let Err(e) = db::save_model(&conn, &model) {
-                error!("save_model failed: {e}");
-            }
+            save.mark();
         } else if let Some(snaps) = undo.last_batch_edit.take() {
             for snap in snaps {
                 if let Some(wb) = model.work_blocks.get_mut(&snap.id) {
@@ -2972,9 +2950,7 @@ pub fn handle_undo(
                     wb.color = snap.color;
                 }
             }
-            if let Err(e) = db::save_model(&conn, &model) {
-                error!("save_model failed: {e}");
-            }
+            save.mark();
         }
     }
 }
@@ -3115,7 +3091,7 @@ pub fn handle_paste(
     camera: Query<(&Camera, &GlobalTransform)>,
     clipboard: Res<Clipboard>,
     mut model: ResMut<model::Model>,
-    conn: NonSend<rusqlite::Connection>,
+    mut save: ResMut<crate::db::SaveRequest>,
     mut undo: ResMut<UndoStack>,
     mut set: ResMut<SelectedBlocks>,
 ) {
@@ -3176,9 +3152,7 @@ pub fn handle_paste(
     // Select the newly pasted blocks.
     set.0 = new_ids.into_iter().collect();
 
-    if let Err(e) = db::save_model(&conn, &model) {
-        error!("save_model failed: {e}");
-    }
+    save.mark();
 }
 
 /// Remove a single work block from the model, cleaning up all cross-references.
@@ -4332,7 +4306,7 @@ pub fn draw_create_mode_overlay(
     mut contexts: EguiContexts,
     mut state: ResMut<CreateModeState>,
     mut model: ResMut<model::Model>,
-    conn: NonSend<rusqlite::Connection>,
+    mut save: ResMut<crate::db::SaveRequest>,
     windows: Query<&Window>,
     camera: Query<(&Camera, &GlobalTransform)>,
 ) {
@@ -4424,9 +4398,7 @@ pub fn draw_create_mode_overlay(
             model.set_block_row(plan_id, new_id, new_row);
             // A new block on main links through to existing branches as a ghost.
             model.link_main_block_to_branches(new_id);
-            if let Err(e) = db::save_model(&conn, &model) {
-                error!("save_model failed: {e}");
-            }
+            save.mark();
         }
         state.text_buf.clear();
     }
@@ -4561,7 +4533,7 @@ fn flush_inspector_buffers(
     name_buf: &str,
     desc_buf: &str,
     url_buf: &str,
-    conn: &rusqlite::Connection,
+    save: &mut crate::db::SaveRequest,
 ) {
     let mut changed = false;
     if let Some(wb) = model.work_blocks.get_mut(&id) {
@@ -4581,9 +4553,7 @@ fn flush_inspector_buffers(
         }
     }
     if changed {
-        if let Err(e) = db::save_model(conn, model) {
-            error!("save_model failed: {e}");
-        }
+        save.mark();
     }
 }
 
@@ -4673,7 +4643,7 @@ pub fn block_inspector_flyout_ui(
     mut model: ResMut<model::Model>,
     settings: Res<crate::SettingsState>,
     keys: Res<ButtonInput<KeyCode>>,
-    conn: NonSend<rusqlite::Connection>,
+    mut save: ResMut<crate::db::SaveRequest>,
     mut set: ResMut<SelectedBlocks>,
     mut undo: ResMut<UndoStack>,
     lane_selected: Res<crate::bands::LaneSelection>,
@@ -4867,9 +4837,7 @@ pub fn block_inspector_flyout_ui(
             undo.last_move = None;
             undo.last_paste = None;
 
-            if let Err(e) = db::save_model(&conn, &model) {
-                error!("save_model failed: {e}");
-            }
+            save.mark();
         }
 
         if close {
@@ -4901,7 +4869,7 @@ pub fn block_inspector_flyout_ui(
                 state.desc_buf.clone(),
                 state.url_buf.clone(),
             );
-            flush_inspector_buffers(&mut model, prev, &n, &d, &u, &conn);
+            flush_inspector_buffers(&mut model, prev, &n, &d, &u, &mut save);
         }
         if let Some(wb) = model.work_blocks.get(&id) {
             state.name_buf = wb.name.clone();
@@ -4921,7 +4889,7 @@ pub fn block_inspector_flyout_ui(
             state.desc_buf.clone(),
             state.url_buf.clone(),
         );
-        flush_inspector_buffers(&mut model, id, &n, &d, &u, &conn);
+        flush_inspector_buffers(&mut model, id, &n, &d, &u, &mut save);
         selected.0 = None;
         state.bound = None;
         return;
@@ -5203,7 +5171,7 @@ pub fn block_inspector_flyout_ui(
             state.desc_buf.clone(),
             state.url_buf.clone(),
         );
-        flush_inspector_buffers(&mut model, id, &n, &d, &u, &conn);
+        flush_inspector_buffers(&mut model, id, &n, &d, &u, &mut save);
     }
     // Only take a mutable borrow when there is something to apply — otherwise
     // `get_mut` would trip `Model`'s change-detection every frame the fly-out is
@@ -5221,9 +5189,7 @@ pub fn block_inspector_flyout_ui(
                 wb.color = c;
             }
         }
-        if let Err(e) = db::save_model(&conn, &model) {
-            error!("save_model failed: {e}");
-        }
+        save.mark();
     }
     if open_reparent {
         state.reparent_open = true;
@@ -5238,9 +5204,7 @@ pub fn block_inspector_flyout_ui(
     }
     if let Some(new_parent) = reparent_to {
         if model.reparent(id, new_parent).is_ok() {
-            if let Err(e) = db::save_model(&conn, &model) {
-                error!("save_model failed: {e}");
-            }
+            save.mark();
         }
         state.reparent_open = false;
         state.reparent_plan_id = None;
@@ -5251,7 +5215,7 @@ pub fn block_inspector_flyout_ui(
             state.desc_buf.clone(),
             state.url_buf.clone(),
         );
-        flush_inspector_buffers(&mut model, id, &n, &d, &u, &conn);
+        flush_inspector_buffers(&mut model, id, &n, &d, &u, &mut save);
         selected.0 = None;
         state.bound = None;
     }

@@ -21,7 +21,6 @@ use bevy::window::SystemCursorIcon;
 
 use crate::{
     constants::{PIXELS_PER_DAY, ROW_HEIGHT},
-    db,
     model::{Day, DependencyId, Model, Plan, PlanId, WorkBlockId},
 };
 
@@ -464,7 +463,7 @@ pub fn handle_band_block_create(
     keyboard: Res<ButtonInput<KeyCode>>,
     time: Res<Time>,
     mut model: ResMut<Model>,
-    conn: NonSend<rusqlite::Connection>,
+    mut save: ResMut<crate::db::SaveRequest>,
     mut last_click: Local<f32>,
 ) {
     if !mouse.just_pressed(MouseButton::Left) {
@@ -521,9 +520,7 @@ pub fn handle_band_block_create(
     let row = ((band.row0_y - world.y) / ROW_HEIGHT).round().max(0.0) as i32;
 
     model.add_block_to_plan(plan_id, "New Block", day, DEFAULT_DURATION, row);
-    if let Err(e) = db::save_model(&conn, &model) {
-        error!("save_model failed: {e}");
-    }
+    save.mark();
 }
 
 /// Clicking a lane's name selects that plan (so the Delete key can remove it);
@@ -680,7 +677,7 @@ pub fn draw_plan_rename_overlay(
     mut contexts: bevy_egui::EguiContexts,
     mut rename: ResMut<PlanRenameState>,
     mut model: ResMut<Model>,
-    conn: NonSend<rusqlite::Connection>,
+    mut save: ResMut<crate::db::SaveRequest>,
     camera: Query<(&Camera, &GlobalTransform), With<Camera2d>>,
     keys: Res<ButtonInput<KeyCode>>,
 ) {
@@ -720,9 +717,7 @@ pub fn draw_plan_rename_overlay(
                 if let Some(plan) = model.plans.get_mut(&plan_id) {
                     plan.name = name;
                 }
-                if let Err(e) = db::save_model(&conn, &model) {
-                    error!("save_model failed: {e}");
-                }
+                save.mark();
             }
             rename.editing = None;
         }
@@ -855,7 +850,7 @@ pub fn handle_lane_block_edit(
     keyboard: Res<ButtonInput<KeyCode>>,
     time: Res<Time>,
     mut model: ResMut<Model>,
-    conn: NonSend<rusqlite::Connection>,
+    mut save: ResMut<crate::db::SaveRequest>,
     mut drag: ResMut<LaneDrag>,
     mut selection: ResMut<LaneSelection>,
     mut rename: ResMut<LaneBlockRename>,
@@ -977,9 +972,7 @@ pub fn handle_lane_block_edit(
             // drag/resize. Cascade is global, so a dep from a ghost (a block main
             // shares) to an owned block pushes the owned block too.
             crate::schedule::cascade_dependencies(&mut model, a.block);
-            if let Err(e) = db::save_model(&conn, &model) {
-                error!("save_model failed: {e}");
-            }
+            save.mark();
         }
     }
 }
@@ -994,7 +987,7 @@ pub fn handle_lane_dep_drag(
     mouse: Res<ButtonInput<MouseButton>>,
     mut drag: ResMut<LaneDepDrag>,
     mut model: ResMut<Model>,
-    conn: NonSend<rusqlite::Connection>,
+    mut save: ResMut<crate::db::SaveRequest>,
 ) {
     if let Ok(ctx) = egui_ctx.ctx_mut() {
         if ctx.is_pointer_over_area() {
@@ -1055,9 +1048,7 @@ pub fn handle_lane_dep_drag(
         });
         if !exists {
             model.create_dependency_in(plan, pred_id, succ_id, dep_type);
-            if let Err(e) = db::save_model(&conn, &model) {
-                error!("save_model failed: {e}");
-            }
+            save.mark();
         }
     }
 }
@@ -1168,7 +1159,7 @@ pub fn handle_lane_block_delete(
     mut selection: ResMut<LaneSelection>,
     rename: Res<LaneBlockRename>,
     mut model: ResMut<Model>,
-    conn: NonSend<rusqlite::Connection>,
+    mut save: ResMut<crate::db::SaveRequest>,
 ) {
     if rename.editing.is_some() {
         return;
@@ -1185,9 +1176,7 @@ pub fn handle_lane_block_delete(
         return;
     };
     model.remove_block_from_plan(plan, id);
-    if let Err(e) = db::save_model(&conn, &model) {
-        error!("save_model failed: {e}");
-    }
+    save.mark();
 }
 
 /// In-place text field for renaming the selected owned lane block, anchored at
@@ -1196,7 +1185,7 @@ pub fn draw_lane_block_rename_overlay(
     mut contexts: bevy_egui::EguiContexts,
     mut rename: ResMut<LaneBlockRename>,
     mut model: ResMut<Model>,
-    conn: NonSend<rusqlite::Connection>,
+    mut save: ResMut<crate::db::SaveRequest>,
     camera: Query<(&Camera, &GlobalTransform), With<Camera2d>>,
     keys: Res<ButtonInput<KeyCode>>,
 ) {
@@ -1239,9 +1228,7 @@ pub fn draw_lane_block_rename_overlay(
                 if let Some(wb) = model.work_blocks.get_mut(&id) {
                     wb.name = name;
                 }
-                if let Err(e) = db::save_model(&conn, &model) {
-                    error!("save_model failed: {e}");
-                }
+                save.mark();
             }
             rename.editing = None;
         }
