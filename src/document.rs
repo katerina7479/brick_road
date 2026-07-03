@@ -99,6 +99,56 @@ pub fn remember_document(path: &Path) {
     }
 }
 
+/// Default width (px) of the right fly-out (settings + block inspector share
+/// the slot and the dragged width).
+pub const FLYOUT_DEFAULT_WIDTH: f32 = 272.0;
+/// Resize range for the right fly-out: narrow enough to tuck away, wide
+/// enough for long names/descriptions without swallowing the canvas.
+pub const FLYOUT_MIN_WIDTH: f32 = 240.0;
+pub const FLYOUT_MAX_WIDTH: f32 = 560.0;
+
+/// Current width of the right fly-out. Seeded from the sidecar at startup;
+/// panels write the live width back after layout and `persist_flyout_width`
+/// saves it once the drag ends. App state, not document schema.
+#[derive(Resource)]
+pub struct FlyoutWidth(pub f32);
+
+impl Default for FlyoutWidth {
+    fn default() -> Self {
+        Self(FLYOUT_DEFAULT_WIDTH)
+    }
+}
+
+/// Clamps a stored/dragged fly-out width to the legal range; non-finite
+/// values fall back to the default.
+pub fn clamp_flyout_width(w: f32) -> f32 {
+    if w.is_finite() {
+        w.clamp(FLYOUT_MIN_WIDTH, FLYOUT_MAX_WIDTH)
+    } else {
+        FLYOUT_DEFAULT_WIDTH
+    }
+}
+
+fn flyout_width_path() -> PathBuf {
+    app_data_dir().join("flyout_width")
+}
+
+/// The persisted fly-out width, clamped; the default when unset/unreadable.
+pub fn load_flyout_width() -> f32 {
+    std::fs::read_to_string(flyout_width_path())
+        .ok()
+        .and_then(|s| s.trim().parse::<f32>().ok())
+        .map(clamp_flyout_width)
+        .unwrap_or(FLYOUT_DEFAULT_WIDTH)
+}
+
+/// Persists the fly-out width sidecar.
+pub fn save_flyout_width(w: f32) {
+    if let Err(e) = std::fs::write(flyout_width_path(), format!("{w:.1}")) {
+        bevy::log::warn!("could not write flyout width: {e}");
+    }
+}
+
 /// The display name for a document path: its file stem.
 pub fn doc_display_name(path: &Path) -> String {
     path.file_stem()
@@ -203,6 +253,15 @@ mod tests {
         assert!(m.resource_blocks.is_empty());
         assert_eq!(m.plans.len(), 1, "just the new empty plan");
         assert_eq!(m.plans.values().next().unwrap().name, "next");
+    }
+
+    #[test]
+    fn clamp_flyout_width_bounds_and_rejects_nonfinite() {
+        assert_eq!(clamp_flyout_width(300.0), 300.0);
+        assert_eq!(clamp_flyout_width(10.0), FLYOUT_MIN_WIDTH);
+        assert_eq!(clamp_flyout_width(9000.0), FLYOUT_MAX_WIDTH);
+        assert_eq!(clamp_flyout_width(f32::NAN), FLYOUT_DEFAULT_WIDTH);
+        assert_eq!(clamp_flyout_width(f32::INFINITY), FLYOUT_DEFAULT_WIDTH);
     }
 
     #[test]
