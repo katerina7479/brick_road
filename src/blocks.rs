@@ -1852,6 +1852,147 @@ pub fn handle_block_drag(
     }
 }
 
+/// Ctrl/Cmd+S with the cursor over a leaf block splits it at the cursor day
+/// (#314): the block becomes a gap-aware rollup parent with two children cut
+/// at that day. Inert while typing or when egui owns the pointer/keyboard.
+#[allow(clippy::too_many_arguments)]
+pub fn handle_split(
+    mut egui_ctx: EguiContexts,
+    keyboard: Res<ButtonInput<KeyCode>>,
+    name_edit: Res<NameEditState>,
+    windows: Query<&Window>,
+    camera: Query<(&Camera, &GlobalTransform)>,
+    block_query: Query<(&BlockSprite, &Transform, &Sprite)>,
+    mut model: ResMut<model::Model>,
+    mut save: ResMut<crate::db::SaveRequest>,
+) {
+    if name_edit.editing.is_some() {
+        return;
+    }
+    if let Ok(ctx) = egui_ctx.ctx_mut() {
+        if ctx.wants_keyboard_input() || ctx.is_pointer_over_area() {
+            return;
+        }
+    }
+    let ctrl = keyboard.any_pressed([KeyCode::ControlLeft, KeyCode::ControlRight])
+        || keyboard.any_pressed([KeyCode::SuperLeft, KeyCode::SuperRight]);
+    if !ctrl || !keyboard.just_pressed(KeyCode::KeyS) {
+        return;
+    }
+    let Some(world_pos) = (|| {
+        let window = windows.single().ok()?;
+        let (cam, cam_tf) = camera.single().ok()?;
+        let cursor = window.cursor_position()?;
+        cam.viewport_to_world_2d(cam_tf, cursor).ok()
+    })() else {
+        return;
+    };
+    let Some(id) = block_query
+        .iter()
+        .filter(|(_, tr, sp)| sprite_hit(tr, sp, world_pos))
+        .map(|(bs, _, _)| bs.work_block_id)
+        .min_by_key(|id| id.0)
+    else {
+        return;
+    };
+    let off = model.calendar.global_off_days();
+    let day = crate::calendar::x_to_day(world_pos.x, &off, &model.calendar);
+    let Some(plan) = model.main_plan_id() else {
+        return;
+    };
+    if model.split_block(plan, id, day).is_some() {
+        save.mark();
+    }
+}
+
+/// Reconciliation key for a dark overlay covering a gap in a rollup parent —
+/// a stretch of the parent bar no child covers, so a split block visibly
+/// reads as "work stops here, restarts there" (#314).
+#[derive(Component, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct RollupGapOverlay(pub WorkBlockId, pub i32);
+
+/// Draws a near-background overlay over each child-gap of every visible
+/// rollup parent. Mirrors `sync_past_overlays` reconciliation.
+pub fn sync_rollup_gap_overlays(
+    mut commands: Commands,
+    model: Res<model::Model>,
+    visible_blocks: Res<schedule::VisibleBlocks>,
+    mut overlay_q: Query<(Entity, &RollupGapOverlay, &mut Transform, &mut Sprite)>,
+) {
+    if !model.is_changed() && !visible_blocks.is_changed() {
+        return;
+    }
+    let existing: HashMap<RollupGapOverlay, Entity> =
+        overlay_q.iter().map(|(e, k, _, _)| (*k, e)).collect();
+    let main_id = model.main_plan_id();
+    let off = model.calendar.global_off_days();
+    let mut desired: Vec<(RollupGapOverlay, Vec3, Vec2)> = Vec::new();
+    for &id in &visible_blocks.ids {
+        let Some(wb) = model.work_blocks.get(&id) else {
+            continue;
+        };
+        if !wb.rollup {
+            continue;
+        }
+        let mut spans: Vec<(model::Day, model::Day)> = model
+            .children(id)
+            .iter()
+            .filter_map(|c| model.work_blocks.get(c))
+            .filter(|c| c.duration_days > 0)
+            .map(|c| (c.start_day, c.start_day + c.duration_days))
+            .collect();
+        if spans.is_empty() {
+            continue;
+        }
+        spans.sort_unstable();
+        let mut covered_to = spans[0].1;
+        let mut gap_idx = 0;
+        let y = -(main_id.map(|m| model.block_row(m, id)).unwrap_or(0) as f32) * ROW_HEIGHT;
+        for &(cs, ce) in &spans[1..] {
+            if cs > covered_to {
+                let x0 = crate::calendar::day_to_x(covered_to, &off, &model.calendar);
+                let x1 = crate::calendar::day_to_x(cs, &off, &model.calendar);
+                desired.push((
+                    RollupGapOverlay(id, gap_idx),
+                    Vec3::new((x0 + x1) * 0.5, y, 0.22),
+                    Vec2::new((x1 - x0 - 2.0).max(1.0), BLOCK_HEIGHT - 4.0),
+                ));
+                gap_idx += 1;
+            }
+            covered_to = covered_to.max(ce);
+        }
+    }
+    let mut live: HashSet<Entity> = HashSet::with_capacity(desired.len());
+    for (key, pos, size) in &desired {
+        if let Some(&e) = existing.get(key) {
+            if let Ok((_, _, mut t, mut sp)) = overlay_q.get_mut(e) {
+                t.translation = *pos;
+                sp.custom_size = Some(*size);
+            }
+            live.insert(e);
+        } else {
+            live.insert(
+                commands
+                    .spawn((
+                        *key,
+                        Sprite {
+                            color: Color::srgba(0.039, 0.055, 0.063, 0.88),
+                            custom_size: Some(*size),
+                            ..default()
+                        },
+                        Transform::from_translation(*pos),
+                    ))
+                    .id(),
+            );
+        }
+    }
+    for (e, _, _, _) in &overlay_q {
+        if !live.contains(&e) {
+            commands.entity(e).despawn();
+        }
+    }
+}
+
 // ── Past-portion overlay ──────────────────────────────────────────────────────
 
 /// Reconciliation key for the dark overlay covering the past portion of a block

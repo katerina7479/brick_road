@@ -453,6 +453,42 @@ impl Model {
     /// If `block` is in roll-up mode and has children, recompute its start/
     /// duration to span its children's extent, then propagate up its ancestors.
     /// Blocks not in roll-up mode (or with no children) keep their own placement.
+    /// Splits leaf `block` at working day `day` (#314): converts it into a
+    /// gap-aware rollup parent with two children cut at `day`, named "<name> 1"
+    /// / "<name> 2". The parent keeps its identity — deps, staffing, color —
+    /// and its span stays derived from the children, so dragging child 2 later
+    /// opens a visible gap ("stop work, restart, planned together"). No-op
+    /// (returning None) unless `block` is a leaf and `day` falls strictly
+    /// inside its span.
+    pub fn split_block(
+        &mut self,
+        plan: PlanId,
+        block: WorkBlockId,
+        day: Day,
+    ) -> Option<(WorkBlockId, WorkBlockId)> {
+        if !self.children(block).is_empty() {
+            return None;
+        }
+        let (name, start, end) = {
+            let wb = self.work_blocks.get(&block)?;
+            (
+                wb.name.clone(),
+                wb.start_day,
+                wb.start_day + wb.duration_days,
+            )
+        };
+        if day <= start || day >= end {
+            return None;
+        }
+        let a = self.add_child_block(plan, block, format!("{name} 1"), start, day - start, 0);
+        let b = self.add_child_block(plan, block, format!("{name} 2"), day, end - day, 0);
+        if let Some(wb) = self.work_blocks.get_mut(&block) {
+            wb.rollup = true;
+        }
+        self.recompute_rollup(block);
+        Some((a, b))
+    }
+
     pub fn recompute_rollup(&mut self, block: WorkBlockId) {
         let mut current = Some(block);
         while let Some(id) = current {
@@ -1651,6 +1687,35 @@ mod tests {
             "placed children, sorted by start"
         );
         assert!(m.has_children(p));
+    }
+
+    #[test]
+    fn split_block_makes_gap_aware_rollup_parent() {
+        let mut m = Model::default();
+        let plan = m.create_plan("main", None);
+        let p = m.add_block_to_plan(plan, "Build", 10, 8, 2);
+        let (a, b) = m.split_block(plan, p, 13).expect("interior day splits");
+        let (wa, wb) = (&m.work_blocks[&a], &m.work_blocks[&b]);
+        assert_eq!((wa.start_day, wa.duration_days), (10, 3));
+        assert_eq!((wb.start_day, wb.duration_days), (13, 5));
+        assert_eq!(wa.parent, Some(p));
+        assert_eq!(wa.name, "Build 1");
+        let wp = &m.work_blocks[&p];
+        assert!(wp.rollup, "parent becomes a rollup");
+        assert_eq!((wp.start_day, wp.duration_days), (10, 8), "span derived");
+        // Boundary days and non-leaves are no-ops.
+        assert!(
+            m.split_block(plan, p, 12).is_none(),
+            "parent is no longer a leaf"
+        );
+        assert!(
+            m.split_block(plan, a, 10).is_none(),
+            "split at start is a no-op"
+        );
+        assert!(
+            m.split_block(plan, a, 13).is_none(),
+            "split at end is a no-op"
+        );
     }
 
     #[test]
