@@ -1865,6 +1865,9 @@ pub fn handle_split(
     block_query: Query<(&BlockSprite, &Transform, &Sprite)>,
     mut model: ResMut<model::Model>,
     mut save: ResMut<crate::db::SaveRequest>,
+    mut drill: ResMut<schedule::DrillScope>,
+    mut selected: ResMut<SelectedBlock>,
+    mut set: ResMut<SelectedBlocks>,
 ) {
     if name_edit.editing.is_some() {
         return;
@@ -1900,7 +1903,14 @@ pub fn handle_split(
     let Some(plan) = model.main_plan_id() else {
         return;
     };
-    if model.split_block(plan, id, day).is_some() {
+    if let Some((_, b)) = model.split_block(plan, id, day) {
+        // Immediate feedback: a fresh split looks identical from outside (the
+        // segments still cover the old span), so drill into the parent and
+        // select the second segment — you land ready to drag it later.
+        drill.path.push(id);
+        selected.0 = Some(b);
+        set.0.clear();
+        set.0.insert(b);
         save.mark();
     }
 }
