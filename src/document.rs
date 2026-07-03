@@ -116,10 +116,17 @@ pub fn with_doc_extension(path: PathBuf) -> PathBuf {
     }
 }
 
-/// Seeds a fresh document's model: a single empty plan named after the file.
-/// The plan is non-empty in `plans`, so the demo seeder never fires for it.
-pub fn blank_document_model(path: &Path) -> crate::model::Model {
+/// Seeds a fresh document's model: a single empty plan named after the file,
+/// inheriting the current document's settings — the calendar (working days
+/// per week, holidays, quarter colors, start date) and the t-shirt size map —
+/// so a new project starts from your conventions rather than factory defaults
+/// (#323). Work stays per-document: blocks, plans, dependencies, and resources
+/// are NOT copied. The plan is non-empty in `plans`, so the demo seeder never
+/// fires for it.
+pub fn blank_document_model(path: &Path, template: &crate::model::Model) -> crate::model::Model {
     let mut model = crate::model::Model::default();
+    model.calendar = template.calendar.clone();
+    model.t_shirt_sizes = template.t_shirt_sizes.clone();
     model.create_plan(doc_display_name(path), None);
     model
 }
@@ -156,12 +163,46 @@ mod tests {
 
     #[test]
     fn blank_document_has_one_empty_plan_named_after_file() {
-        let m = blank_document_model(Path::new("/plans/remodel.brickroad"));
+        let m = blank_document_model(
+            Path::new("/plans/remodel.brickroad"),
+            &crate::model::Model::default(),
+        );
         assert_eq!(m.plans.len(), 1);
         let plan = m.plans.values().next().unwrap();
         assert_eq!(plan.name, "remodel");
         assert!(plan.root_blocks.is_empty());
         assert!(m.work_blocks.is_empty());
+    }
+
+    #[test]
+    fn blank_document_inherits_settings_but_not_work() {
+        use crate::model::{NonWorkingDate, ResourceType, TShirtSize};
+        let mut template = crate::model::Model::default();
+        let plan = template.create_plan("old", None);
+        template.add_block_to_plan(plan, "work", 0, 5, 0);
+        template.set_resource_kind("Team A", ResourceType::Team);
+        template.calendar.working_days_per_week = 4;
+        template.calendar.non_working_dates.push(NonWorkingDate {
+            date: chrono::NaiveDate::from_ymd_opt(2026, 12, 25).unwrap(),
+            description: "Christmas".to_string(),
+        });
+        template.t_shirt_sizes = vec![TShirtSize {
+            label: "Sprint".to_string(),
+            days: 10,
+        }];
+
+        let m = blank_document_model(Path::new("/plans/next.brickroad"), &template);
+
+        // Settings, holidays, and sizes carry over…
+        assert_eq!(m.calendar.working_days_per_week, 4);
+        assert_eq!(m.calendar.non_working_dates.len(), 1);
+        assert_eq!(m.t_shirt_sizes.len(), 1);
+        assert_eq!(m.t_shirt_sizes[0].label, "Sprint");
+        // …work and resources do not.
+        assert!(m.work_blocks.is_empty());
+        assert!(m.resource_blocks.is_empty());
+        assert_eq!(m.plans.len(), 1, "just the new empty plan");
+        assert_eq!(m.plans.values().next().unwrap().name, "next");
     }
 
     #[test]

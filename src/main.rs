@@ -579,7 +579,9 @@ fn apply_document_request(world: &mut World) {
 
     let mut model = match req {
         document::DocRequest::New(_) => {
-            let m = document::blank_document_model(&path);
+            // A new document inherits the current one's settings (calendar,
+            // holidays, sizes) — the old model is still in the world here.
+            let m = document::blank_document_model(&path, world.resource::<model::Model>());
             if let Err(e) = db::save_model(&conn, &m) {
                 error!("could not initialise {path:?}: {e}");
                 return;
