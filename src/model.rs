@@ -286,6 +286,34 @@ impl Model {
         self.resource_by_name(name).map(|r| r.resource_type)
     }
 
+    /// How many gutter rows across all plans and scopes carry `name`
+    /// (case-insensitive). Used to decide whether a row rename is renaming
+    /// the resource itself (sole user) or forking one row off a shared name.
+    pub fn row_name_references(&self, name: &str) -> usize {
+        self.plans
+            .values()
+            .flat_map(|p| p.row_names.values())
+            .flat_map(|v| v.iter())
+            .filter(|n| n.eq_ignore_ascii_case(name))
+            .count()
+    }
+
+    /// Renames the registered resource `old` to `new` (case-insensitive
+    /// lookup), carrying its type and time-off with it. Returns whether a
+    /// registry entry was renamed.
+    pub fn rename_resource(&mut self, old: &str, new: &str) -> bool {
+        if let Some(r) = self
+            .resource_blocks
+            .values_mut()
+            .find(|r| r.name.eq_ignore_ascii_case(old))
+        {
+            r.name = new.to_string();
+            true
+        } else {
+            false
+        }
+    }
+
     /// Sets the type for `name`, creating its registry entry on first use.
     pub fn set_resource_kind(&mut self, name: &str, kind: ResourceType) {
         if let Some(r) = self
@@ -2256,6 +2284,48 @@ mod tests {
     }
 
     // --- person_view_layout / is_individual ---
+
+    #[test]
+    fn rename_resource_carries_type_and_pto_case_insensitively() {
+        let mut m = Model::default();
+        m.set_resource_kind("alice", ResourceType::Engineer);
+        m.resource_blocks
+            .values_mut()
+            .next()
+            .unwrap()
+            .non_working_dates
+            .push(NonWorkingDate {
+                date: NaiveDate::from_ymd_opt(2026, 8, 3).unwrap(),
+                description: "PTO".to_string(),
+            });
+        assert!(m.rename_resource("ALICE", "Alicia"));
+        let rb = m.resource_by_name("Alicia").expect("renamed entry");
+        assert_eq!(rb.resource_type, ResourceType::Engineer);
+        assert_eq!(rb.non_working_dates.len(), 1);
+        assert!(m.resource_by_name("alice").is_none());
+        assert!(!m.rename_resource("nobody", "x"), "unknown name is a no-op");
+    }
+
+    #[test]
+    fn row_name_references_counts_across_plans_and_scopes() {
+        let mut m = Model::default();
+        let main = m.create_plan("main", None);
+        let branch = m.create_plan("b", Some(0));
+        m.plans
+            .get_mut(&main)
+            .unwrap()
+            .set_row_name(None, 0, "Team A".to_string());
+        m.plans
+            .get_mut(&main)
+            .unwrap()
+            .set_row_name(Some(WorkBlockId(7)), 2, "team a".to_string());
+        m.plans
+            .get_mut(&branch)
+            .unwrap()
+            .set_row_name(None, 1, "Team A".to_string());
+        assert_eq!(m.row_name_references("TEAM A"), 3);
+        assert_eq!(m.row_name_references("Team B"), 0);
+    }
 
     #[test]
     fn is_individual_true_for_engineer_and_newhire() {

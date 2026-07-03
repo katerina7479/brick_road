@@ -2196,8 +2196,31 @@ fn commit_row_name(
         if let Some(plan) = model.plans.get_mut(&plan_id) {
             plan.set_row_name(scope, row, String::new());
         }
-    } else if let Some(plan) = model.plans.get_mut(&plan_id) {
-        plan.set_row_name(scope, row, name);
+    } else {
+        // Renaming this row may be renaming the resource itself: when the old
+        // name's registry entry (type + time-off) has no other row using it
+        // and the new name is unregistered, carry the entry to the new name
+        // instead of orphaning it (#339). A shared name (other rows still use
+        // it) or an already-registered new name keeps the old behavior — the
+        // row forks off / points at the existing resource.
+        let old = model
+            .plans
+            .get(&plan_id)
+            .and_then(|p| p.row_name(scope, row))
+            .map(|s| s.to_string());
+        if let Some(old) = old {
+            if !name.is_empty()
+                && !old.eq_ignore_ascii_case(&name)
+                && model.resource_by_name(&name).is_none()
+                && model.resource_by_name(&old).is_some()
+                && model.row_name_references(&old) == 1
+            {
+                model.rename_resource(&old, &name);
+            }
+        }
+        if let Some(plan) = model.plans.get_mut(&plan_id) {
+            plan.set_row_name(scope, row, name);
+        }
     }
 
     if let Err(e) = db::save_model(conn, model) {
@@ -4315,6 +4338,93 @@ mod tests {
         assert!(
             (feb.2[3] - base_alpha * 0.7).abs() < 1e-5,
             "Feb should have 0.7× alpha"
+        );
+    }
+
+    #[test]
+    fn commit_rename_carries_sole_use_resource_registration() {
+        // Renaming the only row using "Jefff" to "Jeff" carries the registry
+        // entry (type + time-off) instead of orphaning it (#339).
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        db::create_tables(&conn).unwrap();
+        let mut m = model::Model::default();
+        let plan_id = m.create_plan("main", None);
+        let scope: Option<model::WorkBlockId> = None;
+        m.set_resource_kind("Jefff", model::ResourceType::Engineer);
+        if let Some(rb) = m.resource_blocks.values_mut().find(|r| r.name == "Jefff") {
+            rb.non_working_dates.push(model::NonWorkingDate {
+                date: chrono::NaiveDate::from_ymd_opt(2026, 8, 3).unwrap(),
+                description: "PTO".to_string(),
+            });
+        }
+        m.plans
+            .get_mut(&plan_id)
+            .unwrap()
+            .set_row_name(scope, 0, "Jefff".to_string());
+        db::save_model(&conn, &m).unwrap();
+
+        commit_row_name(&mut m, &conn, plan_id, scope, 0, "Jeff");
+
+        let rb = m.resource_by_name("Jeff").expect("registration carried");
+        assert_eq!(rb.resource_type, model::ResourceType::Engineer);
+        assert_eq!(rb.non_working_dates.len(), 1, "PTO carried");
+        assert!(
+            m.resource_by_name("Jefff").is_none(),
+            "no orphaned entry under the old name"
+        );
+        assert_eq!(m.plans[&plan_id].row_name(scope, 0), Some("Jeff"));
+    }
+
+    #[test]
+    fn commit_rename_leaves_shared_resource_registration_alone() {
+        // Two rows staff "Team A"; renaming ONE of them must not steal the
+        // registry entry from the other.
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        db::create_tables(&conn).unwrap();
+        let mut m = model::Model::default();
+        let plan_id = m.create_plan("main", None);
+        m.set_resource_kind("Team A", model::ResourceType::Team);
+        {
+            let p = m.plans.get_mut(&plan_id).unwrap();
+            p.set_row_name(None, 0, "Team A".to_string());
+            // Same name in a drilled scope elsewhere still counts as a user.
+            p.set_row_name(Some(model::WorkBlockId(999)), 0, "Team A".to_string());
+        }
+        db::save_model(&conn, &m).unwrap();
+
+        commit_row_name(&mut m, &conn, plan_id, None, 0, "Team Alpha");
+
+        assert!(
+            m.resource_by_name("Team A").is_some(),
+            "shared registration stays with the remaining rows"
+        );
+        assert!(m.resource_by_name("Team Alpha").is_none());
+        assert_eq!(m.plans[&plan_id].row_name(None, 0), Some("Team Alpha"));
+    }
+
+    #[test]
+    fn commit_rename_onto_registered_name_does_not_rename_registry() {
+        // Pointing a row at an already-registered resource keeps both entries
+        // intact — that's an assignment, not a rename.
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        db::create_tables(&conn).unwrap();
+        let mut m = model::Model::default();
+        let plan_id = m.create_plan("main", None);
+        m.set_resource_kind("Old", model::ResourceType::Engineer);
+        m.set_resource_kind("Existing", model::ResourceType::Team);
+        m.plans
+            .get_mut(&plan_id)
+            .unwrap()
+            .set_row_name(None, 0, "Old".to_string());
+        db::save_model(&conn, &m).unwrap();
+
+        commit_row_name(&mut m, &conn, plan_id, None, 0, "Existing");
+
+        assert!(m.resource_by_name("Old").is_some(), "Old entry untouched");
+        assert_eq!(
+            m.resource_kind("Existing"),
+            Some(model::ResourceType::Team),
+            "Existing keeps its own registration"
         );
     }
 
