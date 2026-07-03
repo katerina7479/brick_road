@@ -6,6 +6,41 @@ use crate::model::{
     ResourceBlockId, ResourceType, TShirtSize, WorkBlock, WorkBlockId,
 };
 
+/// Deferred autosave request (#335). Mutation sites call `mark()` instead of
+/// writing SQLite themselves; `flush_save_request` performs a single
+/// `save_model` at the end of the frame. This turns the old "every mutation
+/// path must remember to call save_model" convention into one that cannot be
+/// missed silently: a mutating system without a `SaveRequest` param has no
+/// way to persist at all, which is much easier to spot in review than a
+/// missing call at one of forty sites. Drag-style gestures keep their
+/// save-on-release behavior by marking only on release, exactly where they
+/// used to save.
+#[derive(bevy::prelude::Resource, Default)]
+pub struct SaveRequest(pub bool);
+
+impl SaveRequest {
+    pub fn mark(&mut self) {
+        self.0 = true;
+    }
+}
+
+/// End-of-frame flush (registered in the `Last` schedule — after Update AND
+/// the egui pass, which bevy_egui runs inside PostUpdate):
+/// saves the model once when any system marked the request this frame.
+pub fn flush_save_request(
+    mut req: bevy::prelude::ResMut<SaveRequest>,
+    model: bevy::prelude::Res<Model>,
+    conn: bevy::prelude::NonSend<Connection>,
+) {
+    if !req.0 {
+        return;
+    }
+    req.0 = false;
+    if let Err(e) = save_model(&conn, &model) {
+        bevy::log::error!("save_model failed: {e}");
+    }
+}
+
 pub fn create_tables(conn: &Connection) -> Result<()> {
     conn.execute_batch("PRAGMA foreign_keys = ON;")?;
     // SQLite has no ADD COLUMN IF NOT EXISTS. Run each migration and swallow
