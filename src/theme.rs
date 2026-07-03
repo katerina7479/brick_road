@@ -121,3 +121,23 @@ pub fn style_inputs(ui: &mut Ui) {
     v.selection.stroke = Stroke::new(1.5, ACCENT);
     v.selection.bg_fill = ACCENT.gamma_multiply(0.25);
 }
+
+/// The accent colour marking a resource's type in the gutter and settings.
+pub fn resource_type_rgb(kind: crate::model::ResourceType) -> (u8, u8, u8) {
+    match kind {
+        crate::model::ResourceType::Engineer => (98, 154, 224), // blue
+        crate::model::ResourceType::NewHire => (140, 200, 230), // light cyan
+        crate::model::ResourceType::Team => (120, 196, 140),    // green
+        crate::model::ResourceType::Equipment => (224, 176, 92), // amber
+        crate::model::ResourceType::Budget => (180, 150, 222),  // violet
+    }
+}
+/// Paint the small resource-type indicator dot at `pos`.
+pub fn draw_resource_dot(
+    painter: &egui::Painter,
+    pos: egui::Pos2,
+    kind: crate::model::ResourceType,
+) {
+    let (r, g, b) = resource_type_rgb(kind);
+    painter.circle_filled(pos, 3.5, egui::Color32::from_rgb(r, g, b));
+}
