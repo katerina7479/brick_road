@@ -34,6 +34,10 @@ pub use settings_ui::SettingsState;
 
 fn main() {
     App::new()
+        // Reactive rendering: redraw on input/window events (and while the camera
+        // is gliding — see request_redraw_while_animating) instead of a
+        // continuous full-framerate loop. Cuts idle power (#351).
+        .insert_resource(bevy::winit::WinitSettings::desktop_app())
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
                 title: "brick_road".to_string(),
@@ -115,7 +119,13 @@ fn main() {
         )
         .add_systems(
             Update,
-            (camera_nav_keys, update_camera_target, smooth_camera).chain(),
+            (
+                camera_nav_keys,
+                update_camera_target,
+                smooth_camera,
+                camera::request_redraw_while_animating,
+            )
+                .chain(),
         )
         .add_systems(Update, draw_grid)
         .add_systems(Update, frame_on_drill)
