@@ -1852,9 +1852,123 @@ pub fn handle_block_drag(
     }
 }
 
-/// Ctrl/Cmd+S with the cursor over a leaf block splits it at the cursor day
-/// (#314): the block becomes a gap-aware rollup parent with two children cut
-/// at that day. Inert while typing or when egui owns the pointer/keyboard.
+/// What a split gesture would do this frame, computed from the current
+/// selection, the cursor day, and the drill scope. Shared by the preview line
+/// and the commit, so the affordance and the action never disagree.
+struct SplitCandidate {
+    /// The selected block to cut.
+    block: WorkBlockId,
+    /// The cursor's snapped working day (strictly inside the block's span).
+    day: model::Day,
+    /// World-x of the cut day (where the preview line is drawn).
+    x: f32,
+    /// The bar's world-y and its row (for the preview line's vertical extent).
+    y: f32,
+    /// True at the plan's top level (bootstrap: leaf → rollup parent + drill);
+    /// false inside a drill scope (sibling cut, no nesting).
+    top_level: bool,
+}
+
+/// Resolves the split candidate for this frame, or `None` if nothing can be
+/// cut: requires the *selected* block to be a leaf whose span strictly
+/// contains the cursor's day. At the top level the block must be a root; in a
+/// drill scope it must be a child of the drilled block.
+fn split_candidate(
+    model: &model::Model,
+    selected: Option<WorkBlockId>,
+    drill: &schedule::DrillScope,
+    world_pos: Vec2,
+) -> Option<SplitCandidate> {
+    let id = selected?;
+    let plan = model.main_plan_id()?;
+    let wb = model.work_blocks.get(&id)?;
+    if !model.children(id).is_empty() {
+        return None; // only leaves split
+    }
+    let scope = drill.path.last().copied();
+    // The selection must belong to the scope currently on screen.
+    match scope {
+        Some(parent) if wb.parent != Some(parent) => return None,
+        None if wb.parent.is_some() => return None,
+        _ => {}
+    }
+    let off = model.calendar.global_off_days();
+    let day = crate::calendar::x_to_day(world_pos.x, &off, &model.calendar);
+    let (start, end) = (wb.start_day, wb.start_day + wb.duration_days);
+    if day <= start || day >= end {
+        return None;
+    }
+    let x = crate::calendar::day_to_x(day, &off, &model.calendar);
+    let y = -(model.block_row(plan, id) as f32) * ROW_HEIGHT;
+    Some(SplitCandidate {
+        block: id,
+        day,
+        x,
+        y,
+        top_level: scope.is_none(),
+    })
+}
+
+/// Resolves the world cursor position, or `None` when off-window.
+fn cursor_world(
+    windows: &Query<&Window>,
+    camera: &Query<(&Camera, &GlobalTransform)>,
+) -> Option<Vec2> {
+    let window = windows.single().ok()?;
+    let (cam, cam_tf) = camera.single().ok()?;
+    let cursor = window.cursor_position()?;
+    cam.viewport_to_world_2d(cam_tf, cursor).ok()
+}
+
+/// Ctrl/Cmd held → draw a vertical cut-line at the cursor day over the
+/// selected splittable block, so the split gesture is discoverable and its
+/// landing point is previewed (like the fork-hover ghost line). No candidate
+/// → no line → the gesture is visibly unavailable.
+#[allow(clippy::too_many_arguments)]
+pub fn draw_split_preview(
+    mut gizmos: Gizmos,
+    mut egui_ctx: EguiContexts,
+    keyboard: Res<ButtonInput<KeyCode>>,
+    name_edit: Res<NameEditState>,
+    windows: Query<&Window>,
+    camera: Query<(&Camera, &GlobalTransform)>,
+    model: Res<model::Model>,
+    selected: Res<SelectedBlock>,
+    drill: Res<schedule::DrillScope>,
+) {
+    if name_edit.editing.is_some() {
+        return;
+    }
+    let ctrl = keyboard.any_pressed([KeyCode::ControlLeft, KeyCode::ControlRight])
+        || keyboard.any_pressed([KeyCode::SuperLeft, KeyCode::SuperRight]);
+    if !ctrl {
+        return;
+    }
+    if egui_ctx
+        .ctx_mut()
+        .ok()
+        .is_some_and(|c| c.is_pointer_over_area())
+    {
+        return;
+    }
+    let Some(world_pos) = cursor_world(&windows, &camera) else {
+        return;
+    };
+    let Some(c) = split_candidate(&model, selected.0, &drill, world_pos) else {
+        return;
+    };
+    let half = BLOCK_HEIGHT * 0.5 + 4.0;
+    gizmos.line_2d(
+        Vec2::new(c.x, c.y + half),
+        Vec2::new(c.x, c.y - half),
+        Color::srgba(1.0, 0.85, 0.3, 0.95),
+    );
+}
+
+/// Ctrl/Cmd+S splits the **selected** block at the cursor day (#314). At the
+/// top level the leaf becomes a rollup parent with two children and you drill
+/// in; inside a drill scope the phase is cut into two siblings under the same
+/// parent (no new nesting). Inert while typing or when egui owns input.
 #[allow(clippy::too_many_arguments)]
 pub fn handle_split(
     mut egui_ctx: EguiContexts,
@@ -1862,7 +1976,6 @@ pub fn handle_split(
     name_edit: Res<NameEditState>,
     windows: Query<&Window>,
     camera: Query<(&Camera, &GlobalTransform)>,
-    block_query: Query<(&BlockSprite, &Transform, &Sprite)>,
     mut model: ResMut<model::Model>,
     mut save: ResMut<crate::db::SaveRequest>,
     mut drill: ResMut<schedule::DrillScope>,
@@ -1882,37 +1995,54 @@ pub fn handle_split(
     if !ctrl || !keyboard.just_pressed(KeyCode::KeyS) {
         return;
     }
-    let Some(world_pos) = (|| {
-        let window = windows.single().ok()?;
-        let (cam, cam_tf) = camera.single().ok()?;
-        let cursor = window.cursor_position()?;
-        cam.viewport_to_world_2d(cam_tf, cursor).ok()
-    })() else {
+    let Some(world_pos) = cursor_world(&windows, &camera) else {
         return;
     };
-    let Some(id) = block_query
-        .iter()
-        .filter(|(_, tr, sp)| sprite_hit(tr, sp, world_pos))
-        .map(|(bs, _, _)| bs.work_block_id)
-        .min_by_key(|id| id.0)
-    else {
+    let Some(c) = split_candidate(&model, selected.0, &drill, world_pos) else {
         return;
     };
-    let off = model.calendar.global_off_days();
-    let day = crate::calendar::x_to_day(world_pos.x, &off, &model.calendar);
     let Some(plan) = model.main_plan_id() else {
         return;
     };
-    if let Some((_, b)) = model.split_block(plan, id, day) {
-        // Immediate feedback: a fresh split looks identical from outside (the
-        // segments still cover the old span), so drill into the parent and
-        // select the second segment — you land ready to drag it later.
-        drill.path.push(id);
-        selected.0 = Some(b);
+    if c.top_level {
+        // Bootstrap: wrap the leaf in a rollup parent and drill in so the two
+        // new phases are on screen, ready to move apart.
+        if let Some((_, b)) = model.split_block(plan, c.block, c.day) {
+            drill.path.push(c.block);
+            selected.0 = Some(b);
+            set.0.clear();
+            set.0.insert(b);
+            save.mark();
+        }
+    } else if let Some(sib) = model.split_leaf_sibling(plan, c.block, c.day) {
+        // Sibling cut: the new right phase appears immediately beside the
+        // selected one — select it so it's ready to drag later.
+        selected.0 = Some(sib);
         set.0.clear();
-        set.0.insert(b);
+        set.0.insert(sib);
         save.mark();
     }
+}
+
+/// `(start, end)` spans of every leaf descendant of `root` (or `root` itself
+/// if it is a leaf), with positive duration. The coverage a rollup parent's
+/// bar actually represents, used to find gaps.
+pub(crate) fn leaf_spans(model: &model::Model, root: WorkBlockId) -> Vec<(model::Day, model::Day)> {
+    let mut out = Vec::new();
+    let mut stack = vec![root];
+    while let Some(id) = stack.pop() {
+        let children = model.children(id);
+        if children.is_empty() {
+            if let Some(wb) = model.work_blocks.get(&id) {
+                if wb.duration_days > 0 {
+                    out.push((wb.start_day, wb.start_day + wb.duration_days));
+                }
+            }
+        } else {
+            stack.extend(children);
+        }
+    }
+    out
 }
 
 /// Reconciliation key for a dark overlay covering a gap in a rollup parent —
@@ -1944,12 +2074,12 @@ pub fn sync_rollup_gap_overlays(
         if !wb.rollup {
             continue;
         }
-        let mut spans: Vec<(model::Day, model::Day)> = model
-            .children(id)
-            .iter()
-            .filter_map(|c| model.work_blocks.get(c))
-            .filter(|c| c.duration_days > 0)
-            .map(|c| (c.start_day, c.start_day + c.duration_days))
+        // Aggregate the spans of ALL leaf descendants, not just direct
+        // children, so a nested structure's real coverage is what's checked
+        // for gaps.
+        let mut spans: Vec<(model::Day, model::Day)> = leaf_spans(&model, id)
+            .into_iter()
+            .filter(|(s, e)| e > s)
             .collect();
         if spans.is_empty() {
             continue;

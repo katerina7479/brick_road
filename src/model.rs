@@ -489,6 +489,44 @@ impl Model {
         Some((a, b))
     }
 
+    /// Cuts leaf `leaf` at working day `day` into two siblings under its
+    /// existing parent (#314, the drilled-view gesture): `leaf` keeps its
+    /// identity and shrinks to `[start, day)`, and a new sibling `"<name> 2"`
+    /// takes `[day, end)` on the same lane. Used when splitting a phase inside
+    /// a block — no new nesting level. Returns the new sibling, or `None`
+    /// unless `leaf` is a leaf **with a parent** and `day` is strictly inside
+    /// its span.
+    pub fn split_leaf_sibling(
+        &mut self,
+        plan: PlanId,
+        leaf: WorkBlockId,
+        day: Day,
+    ) -> Option<WorkBlockId> {
+        if !self.children(leaf).is_empty() {
+            return None;
+        }
+        let (parent, name, start, end) = {
+            let wb = self.work_blocks.get(&leaf)?;
+            let parent = wb.parent?;
+            (
+                parent,
+                wb.name.clone(),
+                wb.start_day,
+                wb.start_day + wb.duration_days,
+            )
+        };
+        if day <= start || day >= end {
+            return None;
+        }
+        let row = self.block_row(plan, leaf);
+        if let Some(wb) = self.work_blocks.get_mut(&leaf) {
+            wb.duration_days = day - start;
+        }
+        let sib = self.add_child_block(plan, parent, format!("{name} 2"), day, end - day, row);
+        self.recompute_rollup(parent);
+        Some(sib)
+    }
+
     pub fn recompute_rollup(&mut self, block: WorkBlockId) {
         let mut current = Some(block);
         while let Some(id) = current {
@@ -1716,6 +1754,41 @@ mod tests {
             m.split_block(plan, a, 13).is_none(),
             "split at end is a no-op"
         );
+    }
+
+    #[test]
+    fn split_leaf_sibling_cuts_in_place_without_nesting() {
+        let mut m = Model::default();
+        let plan = m.create_plan("main", None);
+        // A parent with one child phase, drilled-view style.
+        let p = m.add_block_to_plan(plan, "Build", 10, 8, 0);
+        let child = m.add_child_block(plan, p, "Design", 10, 8, 3);
+
+        let sib = m
+            .split_leaf_sibling(plan, child, 14)
+            .expect("interior day cuts");
+
+        // Original keeps identity, shrinks to the left; sibling takes the right.
+        let wc = &m.work_blocks[&child];
+        assert_eq!((wc.start_day, wc.duration_days), (10, 4));
+        assert_eq!(wc.name, "Design", "left piece keeps its name");
+        let ws = &m.work_blocks[&sib];
+        assert_eq!((ws.start_day, ws.duration_days), (14, 4));
+        assert_eq!(ws.name, "Design 2");
+        assert_eq!(
+            ws.parent,
+            Some(p),
+            "sibling under the SAME parent — no nesting"
+        );
+        assert_eq!(m.block_row(plan, sib), 3, "sibling shares the lane");
+        assert_eq!(m.children(p).len(), 2, "two siblings now, parent unchanged");
+
+        // A top-level leaf (no parent) is not a sibling case.
+        let top = m.add_block_to_plan(plan, "Top", 0, 5, 0);
+        assert!(m.split_leaf_sibling(plan, top, 2).is_none());
+        // Boundaries are no-ops.
+        assert!(m.split_leaf_sibling(plan, child, 10).is_none());
+        assert!(m.split_leaf_sibling(plan, child, 14).is_none());
     }
 
     #[test]

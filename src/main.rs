@@ -253,6 +253,7 @@ fn main() {
         .add_systems(Update, blocks::handle_paste.after(blocks::handle_copy))
         .add_systems(Update, blocks::handle_open_url)
         .add_systems(Update, blocks::handle_split.run_if(editing_enabled))
+        .add_systems(Update, blocks::draw_split_preview.run_if(editing_enabled))
         .add_systems(Update, blocks::sync_rollup_gap_overlays)
         .add_systems(
             Update,
@@ -2172,7 +2173,11 @@ const HELP_KEYMAP: &[(&str, &[(&str, &str)])] = &[
             ("Ctrl/Cmd + V", "Paste at cursor"),
             ("Ctrl/Cmd + Z", "Undo"),
             ("Ctrl/Cmd + O", "Open the selected block's URL"),
-            ("Ctrl/Cmd + S", "Split the block under the cursor"),
+            (
+                "Ctrl/Cmd (hold)",
+                "Show the split cut-line on the selected block",
+            ),
+            ("Ctrl/Cmd + S", "Split the selected block at the cursor"),
         ],
     ),
 ];
