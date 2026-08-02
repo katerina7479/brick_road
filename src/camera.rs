@@ -287,6 +287,31 @@ pub fn smooth_camera(
     }
 }
 
+/// Under reactive rendering (`WinitSettings::desktop_app()`), the event loop
+/// sleeps when idle — but `smooth_camera` glides toward its target with no
+/// input events to wake it, so a fit/home/recenter would freeze partway.
+/// While the camera hasn't settled, request the next frame; the chain
+/// self-sustains until it arrives, then stops so the loop can sleep. Must run
+/// after `smooth_camera` so it sees the freshly-stepped transform.
+pub fn request_redraw_while_animating(
+    target: Res<CameraTarget>,
+    cam_q: Query<(&Transform, &Projection), With<Camera2d>>,
+    mut redraw: MessageWriter<bevy::window::RequestRedraw>,
+) {
+    let Ok((transform, proj)) = cam_q.single() else {
+        return;
+    };
+    let pos_settled = (target.pos.x - transform.translation.x).abs() < 0.5
+        && (target.pos.y - transform.translation.y).abs() < 0.5;
+    let zoom_settled = match proj {
+        Projection::Orthographic(ortho) => (target.zoom - ortho.scale).abs() < 0.001,
+        _ => true,
+    };
+    if !(pos_settled && zoom_settled) {
+        redraw.write(bevy::window::RequestRedraw);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
